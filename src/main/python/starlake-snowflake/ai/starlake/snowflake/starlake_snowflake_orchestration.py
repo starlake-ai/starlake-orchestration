@@ -30,6 +30,7 @@ class SnowflakePipeline(AbstractPipeline[DAG, StarlakeDataset], StarlakeDataset)
             stage_location=job.stage_location,
             packages=job.packages,
         )
+
     def __enter__(self):
         _dag_context_stack.append(self.dag)
         return super().__enter__()
@@ -48,8 +49,11 @@ class SnowflakePipeline(AbstractPipeline[DAG, StarlakeDataset], StarlakeDataset)
             def update_dependencies(upstream_dependencies, root_key):
                 root = group.get_dependency(root_key)
                 temp_root_node = get_node(root)
-                if isinstance(temp_root_node, List[DAGTask]):
-                    root_node = temp_root_node[-1] # get the last task
+                if isinstance(temp_root_node, list):
+                    if temp_root_node.__len__() >= 1:
+                        root_node = temp_root_node[-1] # get the last task
+                    else:
+                        root_node = temp_root_node
                 else:
                     root_node = temp_root_node
                 if isinstance(root, AbstractTaskGroup) and root_key != group.group_id:
@@ -60,11 +64,15 @@ class SnowflakePipeline(AbstractPipeline[DAG, StarlakeDataset], StarlakeDataset)
                         temp_downstream_node = get_node(downstream)
                         if isinstance(downstream, AbstractTaskGroup) and key != group.group_id:
                             update_group_dependencies(downstream)
-                        if isinstance(temp_downstream_node, List[DAGTask]):
-                            downstream_node = temp_downstream_node[0] # get the first task
+                        if isinstance(temp_downstream_node, list):
+                            if temp_downstream_node.__len__() >= 1:
+                                downstream_node = temp_downstream_node[0] # get the first task
+                            else:
+                                downstream_node = None
                         else:
                             downstream_node = temp_downstream_node
-                        downstream_node.add_predecessors(root_node)
+                        if downstream_node is not None and root_node is not None:
+                            downstream_node.add_predecessors(root_node)
                         update_dependencies(upstream_dependencies, key)
 
             upstream_dependencies = group.upstream_dependencies
@@ -161,7 +169,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
             return task_group
 
         else:
-            task.dag = pipeline.dag
+            task._dag = pipeline.dag
             return AbstractTask(task_id, task)
 
     def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, StarlakeDataset], **kwargs) -> AbstractTaskGroup[List[DAGTask]]:
