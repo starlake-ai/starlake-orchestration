@@ -161,8 +161,8 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         pass
 
     @final
-    def __add_event(self, sink: str, **kwargs) -> E:
-        event = self.to_event(StarlakeDataset(sink, **kwargs), source=kwargs.get('source', self.source))
+    def __add_event(self, name: str, **kwargs) -> E:
+        event = self.to_event(StarlakeDataset(name, **kwargs), source=kwargs.get('source', self.source))
         events = self.events
         events.append(event)
         self.events = events
