@@ -103,9 +103,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
             DAGTask: The Snowflake task.
         """
         kwargs.update({'transform': True})
-        kwargs.update({'transform_name': transform_name})
-        if sink:
-            kwargs.update({'sink': sink})
+        if not sink:
+            sink = kwargs.get('sink', transform_name)
+        kwargs.update({'sink': sink})
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, **kwargs)
 
     def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, **kwargs) -> DAGTask:
@@ -121,12 +121,12 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
         """
         if kwargs.get('transform', False):
             kwargs.pop('transform', None)
-            transform_name = kwargs.get('transform_name', None)
-            if transform_name:
-                kwargs.pop('transform', None)
-                statements = self.caller_globals.get('statements', dict()).get(transform_name, None)
+            sink = kwargs.get('sink', None)
+            if sink:
+                kwargs.pop('sink', None)
+                statements = self.caller_globals.get('statements', dict()).get(sink, None)
                 if statements:
-                    comment = kwargs.get('comment', f'Starlake {transform_name} task')
+                    comment = kwargs.get('comment', f'Starlake {sink} task')
                     kwargs.pop('comment', None)
                     options = self.sl_env_vars.copy() # Copy the current sl env variables
                     for index, arg in enumerate(arguments):
@@ -141,104 +141,98 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
                                 })
                             break
 
-                    sink = kwargs.get('sink', None)
-                    if not sink:
-                        raise ValueError("sink is required")
-                    else:
-                        kwargs.pop('sink', None)
-
                     cron_expr = kwargs.get('cron_expr', None)
                     kwargs.pop('cron_expr', None)
 
                     # create the function that will execute the transform
-                    if statements:
-                        def fun(session: Session, sink: str, statements: dict, params: dict, cron_expr: Optional[str]) -> None:
-                            from sqlalchemy import text
+                    def fun(session: Session, sink: str, statements: dict, params: dict, cron_expr: Optional[str]) -> None:
+                        from sqlalchemy import text
 
-                            if cron_expr:
-                                from croniter import croniter
-                                from croniter.croniter import CroniterBadCronError
-                                from datetime import datetime
-                                try:
-                                    croniter(cron_expr)
-                                    start_time = datetime.fromtimestamp(datetime.now().timestamp())
-                                    iter = croniter(cron_expr, start_time)
-                                    curr = iter.get_current(datetime)
-                                    previous = iter.get_prev(datetime)
-                                    next = croniter(cron_expr, previous).get_next(datetime)
-                                    if curr == next :
-                                        sl_end_date = curr
-                                    else:
-                                        sl_end_date = previous
-                                    sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
-                                    format = '%Y-%m-%d %H:%M:%S%z'
-                                    params.update({'sl_start_date': sl_start_date.strftime(format), 'sl_end_date': sl_end_date.strftime(format)})
-                                except CroniterBadCronError:
-                                    raise ValueError(f"Invalid cron expression: {cron_expr}")
+                        if cron_expr:
+                            from croniter import croniter
+                            from croniter.croniter import CroniterBadCronError
+                            from datetime import datetime
+                            try:
+                                croniter(cron_expr)
+                                start_time = datetime.fromtimestamp(datetime.now().timestamp())
+                                iter = croniter(cron_expr, start_time)
+                                curr = iter.get_current(datetime)
+                                previous = iter.get_prev(datetime)
+                                next = croniter(cron_expr, previous).get_next(datetime)
+                                if curr == next :
+                                    sl_end_date = curr
+                                else:
+                                    sl_end_date = previous
+                                sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
+                                format = '%Y-%m-%d %H:%M:%S%z'
+                                params.update({'sl_start_date': sl_start_date.strftime(format), 'sl_end_date': sl_end_date.strftime(format)})
+                            except CroniterBadCronError:
+                                raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-                            schemaAndTable = sink.split('.')
-                            schema = schemaAndTable[0]
-                            table = schemaAndTable[1]
+                        schemaAndTable = sink.split('.')
+                        schema = schemaAndTable[0]
+                        table = schemaAndTable[1]
 
-                            # create SQL schema
-                            session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {schema}").collect() # use templating
+                        # create SQL schema
+                        session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {schema}").collect() # use templating
 
-                            # execute preActions
-                            preActions: List[str] = statements.get('preActions', [])
-                            for action in preActions:
-                                stmt: str = text(action).bindparams(**params)
+                        # execute preActions
+                        preActions: List[str] = statements.get('preActions', [])
+                        for action in preActions:
+                            stmt: str = text(action).bindparams(**params)
+                            session.sql(stmt).collect()
+
+                        # execute preSqls
+                        preSqls: List[str] = statements.get('preSqls', [])
+                        for sql in preSqls:
+                            stmt: str = text(sql).bindparams(**params)
+                            session.sql(stmt).collect()
+
+                        # check if the sink exists
+                        df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}'
+AND TABLE_NAME = '{table}'") # use templating
+                        rows: List[Row] = df.collect()
+                        if rows.__len__() > 0:
+                            # execute mainSqlIfExists
+                            sqls: List[str] = statements.get('mainSqlIfExists', [])
+                            for sql in sqls:
+                                stmt: str = text(sql).bindparams(**params)
                                 session.sql(stmt).collect()
-
-                            # execute preSqls
-                            preSqls: List[str] = statements.get('preSqls', [])
-                            for sql in preSqls:
+                        else:
+                            # execute mainSqlIfNotExists
+                            sqls: List[str] = statements.get('mainSqlIfNotExists', [])
+                            for sql in sqls:
                                 stmt: str = text(sql).bindparams(**params)
                                 session.sql(stmt).collect()
 
-                            # check if the sink exists
-                            df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}'
-  AND TABLE_NAME = '{table}'") # use templating
-                            rows: List[Row] = df.collect()
-                            if rows.__len__() > 0:
-                                # execute mainSqlIfExists
-                                sqls: List[str] = statements.get('mainSqlIfExists', [])
-                                for sql in sqls:
-                                    stmt: str = text(sql).bindparams(**params)
-                                    session.sql(stmt).collect()
-                            else:
-                                # execute mainSqlIfNotExists
-                                sqls: List[str] = statements.get('mainSqlIfNotExists', [])
-                                for sql in sqls:
-                                    stmt: str = text(sql).bindparams(**params)
-                                    session.sql(stmt).collect()
+                        # execute postSqls
+                        postSqls: List[str] = statements.get('postSqls', [])
+                        for sql in postSqls:
+                            stmt: str = text(sql).bindparams(**params)
+                            session.sql(stmt).collect()
 
-                            # execute postSqls
-                            postSqls: List[str] = statements.get('postSqls', [])
-                            for sql in postSqls:
-                                stmt: str = text(sql).bindparams(**params)
-                                session.sql(stmt).collect()
-
-                        return DAGTask(
-                            name=task_id, 
-                            definition=StoredProcedureCall(
-                                func = partial(
-                                    fun, 
-                                    sink=sink, 
-                                    statements=statements, 
-                                    params=options, 
-                                    cron_expr=cron_expr
-                                ), 
-                                stage_location=self.stage_location,
-                                packages=self.packages
+                    return DAGTask(
+                        name=task_id, 
+                        definition=StoredProcedureCall(
+                            func = partial(
+                                fun, 
+                                sink=sink, 
+                                statements=statements, 
+                                params=options, 
+                                cron_expr=cron_expr
                             ), 
-                            comment=comment, 
-                            **kwargs
-                        )
+                            stage_location=self.stage_location,
+                            packages=self.packages
+                        ), 
+                        comment=comment, 
+                        **kwargs
+                    )
                 else:
-                    raise ValueError(f"Transform '{transform_name}' statements not found")
+                    # sink statements are required
+                    raise ValueError(f"Transform '{sink}' statements not found")
             else:
-                # transform_name is required
-                raise ValueError("transform_name is required")
+                # sink is required
+                raise ValueError("sink is required")
         else:
-            # transform is required
+            # only sl_transform is implemented
             raise NotImplementedError("Not implemented")
