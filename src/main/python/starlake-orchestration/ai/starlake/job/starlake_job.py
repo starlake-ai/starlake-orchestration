@@ -306,7 +306,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             )
         return self.sl_job(task_id=task_id, arguments=arguments, spark_config=spark_config, **kwargs)
 
-    def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig]=None, sink: Optional[str] = None, **kwargs) -> T:
+    def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig]=None, **kwargs) -> T:
         """Transform job.
         Generate the scheduler task that will run the starlake `transform` command.
 
@@ -315,14 +315,13 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             transform_name (str): The transform to run.
             transform_options (str): The optional transform options to use.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
-            sink (Optional[str], optional): The optional sink to write the transformed data.
         
         Returns:
             T: The scheduler task.
         """
         task_id = kwargs.get("task_id", f"{transform_name}") if not task_id else task_id
         kwargs.pop("task_id", None)
-        tuple_events = self.update_events(self.__add_event(transform_name if not sink else sink, **kwargs))
+        tuple_events = self.update_events(self.__add_event(transform_name, **kwargs))
         kwargs.update({tuple_events[0]: tuple_events[1]})
         arguments = ["transform", "--name", transform_name]
         options = list()
