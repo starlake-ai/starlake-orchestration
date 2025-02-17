@@ -14,10 +14,10 @@ from snowflake.core.task.dagv1 import DAGTask
 from snowflake.snowpark import Session, DataFrame
 from snowflake.snowpark.row import Row
 
-class SnowflakeEvent(AbstractEvent[str]):
+class SnowflakeEvent(AbstractEvent[StarlakeDataset]):
     @classmethod
-    def to_event(cls, dataset: StarlakeDataset, source: Optional[str] = None) -> str:
-        return dataset.refresh().url
+    def to_event(cls, dataset: StarlakeDataset, source: Optional[str] = None) -> StarlakeDataset:
+        return dataset
 
 class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, SnowflakeEvent):
     def __init__(self, filename: str, module_name: str, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None]=None, options: dict=None, **kwargs) -> None:
@@ -57,27 +57,27 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
         """
         return StarlakeExecutionEnvironment.SQL
 
-    def update_events(self, event: str, **kwargs) -> Tuple[(str, List[str])]:
+    def update_events(self, event: StarlakeDataset, **kwargs) -> Tuple[(str, List[StarlakeDataset])]:
         """Add the event to the list of Snowflake events that will be triggered.
 
         Args:
-            event (str): The event to add.
+            event (StarlakeDataset): The event to add.
 
         Returns:
-            Tuple[(str, List[str]): The tuple containing the list of snowflake events to trigger.
+            Tuple[(str, List[StarlakeDataset]): The tuple containing the list of snowflake events to trigger.
         """
-        events: List[str] = kwargs.get('events', [])
+        events: List[StarlakeDataset] = kwargs.get('events', [])
         events.append(event)
         return 'events', events
 
-    def dummy_op(self, task_id: str, events: Optional[List[str]] = None, **kwargs) -> DAGTask:
+    def dummy_op(self, task_id: str, events: Optional[List[StarlakeDataset]] = None, **kwargs) -> DAGTask:
         """Dummy op.
         Generate a Snowflake dummy task.
         If it represents the first task of a pipeline, it will define the optional streams that may trigger the DAG.
 
         Args:
             task_id (str): The required task id.
-            events (Optional[List[str]]): The optional events to materialize.
+            events (Optional[List[StarlakeDataset]]): The optional events to materialize.
 
         Returns:
             DAGTask: The Snowflake task.
@@ -88,7 +88,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
         kwargs.pop('comment', None)
         return DAGTask(name=task_id, definition=f"select '{task_id}'", comment=comment, **kwargs)
 
-    def sl_transform(self, task_id: str, transform_name: str, transform_options: str = None, spark_config: StarlakeSparkConfig = None, sink: Optional[str] = None, **kwargs) -> DAGTask:
+    def sl_transform(self, task_id: str, transform_name: str, transform_options: str = None, spark_config: StarlakeSparkConfig = None, **kwargs) -> DAGTask:
         """Overrides IStarlakeJob.sl_transform()
         Generate the Snowflake task that will run the starlake `transform` command.
 
@@ -97,14 +97,12 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
             transform_name (str): The required transform name.
             transform_options (str, optional): The optional transform options. Defaults to None.
             spark_config (StarlakeSparkConfig, optional): The optional spark configuration. Defaults to None.
-            sink (Optional[str], optional): The optional sink to write the transformed data.
 
         Returns:
             DAGTask: The Snowflake task.
         """
         kwargs.update({'transform': True})
-        if not sink:
-            sink = kwargs.get('sink', transform_name)
+        sink = kwargs.get('sink', transform_name)
         kwargs.update({'sink': sink})
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, **kwargs)
 
@@ -189,8 +187,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
                             session.sql(stmt).collect()
 
                         # check if the sink exists
-                        df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}'
-AND TABLE_NAME = '{table}'") # use templating
+                        df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}'") # use templating
                         rows: List[Row] = df.collect()
                         if rows.__len__() > 0:
                             # execute mainSqlIfExists
