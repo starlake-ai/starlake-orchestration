@@ -46,20 +46,20 @@ from typing import List, Optional, Set, Union
 
 dependencies=StarlakeDependencies(dependencies="""[ {
   "data" : {
-    "name" : "Customers.CustomerLifetimeValue",
+    "name" : "kpi.order_items_analysis",
     "typ" : "task",
-    "parent" : "starbake.Customers",
+    "parent" : "starbake.order_line",
     "parentTyp" : "table",
-    "parentRef" : "starbake.Customers",
+    "parentRef" : "starbake.order_line",
     "writeStrategy" : {
       "type" : "OVERWRITE"
     },
-    "sink" : "Customers.CustomerLifetimeValue",
+    "sink" : "kpi.order_items_analysis",
     "cron" : "None"
   },
   "children" : [ {
     "data" : {
-      "name" : "starbake.Customers",
+      "name" : "starbake.product",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -70,7 +70,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "task" : false
   }, {
     "data" : {
-      "name" : "starbake.Orders",
+      "name" : "starbake.order_line",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -83,44 +83,44 @@ dependencies=StarlakeDependencies(dependencies="""[ {
   "task" : true
 }, {
   "data" : {
-    "name" : "Customers.HighValueCustomers",
+    "name" : "kpi.order_summary",
     "typ" : "task",
-    "parent" : "Customers.CustomerLifetimeValue",
+    "parent" : "kpi.product_summary",
     "parentTyp" : "task",
-    "parentRef" : "Customers.CustomerLifetimeValue",
+    "parentRef" : "kpi.product_summary",
     "writeStrategy" : {
       "type" : "OVERWRITE"
     },
-    "sink" : "Customers.HighValueCustomers",
+    "sink" : "kpi.order_summary",
     "cron" : "None"
   },
   "children" : [ {
     "data" : {
-      "name" : "Customers.CustomerLifetimeValue",
+      "name" : "kpi.revenue_summary",
       "typ" : "task",
-      "parent" : "starbake.Customers",
+      "parent" : "starbake.order",
       "parentTyp" : "table",
-      "parentRef" : "starbake.Customers",
+      "parentRef" : "starbake.order",
       "writeStrategy" : {
         "type" : "OVERWRITE"
       },
-      "sink" : "Customers.CustomerLifetimeValue",
+      "sink" : "kpi.revenue_summary",
       "cron" : "None"
     },
     "children" : [ {
       "data" : {
-        "name" : "starbake.Customers",
+        "name" : "starbake.order",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
-          "type" : "OVERWRITE"
+          "type" : "APPEND"
         },
         "cron" : "0 0 * * *"
       },
       "task" : false
     }, {
       "data" : {
-        "name" : "starbake.Orders",
+        "name" : "starbake.order_line",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
@@ -131,37 +131,22 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "task" : false
     } ],
     "task" : true
-  } ],
-  "task" : true
-}, {
-  "data" : {
-    "name" : "Products.MostProfitableProducts",
-    "typ" : "task",
-    "parent" : "Products.ProductProfitability",
-    "parentTyp" : "task",
-    "parentRef" : "Products.ProductProfitability",
-    "writeStrategy" : {
-      "type" : "OVERWRITE"
-    },
-    "sink" : "Products.MostProfitableProducts",
-    "cron" : "None"
-  },
-  "children" : [ {
+  }, {
     "data" : {
-      "name" : "Products.ProductProfitability",
+      "name" : "kpi.product_summary",
       "typ" : "task",
-      "parent" : "starbake.Orders",
+      "parent" : "starbake.product",
       "parentTyp" : "table",
-      "parentRef" : "starbake.Orders",
+      "parentRef" : "starbake.product",
       "writeStrategy" : {
         "type" : "OVERWRITE"
       },
-      "sink" : "Products.ProductProfitability",
+      "sink" : "kpi.product_summary",
       "cron" : "None"
     },
     "children" : [ {
       "data" : {
-        "name" : "starbake.Products",
+        "name" : "starbake.order",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
@@ -172,7 +157,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "task" : false
     }, {
       "data" : {
-        "name" : "starbake.Orders",
+        "name" : "starbake.order_line",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
@@ -183,7 +168,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "task" : false
     }, {
       "data" : {
-        "name" : "starbake.Ingredients",
+        "name" : "starbake.product",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
@@ -198,20 +183,20 @@ dependencies=StarlakeDependencies(dependencies="""[ {
   "task" : true
 }, {
   "data" : {
-    "name" : "Products.ProductPerformance",
+    "name" : "kpi.product_summary",
     "typ" : "task",
-    "parent" : "starbake.Orders",
+    "parent" : "starbake.product",
     "parentTyp" : "table",
-    "parentRef" : "starbake.Orders",
+    "parentRef" : "starbake.product",
     "writeStrategy" : {
       "type" : "OVERWRITE"
     },
-    "sink" : "Products.ProductPerformance",
+    "sink" : "kpi.product_summary",
     "cron" : "None"
   },
   "children" : [ {
     "data" : {
-      "name" : "starbake.Products",
+      "name" : "starbake.order",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -222,44 +207,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "task" : false
   }, {
     "data" : {
-      "name" : "starbake.Orders",
-      "typ" : "table",
-      "parentTyp" : "unknown",
-      "writeStrategy" : {
-        "type" : "APPEND"
-      },
-      "cron" : "0 * * * *"
-    },
-    "task" : false
-  } ],
-  "task" : true
-}, {
-  "data" : {
-    "name" : "Products.ProductProfitability",
-    "typ" : "task",
-    "parent" : "starbake.Orders",
-    "parentTyp" : "table",
-    "parentRef" : "starbake.Orders",
-    "writeStrategy" : {
-      "type" : "OVERWRITE"
-    },
-    "sink" : "Products.ProductProfitability",
-    "cron" : "None"
-  },
-  "children" : [ {
-    "data" : {
-      "name" : "starbake.Products",
-      "typ" : "table",
-      "parentTyp" : "unknown",
-      "writeStrategy" : {
-        "type" : "APPEND"
-      },
-      "cron" : "0 0 * * *"
-    },
-    "task" : false
-  }, {
-    "data" : {
-      "name" : "starbake.Orders",
+      "name" : "starbake.order_line",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -270,7 +218,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "task" : false
   }, {
     "data" : {
-      "name" : "starbake.Ingredients",
+      "name" : "starbake.product",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -283,190 +231,73 @@ dependencies=StarlakeDependencies(dependencies="""[ {
   "task" : true
 }, {
   "data" : {
-    "name" : "Products.TopSellingProducts",
+    "name" : "kpi.revenue_summary",
     "typ" : "task",
-    "parent" : "Products.ProductPerformance",
-    "parentTyp" : "task",
-    "parentRef" : "Products.ProductPerformance",
+    "parent" : "starbake.order",
+    "parentTyp" : "table",
+    "parentRef" : "starbake.order",
     "writeStrategy" : {
       "type" : "OVERWRITE"
     },
-    "sink" : "Products.TopSellingProducts",
+    "sink" : "kpi.revenue_summary",
     "cron" : "None"
   },
   "children" : [ {
     "data" : {
-      "name" : "Products.ProductPerformance",
-      "typ" : "task",
-      "parent" : "starbake.Orders",
-      "parentTyp" : "table",
-      "parentRef" : "starbake.Orders",
+      "name" : "starbake.order",
+      "typ" : "table",
+      "parentTyp" : "unknown",
       "writeStrategy" : {
-        "type" : "OVERWRITE"
+        "type" : "APPEND"
       },
-      "sink" : "Products.ProductPerformance",
-      "cron" : "None"
+      "cron" : "0 0 * * *"
     },
-    "children" : [ {
-      "data" : {
-        "name" : "starbake.Products",
-        "typ" : "table",
-        "parentTyp" : "unknown",
-        "writeStrategy" : {
-          "type" : "APPEND"
-        },
-        "cron" : "0 0 * * *"
-      },
-      "task" : false
-    }, {
-      "data" : {
-        "name" : "starbake.Orders",
-        "typ" : "table",
-        "parentTyp" : "unknown",
-        "writeStrategy" : {
-          "type" : "APPEND"
-        },
-        "cron" : "0 * * * *"
-      },
-      "task" : false
-    } ],
-    "task" : true
-  } ],
-  "task" : true
-}, {
-  "data" : {
-    "name" : "Products.TopSellingProfitableProducts",
-    "typ" : "task",
-    "parent" : "Products.TopSellingProducts",
-    "parentTyp" : "task",
-    "parentRef" : "Products.TopSellingProducts",
-    "writeStrategy" : {
-      "type" : "OVERWRITE"
-    },
-    "sink" : "Products.TopSellingProfitableProducts",
-    "cron" : "None"
-  },
-  "children" : [ {
-    "data" : {
-      "name" : "Products.TopSellingProducts",
-      "typ" : "task",
-      "parent" : "Products.ProductPerformance",
-      "parentTyp" : "task",
-      "parentRef" : "Products.ProductPerformance",
-      "writeStrategy" : {
-        "type" : "OVERWRITE"
-      },
-      "sink" : "Products.TopSellingProducts",
-      "cron" : "None"
-    },
-    "children" : [ {
-      "data" : {
-        "name" : "Products.ProductPerformance",
-        "typ" : "task",
-        "parent" : "starbake.Orders",
-        "parentTyp" : "table",
-        "parentRef" : "starbake.Orders",
-        "writeStrategy" : {
-          "type" : "OVERWRITE"
-        },
-        "sink" : "Products.ProductPerformance",
-        "cron" : "None"
-      },
-      "children" : [ {
-        "data" : {
-          "name" : "starbake.Products",
-          "typ" : "table",
-          "parentTyp" : "unknown",
-          "writeStrategy" : {
-            "type" : "APPEND"
-          },
-          "cron" : "0 0 * * *"
-        },
-        "task" : false
-      }, {
-        "data" : {
-          "name" : "starbake.Orders",
-          "typ" : "table",
-          "parentTyp" : "unknown",
-          "writeStrategy" : {
-            "type" : "APPEND"
-          },
-          "cron" : "0 * * * *"
-        },
-        "task" : false
-      } ],
-      "task" : true
-    } ],
-    "task" : true
+    "task" : false
   }, {
     "data" : {
-      "name" : "Products.MostProfitableProducts",
-      "typ" : "task",
-      "parent" : "Products.ProductProfitability",
-      "parentTyp" : "task",
-      "parentRef" : "Products.ProductProfitability",
+      "name" : "starbake.order_line",
+      "typ" : "table",
+      "parentTyp" : "unknown",
       "writeStrategy" : {
-        "type" : "OVERWRITE"
+        "type" : "APPEND"
       },
-      "sink" : "Products.MostProfitableProducts",
-      "cron" : "None"
+      "cron" : "0 * * * *"
     },
-    "children" : [ {
-      "data" : {
-        "name" : "Products.ProductProfitability",
-        "typ" : "task",
-        "parent" : "starbake.Orders",
-        "parentTyp" : "table",
-        "parentRef" : "starbake.Orders",
-        "writeStrategy" : {
-          "type" : "OVERWRITE"
-        },
-        "sink" : "Products.ProductProfitability",
-        "cron" : "None"
-      },
-      "children" : [ {
-        "data" : {
-          "name" : "starbake.Products",
-          "typ" : "table",
-          "parentTyp" : "unknown",
-          "writeStrategy" : {
-            "type" : "APPEND"
-          },
-          "cron" : "0 0 * * *"
-        },
-        "task" : false
-      }, {
-        "data" : {
-          "name" : "starbake.Orders",
-          "typ" : "table",
-          "parentTyp" : "unknown",
-          "writeStrategy" : {
-            "type" : "APPEND"
-          },
-          "cron" : "0 * * * *"
-        },
-        "task" : false
-      }, {
-        "data" : {
-          "name" : "starbake.Ingredients",
-          "typ" : "table",
-          "parentTyp" : "unknown",
-          "writeStrategy" : {
-            "type" : "OVERWRITE"
-          },
-          "cron" : "0 0 * * *"
-        },
-        "task" : false
-      } ],
-      "task" : true
-    } ],
-    "task" : true
+    "task" : false
   } ],
   "task" : true
 } ]""")
 
 statements = {
-    #TODO
+  "kpi.order_items_analysis" : {
+    "preActions" : [ "USE kpi" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.order_items_analysis AS WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, List( p.name || ' (' || o.quantity || ')' ) AS purchased_items\n, Sum( o.quantity * p.price ) AS total_order_value\nFROM starbake.order_line o\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id;" ],
+    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.order_items_analysis", "INSERT INTO kpi.order_items_analysis WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, List( p.name || ' (' || o.quantity || ')' ) AS purchased_items\n, Sum( o.quantity * p.price ) AS total_order_value\nFROM starbake.order_line o\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id" ]
+  },
+  "kpi.order_summary" : {
+    "preActions" : [ "USE kpi" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.order_summary AS SELECT\nps.order_id,\nps.order_date,\nrs.total_revenue,\nps.profit,\nps.total_units_sold\nFROM\nkpi.product_summary ps\nJOIN kpi.revenue_summary rs ON ps.order_id = rs.order_id;" ],
+    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.order_summary", "INSERT INTO kpi.order_summary SELECT\nps.order_id,\nps.order_date,\nrs.total_revenue,\nps.profit,\nps.total_units_sold\nFROM\nkpi.product_summary ps\nJOIN kpi.revenue_summary rs ON ps.order_id = rs.order_id" ]
+  },
+  "kpi.product_summary" : {
+    "preActions" : [ "USE kpi" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.product_summary AS SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.timestamp AS order_date\nFROM\nstarbake.product p\nJOIN starbake.order_line ol ON p.product_id = ol.product_id\nJOIN starbake.order o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.timestamp;" ],
+    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.product_summary", "INSERT INTO kpi.product_summary SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.timestamp AS order_date\nFROM\nstarbake.product p\nJOIN starbake.order_line ol ON p.product_id = ol.product_id\nJOIN starbake.order o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.timestamp" ]
+  },
+  "kpi.revenue_summary" : {
+    "preActions" : [ "USE kpi" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.revenue_summary AS SELECT\no.order_id,\no.timestamp AS order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.order o\nJOIN starbake.order_line ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.timestamp;" ],
+    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.revenue_summary", "INSERT INTO kpi.revenue_summary SELECT\no.order_id,\no.timestamp AS order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.order o\nJOIN starbake.order_line ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.timestamp" ]
+  }
+}
+
+expectations = { }
+
+audit = {
+  "preActions" : [ "USE audit" ],
+  "mainSqlIfNotExists" : [ "\n          SELECT\n            '{{jobid}}' AS JOBID,\n            '{{paths}}' AS PATHS,\n            '{{domain}}' AS DOMAIN,\n            '{{schema}}' AS SCHEMA,\n            {{success}} AS SUCCESS,\n            {{count}} AS COUNT,\n            {{countAccepted}} AS COUNTACCEPTED,\n            {{countRejected}} AS COUNTREJECTED,\n            TIMESTAMP '{{timestamp}}' AS TIMESTAMP,\n            {{duration}} AS DURATION,\n            '{{message}}' AS MESSAGE,\n            '{{step}}' AS STEP,\n            '{{database}}' AS DATABASE,\n            '{{tenant}}' AS TENANT\n        " ],
+  "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID VARCHAR NOT NULL,\n                              PATHS TEXT NOT NULL,\n                              DOMAIN VARCHAR NOT NULL,\n                              SCHEMA VARCHAR NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION LONG NOT NULL,\n                              MESSAGE VARCHAR NOT NULL,\n                              STEP VARCHAR NOT NULL,\n                              DATABASE VARCHAR,\n                              TENANT VARCHAR\n                             )\n    " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{{jobid}}' AS JOBID,\n            '{{paths}}' AS PATHS,\n            '{{domain}}' AS DOMAIN,\n            '{{schema}}' AS SCHEMA,\n            {{success}} AS SUCCESS,\n            {{count}} AS COUNT,\n            {{countAccepted}} AS COUNTACCEPTED,\n            {{countRejected}} AS COUNTREJECTED,\n            TIMESTAMP '{{timestamp}}' AS TIMESTAMP,\n            {{duration}} AS DURATION,\n            '{{message}}' AS MESSAGE,\n            '{{step}}' AS STEP,\n            '{{database}}' AS DATABASE,\n            '{{tenant}}' AS TENANT\n        " ]
 }
 
 with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
