@@ -38,7 +38,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
         cron = pipeline.cron
 
-        uris: Set[str] = set(map(lambda dataset: sanitize_id(dataset.uri).lower(), datasets or []))
+        uris: Set[str] = set(map(lambda dataset: dataset.uri, datasets or []))
 
         first_level_tasks: Set[str] = dependencies.first_level_tasks
 
@@ -55,7 +55,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
         elif len(uris) == len(scheduled_datasets) and len(set(scheduled_datasets.values())) > 0:
             sorted_crons = sort_crons_by_frequency(set(
                 scheduled_datasets.values()), 
-                period=pipeline.get_context_var(var_name='cron_period_frequency', default_value='week')
+                period=pipeline.cron_period_frequency
             )
             cron_expr = sorted_crons[0][0]
         else:
@@ -77,7 +77,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             else:
                 load_domain_and_table = task_name.split(".", 1)
                 domain = load_domain_and_table[0]
-                table = load_domain_and_table[1]
+                table = load_domain_and_table[-1]
                 return pipeline.sl_load(
                     task_id=task_id, 
                     domain=domain, 
@@ -88,10 +88,9 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
         # build group of tasks recursively
         def generate_task_group_for_task(task: StarlakeDependency, parent_group_id: Optional[str] = None) -> Union[AbstractTaskGroup, AbstractTask]:
-            task_name = task.name
-            task_group_id = sanitize_id(task_name)
+            task_name = task.sink
+            task_group_id = task.uri
             task_type = task.dependency_type
-            task_sink = task.sink
             task_id = f"{task_group_id}_{task_type}"
             
             if load_dependencies and parent_group_id:
@@ -112,7 +111,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
                     task << upstream_tasks
                 return task_group
             else:
-                task = create_task(task_id=task_id, task_name=task_name, task_type=task_type, task_sink=task_sink)
+                task = create_task(task_id=task_id, task_name=task_name, task_type=task_type)
                 return task
 
         all_transform_tasks = [generate_task_group_for_task(task) for task in dependencies if task.name not in all_dependencies]

@@ -7,7 +7,7 @@ import os
 import importlib
 import inspect
 
-from ai.starlake.common import sl_cron_start_end_dates, sort_crons_by_frequency, is_valid_cron
+from ai.starlake.common import StarlakeCronPeriod, sl_cron_start_end_dates, sort_crons_by_frequency, is_valid_cron
 
 from ai.starlake.job import StarlakeSparkConfig, IStarlakeJob, StarlakePreLoadStrategy
 
@@ -421,7 +421,7 @@ class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
         least_frequent_datasets: List[StarlakeDataset] = []
         if set(self.scheduled_datasets.values()).__len__() > 1: # we have at least 2 distinct cron expressions
             # we sort the cron datasets by frequency (most frequent first)
-            sorted_crons = sort_crons_by_frequency(set(self.scheduled_datasets.values()), period=self.job.cron_period_frequency())
+            sorted_crons = sort_crons_by_frequency(set(self.scheduled_datasets.values()), period=self.cron_period_frequency)
             # we exclude the most frequent cron dataset
             least_frequent_crons = set([expr for expr, _ in sorted_crons[1:sorted_crons.__len__()]])
             for sink, cron in self.scheduled_datasets.items() :
@@ -439,6 +439,11 @@ class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
     @property
     def pre_load_strategy(self) -> StarlakePreLoadStrategy:
         return self.job.pre_load_strategy
+
+    @final
+    @property
+    def cron_period_frequency(self) -> StarlakeCronPeriod:
+        return self.job.cron_period_frequency
 
     @final
     def get_context_var(self, var_name: str, default_value: Any) -> Any:
