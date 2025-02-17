@@ -22,10 +22,7 @@ class SnowflakeEvent(AbstractEvent[StarlakeDataset]):
 class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, SnowflakeEvent):
     def __init__(self, filename: str, module_name: str, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None]=None, options: dict=None, **kwargs) -> None:
         super().__init__(filename=filename, module_name=module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
-        try:
-            self._stage_location = kwargs.get('stage_location', __class__.get_context_var(var_name='stage_location', options=self.options))
-        except MissingEnvironmentVariable:
-            self._stage_location = None
+        self._stage_location = kwargs.get('stage_location', __class__.get_context_var(var_name='stage_location', options=self.options)) #stage_location is required
         try:
             self._warehouse = kwargs.get('warehouse', __class__.get_context_var(var_name='warehouse', options=self.options))
         except MissingEnvironmentVariable:
@@ -222,7 +219,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
                             packages=self.packages
                         ), 
                         comment=comment, 
-                        **kwargs
+# FIXME                        **kwargs
                     )
                 else:
                     # sink statements are required
