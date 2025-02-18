@@ -164,6 +164,7 @@ class StarlakeDependencies():
                     for dependency in task.dependencies:
                         name = dependency.name
                         uri = dependency.uri
+                        stream = dependency.stream
                         if uri not in uris and uri not in temp_filtered_datasets:
                             kw = dict()
                             if dependency.cron is not None:
@@ -172,6 +173,8 @@ class StarlakeDependencies():
                                 kw['sl_schedule_parameter_name'] = sl_schedule_parameter_name
                             if sl_schedule_format is not None:
                                 kw['sl_schedule_format'] = sl_schedule_format
+                            if stream is not None:
+                                kw['stream'] = stream
                             dataset = StarlakeDataset(name=name, **kw)
                             uris.add(uri)
                             datasets.append(dataset)

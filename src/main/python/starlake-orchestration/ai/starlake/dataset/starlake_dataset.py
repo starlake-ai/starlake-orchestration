@@ -7,7 +7,7 @@ from ai.starlake.common import asQueryParameters, sanitize_id, sl_schedule, sl_s
 from typing import Generic, List, Optional, TypeVar
 
 class StarlakeDataset():
-    def __init__(self, name: str, parameters: Optional[dict] = None, cron: Optional[str] = None, **kwargs):
+    def __init__(self, name: str, parameters: Optional[dict] = None, cron: Optional[str] = None, stream: Optional[str] = None, **kwargs):
         """Initializes a new StarlakeDataset instance.
 
         Args:
@@ -42,6 +42,7 @@ class StarlakeDataset():
         self._queryParameters = asQueryParameters(temp_parameters)
         self._parameters = parameters
         self._url = self.uri + self.queryParameters
+        self._stream = stream
 
     @property
     def name(self) -> str:
@@ -75,8 +76,12 @@ class StarlakeDataset():
     def table(self) -> str:
         return self._table
 
+    @property
+    def stream(self) -> Optional[str]:
+        return self._stream
+
     def refresh(self) -> StarlakeDataset:
-        return StarlakeDataset(self.name, self.parameters, self.cron)
+        return StarlakeDataset(self.name, self.parameters, self.cron, self.stream)
 
     @staticmethod
     def refresh_datasets(datasets: Optional[List[StarlakeDataset]]) -> Optional[List[StarlakeDataset]]:
