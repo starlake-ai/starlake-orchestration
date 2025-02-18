@@ -408,3 +408,15 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             all_done = pipeline.sl_dummy_op(task_id="all_done")
             all_done << all_transform_tasks
             all_done >> post_tasks >> end
+
+    print(f"Pipeline {pipeline_id} created") 
+    from snowflake.core.task.dagv1 import DAG
+    dag: DAG = pipeline.dag
+    for task in dag.tasks:
+        print(f"Task {task.full_name} created")
+        for predecessor in task.predecessors:
+            print(f"Task {task.full_name} depends on {predecessor.full_name}")
+    for dataset in pipeline.least_frequent_datasets:
+        print(f"Dataset {dataset.name} is least frequent -> {dataset.cron}")
+    for dataset in pipeline.most_frequent_datasets:
+        print(f"Dataset {dataset.name} is most frequent -> {dataset.cron}")
