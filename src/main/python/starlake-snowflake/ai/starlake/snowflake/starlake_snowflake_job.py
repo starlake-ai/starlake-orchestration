@@ -84,21 +84,30 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
             comment = f"dummy task for {task_id}"
         kwargs.pop('comment', None)
 
-        not_scheduled_datasets = kwargs.get('not_scheduled_datasets', [])
-        kwargs.pop('not_scheduled_datasets', None)
-        if not_scheduled_datasets:
-            print(f"not scheduled datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
-
-        most_frequent_datasets = kwargs.get('most_frequent_datasets', [])
-        kwargs.pop('most_frequent_datasets', None)
-        if most_frequent_datasets:
-            print(f"most frequent datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
-
         least_frequent_datasets = kwargs.get('least_frequent_datasets', [])
         kwargs.pop('least_frequent_datasets', None)
         if least_frequent_datasets:
             print(f"least frequent datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
 
+        not_scheduled_datasets = kwargs.get('not_scheduled_datasets', [])
+        kwargs.pop('not_scheduled_datasets', None)
+        not_scheduled_streams = set()
+        not_scheduled_datasets_without_streams = []
+        if not_scheduled_datasets:
+            print(f"not scheduled datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
+            for dataset in not_scheduled_datasets:
+                if dataset.stream:
+                    not_scheduled_streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
+                else:
+                    not_scheduled_datasets_without_streams.append(dataset)
+        if not_scheduled_datasets_without_streams:
+            print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, not_scheduled_datasets_without_streams)))}")
+            ...
+
+        most_frequent_datasets = kwargs.get('most_frequent_datasets', [])
+        kwargs.pop('most_frequent_datasets', None)
+        if most_frequent_datasets:
+            print(f"most frequent datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
         streams = set()
         most_frequent_datasets_without_streams = []
         if most_frequent_datasets:
@@ -107,6 +116,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
                     streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
                 else:
                     most_frequent_datasets_without_streams.append(dataset)
+        if most_frequent_datasets_without_streams:
+            print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
+            ...
 
         condition = None
 
@@ -114,9 +126,12 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
             condition = ' OR '.join(streams)
             print(f"condition: {condition}")
 
-        if most_frequent_datasets_without_streams:
-            print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
-            ...
+        if not_scheduled_streams:
+            if condition:
+                condition = f"({condition}) AND ({' AND '.join(not_scheduled_streams)})"
+            else:
+                condition = ' AND '.join(not_scheduled_streams)
+            print(f"condition: {condition}")
 
         return DAGTask(
             name=task_id, 
