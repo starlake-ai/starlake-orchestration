@@ -411,9 +411,18 @@ class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
     def datasets(self) -> Optional[List[StarlakeDataset]]:
         return self._datasets
 
+    @final
+    def find_dataset_by_name(self, name: str) -> Optional[StarlakeDataset]:
+        return next((dataset for dataset in self.datasets or [] if dataset.name == name), None)
+
     @property
     def scheduled_datasets(self) -> dict:
         return {dataset.name: dataset.cron for dataset in self.datasets or [] if dataset.cron is not None and dataset.name is not None}
+
+    @final
+    @property
+    def not_scheduled_datasets(self) -> List[StarlakeDataset]:
+        return [dataset for dataset in self.datasets or [] if dataset.name not in self.scheduled_datasets.keys()]
 
     @final
     @property
@@ -427,8 +436,16 @@ class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
             for name, cron in self.scheduled_datasets.items() :
                 # we republish the least frequent scheduled datasets
                 if cron in least_frequent_crons:
-                    least_frequent_datasets.append(StarlakeDataset(name=name, cron=cron))
+                    dataset = self.find_dataset_by_name(name)
+                    if dataset:
+                        least_frequent_datasets.append(dataset)
         return least_frequent_datasets
+
+    @final
+    @property
+    def most_frequent_datasets(self) -> List[StarlakeDataset]:
+        least_frequent_datasets: List[str] = list(map(lambda dataset: dataset.name, self.least_frequent_datasets or []))
+        return [dataset for dataset in self.datasets or [] if dataset.name not in least_frequent_datasets]
 
     @final
     @property
