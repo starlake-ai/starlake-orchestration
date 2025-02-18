@@ -87,17 +87,17 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
         not_scheduled_datasets = kwargs.get('not_scheduled_datasets', [])
         kwargs.pop('not_scheduled_datasets', None)
         if not_scheduled_datasets:
-            print(f"not_scheduled_datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
+            print(f"not scheduled datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
 
         most_frequent_datasets = kwargs.get('most_frequent_datasets', [])
         kwargs.pop('most_frequent_datasets', None)
         if most_frequent_datasets:
-            print(f"most_frequent_datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
+            print(f"most frequent datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
 
         least_frequent_datasets = kwargs.get('least_frequent_datasets', [])
         kwargs.pop('least_frequent_datasets', None)
         if least_frequent_datasets:
-            print(f"least_frequent_datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
+            print(f"least frequent datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
 
         streams = set()
         most_frequent_datasets_without_streams = []
