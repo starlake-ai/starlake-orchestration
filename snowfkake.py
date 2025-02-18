@@ -77,7 +77,8 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "writeStrategy" : {
         "type" : "APPEND"
       },
-      "cron" : "0 * * * *"
+      "cron" : "0 * * * *",
+      "stream" : "starbake.order_line_stream"
     },
     "task" : false
   } ],
@@ -127,7 +128,8 @@ dependencies=StarlakeDependencies(dependencies="""[ {
         "writeStrategy" : {
           "type" : "APPEND"
         },
-        "cron" : "0 * * * *"
+        "cron" : "0 * * * *",
+        "stream" : "starbake.order_line_stream"
       },
       "task" : false
     } ],
@@ -164,7 +166,8 @@ dependencies=StarlakeDependencies(dependencies="""[ {
         "writeStrategy" : {
           "type" : "APPEND"
         },
-        "cron" : "0 * * * *"
+        "cron" : "0 * * * *",
+        "stream" : "starbake.order_line_stream"
       },
       "task" : false
     }, {
@@ -214,7 +217,8 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "writeStrategy" : {
         "type" : "APPEND"
       },
-      "cron" : "0 * * * *"
+      "cron" : "0 * * * *",
+      "stream" : "starbake.order_line_stream"
     },
     "task" : false
   }, {
@@ -262,7 +266,8 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "writeStrategy" : {
         "type" : "APPEND"
       },
-      "cron" : "0 * * * *"
+      "cron" : "0 * * * *",
+      "stream" : "starbake.order_line_stream"
     },
     "task" : false
   } ],

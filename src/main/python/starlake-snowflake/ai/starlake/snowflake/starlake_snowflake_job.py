@@ -104,7 +104,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
         if most_frequent_datasets:
             for dataset in most_frequent_datasets:
                 if dataset.stream:
-                    streams.add(f'SYSTEM$STREAM_HAS_DATA({dataset.stream})')
+                    streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
                 else:
                     most_frequent_datasets_without_streams.append(dataset)
 
@@ -112,6 +112,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
 
         if streams:
             condition = ' OR '.join(streams)
+            print(f"condition: {condition}")
 
         if most_frequent_datasets_without_streams:
             print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
