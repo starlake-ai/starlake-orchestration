@@ -35,6 +35,9 @@ class SnowflakePipeline(AbstractPipeline[DAG, StarlakeDataset], StarlakeDataset)
         _dag_context_stack.append(self.dag)
         return super().__enter__()
     
+    def start_task(self, **kwargs) -> Optional[Union[AbstractTask[DAGTask], AbstractTaskGroup[List[DAGTask]]]]:
+        return super().start_task(not_scheduled_datasets=self.not_scheduled_datasets, least_frequent_datasets = self.least_frequent_datasets, most_frequent_datasets=self.most_frequent_datasets, **kwargs)
+
     def __exit__(self, exc_type, exc_value, traceback):
         _dag_context_stack.pop()
 
