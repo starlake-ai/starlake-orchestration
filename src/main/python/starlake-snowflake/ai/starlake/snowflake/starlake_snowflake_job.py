@@ -83,7 +83,47 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
         if not comment:
             comment = f"dummy task for {task_id}"
         kwargs.pop('comment', None)
-        return DAGTask(name=task_id, definition=f"select '{task_id}'", comment=comment, **kwargs)
+
+        not_scheduled_datasets = kwargs.get('not_scheduled_datasets', [])
+        kwargs.pop('not_scheduled_datasets', None)
+        if not_scheduled_datasets:
+            print(f"not_scheduled_datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
+
+        most_frequent_datasets = kwargs.get('most_frequent_datasets', [])
+        kwargs.pop('most_frequent_datasets', None)
+        if most_frequent_datasets:
+            print(f"most_frequent_datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
+
+        least_frequent_datasets = kwargs.get('least_frequent_datasets', [])
+        kwargs.pop('least_frequent_datasets', None)
+        if least_frequent_datasets:
+            print(f"least_frequent_datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
+
+        streams = set()
+        most_frequent_datasets_without_streams = []
+        if most_frequent_datasets:
+            for dataset in most_frequent_datasets:
+                if dataset.stream:
+                    streams.add(f'SYSTEM$STREAM_HAS_DATA({dataset.stream})')
+                else:
+                    most_frequent_datasets_without_streams.append(dataset)
+
+        condition = None
+
+        if streams:
+            condition = ' OR '.join(streams)
+
+        if most_frequent_datasets_without_streams:
+            print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
+            ...
+
+        return DAGTask(
+            name=task_id, 
+            definition=f"select '{task_id}'", 
+            comment=comment, 
+            condition=condition,
+            **kwargs
+        )
 
     def sl_transform(self, task_id: str, transform_name: str, transform_options: str = None, spark_config: StarlakeSparkConfig = None, **kwargs) -> DAGTask:
         """Overrides IStarlakeJob.sl_transform()
@@ -205,6 +245,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
                             stmt: str = text(sql).bindparams(**params)
                             session.sql(stmt).collect()
 
+                    kwargs.pop('params', None)
+                    kwargs.pop('events', None)
+
                     return DAGTask(
                         name=task_id, 
                         definition=StoredProcedureCall(
@@ -219,7 +262,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, Snowflak
                             packages=self.packages
                         ), 
                         comment=comment, 
-# FIXME                        **kwargs
+                        **kwargs
                     )
                 else:
                     # sink statements are required
