@@ -27,7 +27,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             self._warehouse = kwargs.get('warehouse', __class__.get_context_var(var_name='warehouse', options=self.options))
         except MissingEnvironmentVariable:
             self._warehouse = None
-        self._packages=["croniter", "sqlalchemy"]
+        self._packages=["croniter", "sqlalchemy", "python-dateutil"]
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -134,18 +134,30 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     condition = ' AND '.join(not_scheduled_streams)
 
             if changes:
-                def fun(session: Session, changes: dict) -> None:
+                format = '%Y-%m-%d %H:%M:%S%z'
+
+                def fun(session: Session, changes: dict, format: str) -> None:
                     from croniter import croniter
                     from croniter.croniter import CroniterBadCronError
                     from datetime import datetime
+                    from snowflake.core.task.context import TaskContext
+                    context = TaskContext(session)
+                    # get the original scheduled timestamp of the initial graph run in the current group
+                    # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
+                    original_schedule = context.get_current_task_graph_original_schedule()
+                    if original_schedule:
+                        from dateutil import parser
+                        start_time = parser.parse(original_schedule)
+                    else:
+                        start_time = datetime.fromtimestamp(datetime.now().timestamp())
                     for dataset, cron_expr in changes.items():
                         # enabling change tracking for the dataset
                         print(f"Enabling change tracking for dataset {dataset}")
                         session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect()
                         try:
                             croniter(cron_expr)
-                            start_time = datetime.fromtimestamp(datetime.now().timestamp())
                             iter = croniter(cron_expr, start_time)
+                            # get the start and end date of the current cron iteration
                             curr = iter.get_current(datetime)
                             previous = iter.get_prev(datetime)
                             next = croniter(cron_expr, previous).get_next(datetime)
@@ -154,7 +166,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             else:
                                 sl_end_date = previous
                             sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
-                            format = '%Y-%m-%d %H:%M:%S%z'
                             change = f"SELECT * FROM {dataset} WHERE CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')"
                             print(f"Checking changes for dataset {dataset} from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)} -> {change}")
                             df = session.sql(query=change)
@@ -169,6 +180,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     func = partial(
                         fun,
                         changes=changes,
+                        format=format
                     ), 
                     stage_location=self.stage_location,
                     packages=self.packages
@@ -315,17 +327,28 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     cron_expr = kwargs.get('cron_expr', None)
                     kwargs.pop('cron_expr', None)
 
+                    format = '%Y-%m-%d %H:%M:%S%z'
+
                     # create the function that will execute the transform
-                    def fun(session: Session, sink: str, statements: dict, params: dict, cron_expr: Optional[str]) -> None:
+                    def fun(session: Session, sink: str, statements: dict, params: dict, cron_expr: Optional[str], format: str) -> None:
                         from sqlalchemy import text
 
                         if cron_expr:
                             from croniter import croniter
                             from croniter.croniter import CroniterBadCronError
                             from datetime import datetime
+                            from snowflake.core.task.context import TaskContext
+                            context = TaskContext(session)
+                            # get the original scheduled timestamp of the initial graph run in the current group
+                            # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
+                            original_schedule = context.get_current_task_graph_original_schedule()
+                            if original_schedule:
+                                from dateutil import parser
+                                start_time = parser.parse(original_schedule)
+                            else:
+                                start_time = datetime.fromtimestamp(datetime.now().timestamp())
                             try:
                                 croniter(cron_expr)
-                                start_time = datetime.fromtimestamp(datetime.now().timestamp())
                                 iter = croniter(cron_expr, start_time)
                                 curr = iter.get_current(datetime)
                                 previous = iter.get_prev(datetime)
@@ -335,7 +358,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 else:
                                     sl_end_date = previous
                                 sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
-                                format = '%Y-%m-%d %H:%M:%S%z'
                                 params.update({'sl_start_date': sl_start_date.strftime(format), 'sl_end_date': sl_end_date.strftime(format)})
                             except CroniterBadCronError:
                                 raise ValueError(f"Invalid cron expression: {cron_expr}")
@@ -392,7 +414,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 sink=sink, 
                                 statements=statements, 
                                 params=options, 
-                                cron_expr=cron_expr
+                                cron_expr=cron_expr,
+                                format=format
                             ), 
                             stage_location=self.stage_location,
                             packages=self.packages
