@@ -343,13 +343,21 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             )
         return self.sl_job(task_id=task_id, arguments=arguments, spark_config=spark_config, **kwargs)
 
-    def pre_tasks(self, *args, **kwargs) -> Optional[T]: #TODO rename to pre_op
+    def pre_tasks(self, *args, **kwargs) -> Optional[T]: #TODO rename to pre_ops
         """Pre tasks."""
         return None
 
-    def post_tasks(self, *args, **kwargs) -> Optional[T]: #TODO rename to post_op
+    def post_tasks(self, *args, **kwargs) -> Optional[T]: #TODO rename to post_ops
         """Post tasks."""
         return None
+
+    def start_op(self, task_id: str, scheduled: bool, not_scheduled_datasets: Optional[List[StarlakeDataset]], least_frequent_datasets: Optional[List[StarlakeDataset]], most_frequent_datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[T]:
+        """Start operation."""
+        return self.dummy_op(task_id, **kwargs)
+
+    def end_op(self, task_id: str, events: Optional[List[E]] = None, **kwargs) -> Optional[T]:
+        """End operation."""
+        return self.dummy_op(task_id, events, **kwargs)
 
     @abstractmethod
     def dummy_op(self, task_id, events: Optional[List[E]], **kwargs) -> T: 
