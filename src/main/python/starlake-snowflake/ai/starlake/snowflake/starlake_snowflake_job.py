@@ -88,11 +88,15 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
         definition=f"select '{task_id}'"
 
-        if not scheduled:
+        if not scheduled: # if the DAG is not scheduled we will rely on streams to trigger the underlying dag and check if the scheduled datasets without streams have data using CHANGES
+            changes = dict() # tracks the datasets that have to be checked
+
             if least_frequent_datasets:
                 print(f"least frequent datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
+                for dataset in least_frequent_datasets:
+                    changes.update({dataset.name: dataset.cron})
 
-            not_scheduled_streams = set()
+            not_scheduled_streams = set() # set of streams which underlying datasets are not scheduled
             not_scheduled_datasets_without_streams = []
             if not_scheduled_datasets:
                 print(f"not scheduled datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
@@ -103,7 +107,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         not_scheduled_datasets_without_streams.append(dataset)
             if not_scheduled_datasets_without_streams:
                 print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, not_scheduled_datasets_without_streams)))}")
-                ...
+                ... # nothing to do here
 
             if most_frequent_datasets:
                 print(f"most frequent datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
@@ -115,6 +119,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
                     else:
                         most_frequent_datasets_without_streams.append(dataset)
+                        changes.update({dataset.name: dataset.cron})
             if most_frequent_datasets_without_streams:
                 print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
                 ...
@@ -127,6 +132,44 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     condition = f"({condition}) AND ({' AND '.join(not_scheduled_streams)})"
                 else:
                     condition = ' AND '.join(not_scheduled_streams)
+
+            if changes:
+                def fun(session: Session, changes: dict) -> None:
+                    from croniter import croniter
+                    from croniter.croniter import CroniterBadCronError
+                    from datetime import datetime
+                    for dataset, cron_expr in changes.items():
+                        # enabling change tracking for the dataset
+                        session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect()
+                        try:
+                            croniter(cron_expr)
+                            start_time = datetime.fromtimestamp(datetime.now().timestamp())
+                            iter = croniter(cron_expr, start_time)
+                            curr = iter.get_current(datetime)
+                            previous = iter.get_prev(datetime)
+                            next = croniter(cron_expr, previous).get_next(datetime)
+                            if curr == next :
+                                sl_end_date = curr
+                            else:
+                                sl_end_date = previous
+                            sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
+                            format = '%Y-%m-%d %H:%M:%S%z'
+                            df = session.sql(query=f"SELECT * FROM {dataset} WHERE CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')")
+                            rows = df.collect()
+                            if rows.__len__() == 0:
+                                raise ValueError(f"Dataset {dataset} has no changes from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
+                            print(f"Dataset {dataset} has data from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
+                        except CroniterBadCronError:
+                            raise ValueError(f"Invalid cron expression: {cron_expr}")
+
+                definition = StoredProcedureCall(
+                    func = partial(
+                        fun,
+                        changes=changes,
+                    ), 
+                    stage_location=self.stage_location,
+                    packages=self.packages
+                )
 
         if condition:
             print(f"condition: {condition}")
