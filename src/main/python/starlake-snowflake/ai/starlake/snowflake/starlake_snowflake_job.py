@@ -67,10 +67,81 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         events.append(event)
         return 'events', events
 
+    def start_op(self, task_id, scheduled: bool, not_scheduled_datasets: Optional[List[StarlakeDataset]], least_frequent_datasets: Optional[List[StarlakeDataset]], most_frequent_datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[DAGTask]:
+        """Overrides IStarlakeJob.start_op()
+        It represents the first task of a pipeline, it will define the optional condition that may trigger the DAG.
+        Args:
+            task_id (str): The required task id.
+            scheduled (bool): whether the dag is scheduled or not.
+            not_scheduled_datasets (Optional[List[StarlakeDataset]]): The optional not scheduled datasets.
+            least_frequent_datasets (Optional[List[StarlakeDataset]]): The optional least frequent datasets.
+            most_frequent_datasets (Optional[List[StarlakeDataset]]): The optional most frequent datasets.
+        Returns:
+            Optional[DAGTask]: The optional Snowflake task.
+        """
+        comment = kwargs.get('comment', None)
+        if not comment:
+            comment = f"dummy task for {task_id}"
+        kwargs.pop('comment', None)
+
+        condition = None
+
+        definition=f"select '{task_id}'"
+
+        if not scheduled:
+            if least_frequent_datasets:
+                print(f"least frequent datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
+
+            not_scheduled_streams = set()
+            not_scheduled_datasets_without_streams = []
+            if not_scheduled_datasets:
+                print(f"not scheduled datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
+                for dataset in not_scheduled_datasets:
+                    if dataset.stream:
+                        not_scheduled_streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
+                    else:
+                        not_scheduled_datasets_without_streams.append(dataset)
+            if not_scheduled_datasets_without_streams:
+                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, not_scheduled_datasets_without_streams)))}")
+                ...
+
+            if most_frequent_datasets:
+                print(f"most frequent datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
+            streams = set()
+            most_frequent_datasets_without_streams = []
+            if most_frequent_datasets:
+                for dataset in most_frequent_datasets:
+                    if dataset.stream:
+                        streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
+                    else:
+                        most_frequent_datasets_without_streams.append(dataset)
+            if most_frequent_datasets_without_streams:
+                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
+                ...
+
+            if streams:
+                condition = ' OR '.join(streams)
+
+            if not_scheduled_streams:
+                if condition:
+                    condition = f"({condition}) AND ({' AND '.join(not_scheduled_streams)})"
+                else:
+                    condition = ' AND '.join(not_scheduled_streams)
+
+        if condition:
+            print(f"condition: {condition}")
+
+        return DAGTask(
+            name=task_id, 
+            definition=definition, 
+            comment=comment, 
+            condition=condition,
+            **kwargs
+        )
+
     def dummy_op(self, task_id: str, events: Optional[List[StarlakeDataset]] = None, **kwargs) -> DAGTask:
         """Dummy op.
         Generate a Snowflake dummy task.
-        If it represents the first task of a pipeline, it will define the optional streams that may trigger the DAG.
 
         Args:
             task_id (str): The required task id.
@@ -84,60 +155,63 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             comment = f"dummy task for {task_id}"
         kwargs.pop('comment', None)
 
-        least_frequent_datasets = kwargs.get('least_frequent_datasets', [])
-        kwargs.pop('least_frequent_datasets', None)
-        if least_frequent_datasets:
-            print(f"least frequent datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
-
-        not_scheduled_datasets = kwargs.get('not_scheduled_datasets', [])
-        kwargs.pop('not_scheduled_datasets', None)
-        not_scheduled_streams = set()
-        not_scheduled_datasets_without_streams = []
-        if not_scheduled_datasets:
-            print(f"not scheduled datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
-            for dataset in not_scheduled_datasets:
-                if dataset.stream:
-                    not_scheduled_streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
-                else:
-                    not_scheduled_datasets_without_streams.append(dataset)
-        if not_scheduled_datasets_without_streams:
-            print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, not_scheduled_datasets_without_streams)))}")
-            ...
-
-        most_frequent_datasets = kwargs.get('most_frequent_datasets', [])
-        kwargs.pop('most_frequent_datasets', None)
-        if most_frequent_datasets:
-            print(f"most frequent datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
-        streams = set()
-        most_frequent_datasets_without_streams = []
-        if most_frequent_datasets:
-            for dataset in most_frequent_datasets:
-                if dataset.stream:
-                    streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
-                else:
-                    most_frequent_datasets_without_streams.append(dataset)
-        if most_frequent_datasets_without_streams:
-            print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
-            ...
-
-        condition = None
-
-        if streams:
-            condition = ' OR '.join(streams)
-            print(f"condition: {condition}")
-
-        if not_scheduled_streams:
-            if condition:
-                condition = f"({condition}) AND ({' AND '.join(not_scheduled_streams)})"
-            else:
-                condition = ' AND '.join(not_scheduled_streams)
-            print(f"condition: {condition}")
-
         return DAGTask(
             name=task_id, 
             definition=f"select '{task_id}'", 
             comment=comment, 
-            condition=condition,
+            **kwargs
+        )
+
+    def skip_or_start_op(self, task_id: str, upstream_task: DAGTask, **kwargs) -> Optional[DAGTask]:
+        """Overrides IStarlakeJob.skip_or_start_op()
+        Generate a Snowflake task that will skip or start the pipeline.
+
+        Args:
+            task_id (str): The required task id.
+            events (Optional[List[StarlakeDataset]]): The optional events to materialize.
+
+        Returns:
+            Optional[DAGTask]: The optional Snowflake task.
+        """
+        comment = kwargs.get('comment', None)
+        if not comment:
+            comment = f"skip or start task {task_id}"
+        kwargs.pop('comment', None)
+
+        def fun(session: Session, upstream_task_id: str) -> None:
+            from snowflake.core.task.context import TaskContext
+            context = TaskContext(session)
+            return_value: str = context.get_predecessor_return_value(upstream_task_id)
+            if return_value is None:
+                print(f"upstream task {upstream_task_id} did not return any value")
+                failed = True
+            else:
+                print(f"upstream task {upstream_task_id} returned {return_value}")
+                try:
+                    import ast
+                    parsed_return_value = ast.literal_eval(return_value)
+                    if isinstance(parsed_return_value, bool):
+                        failed = not parsed_return_value
+                    elif isinstance(parsed_return_value, int):
+                        failed = parsed_return_value
+                    elif isinstance(parsed_return_value, str) and parsed_return_value:
+                        failed = int(parsed_return_value.strip())
+                    else:
+                        failed = True
+                        print(f"Parsed return value {parsed_return_value}[{type(parsed_return_value)}] is not a valid bool, integer or is empty.")
+                except (ValueError, SyntaxError) as e:
+                    failed = True
+                    print(f"Error parsing return value: {e}")
+            if failed:
+                raise ValueError(f"upstream task {upstream_task_id} failed")
+
+        return DAGTask(
+            name=task_id, 
+            definition=partial(
+                fun,
+                upstream_task_id=upstream_task.name,
+            ), 
+            comment=comment, 
             **kwargs
         )
 

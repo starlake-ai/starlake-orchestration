@@ -511,8 +511,12 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         kwargs.pop('task_id', None)
         return self.orchestration.sl_create_task(
             task_id, 
-            self.job.dummy_op(
+            self.job.start_op(
                 task_id=task_id, 
+                scheduled = self.cron is not None,
+                not_scheduled_datasets=self.not_scheduled_datasets, 
+                least_frequent_datasets = self.least_frequent_datasets, 
+                most_frequent_datasets=self.most_frequent_datasets, 
                 **kwargs
             ),
             self
@@ -639,7 +643,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         kwargs.pop('task_id', None)
         end = self.orchestration.sl_create_task(
             task_id, 
-            self.job.dummy_op(
+            self.job.end_op(
                 task_id=task_id, 
                 events=events, 
                 **kwargs
