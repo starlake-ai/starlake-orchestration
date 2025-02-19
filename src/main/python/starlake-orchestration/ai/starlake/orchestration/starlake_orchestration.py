@@ -19,8 +19,6 @@ U = TypeVar("U") # type of DAG
 
 E = TypeVar("E") # type of event
 
-J = TypeVar("J", bound=IStarlakeJob) # type of job
-
 T = TypeVar("T") # type of task
 
 GT = TypeVar("GT") # type of task group
@@ -260,9 +258,9 @@ class AbstractTaskGroup(Generic[GT], TaskGroupContext):
         else:
             return level
 
-class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
+class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent[E]):
     """Abstract interface to define a pipeline."""
-    def __init__(self, job: J, orchestration_cls: "AbstractOrchestration", dag: Optional[U] = None, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[U, T, GT, E]] = None, **kwargs) -> None:
+    def __init__(self, job: IStarlakeJob[T, E], orchestration_cls: "AbstractOrchestration", dag: Optional[U] = None, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[U, T, GT, E]] = None, **kwargs) -> None:
         if not schedule and not dependencies:
             raise ValueError("Either a schedule or dependencies must be provided")
         pipeline_id = job.caller_filename.replace(".py", "").replace(".pyc", "").lower()
@@ -347,7 +345,7 @@ class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
         return False
 
     @property
-    def orchestration(self) -> Optional[AbstractOrchestration[J, T, GT, E]]:
+    def orchestration(self) -> Optional[AbstractOrchestration[U, T, GT, E]]:
         return self._orchestration
 
     @property
@@ -360,7 +358,7 @@ class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
 
     @final
     @property
-    def job(self) -> J:
+    def job(self) -> IStarlakeJob[T, E]:
         return self._job
 
     @final
@@ -660,7 +658,7 @@ class AbstractPipeline(Generic[U, E], AbstractTaskGroup[U], AbstractEvent[E]):
         return self.print_pipeline()
 
 class AbstractOrchestration(Generic[U, T, GT, E]):
-    def __init__(self, job: J, **kwargs) -> None:
+    def __init__(self, job: IStarlakeJob[T, E], **kwargs) -> None:
         super().__init__(**kwargs)
         self._job = job
         self._pipelines = []
@@ -677,25 +675,25 @@ class AbstractOrchestration(Generic[U, T, GT, E]):
         return None
 
     @property
-    def job(self) -> J:
+    def job(self) -> IStarlakeJob[T, E]:
         return self._job
 
     @property
-    def pipelines(self) -> List[AbstractPipeline[U, E]]:
+    def pipelines(self) -> List[AbstractPipeline[U, T, GT, E]]:
         return self._pipelines
 
     @abstractmethod
-    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[U, E]:
+    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[U, T, GT, E]:
         """Create a pipeline."""
         pass
 
-    def sl_create_task(self, task_id: str, task: Optional[Union[T, GT]], pipeline: AbstractPipeline[U, E]) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+    def sl_create_task(self, task_id: str, task: Optional[Union[T, GT]], pipeline: AbstractPipeline[U, T, GT, E]) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
         if task is None:
             return None
         return AbstractTask(task_id, task)
 
     @abstractmethod
-    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[U, E], **kwargs) -> AbstractTaskGroup[GT]:
+    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[U, T, GT, E], **kwargs) -> AbstractTaskGroup[GT]:
         pass
 
     @classmethod
@@ -758,7 +756,7 @@ class OrchestrationFactory:
         print(f"Registered orchestration {orchestration_class} for orchestrator {orchestrator}")
 
     @classmethod
-    def create_orchestration(cls, job: J, **kwargs) -> AbstractOrchestration[U, T, GT, E]:
+    def create_orchestration(cls, job: IStarlakeJob[T, E], **kwargs) -> AbstractOrchestration[U, T, GT, E]:
         if not cls._initialized:
             cls.register_orchestrations_from_package()
             cls._initialized = True

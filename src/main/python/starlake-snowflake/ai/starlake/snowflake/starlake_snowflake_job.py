@@ -19,7 +19,7 @@ class SnowflakeEvent(AbstractEvent[StarlakeDataset]):
     def to_event(cls, dataset: StarlakeDataset, source: Optional[str] = None) -> StarlakeDataset:
         return dataset
 
-class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, str], StarlakeOptions, SnowflakeEvent):
+class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptions, SnowflakeEvent):
     def __init__(self, filename: str, module_name: str, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None]=None, options: dict=None, **kwargs) -> None:
         super().__init__(filename=filename, module_name=module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
         self._stage_location = kwargs.get('stage_location', __class__.get_context_var(var_name='stage_location', options=self.options)) #stage_location is required
