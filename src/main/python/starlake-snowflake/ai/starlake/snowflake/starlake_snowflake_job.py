@@ -89,7 +89,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         definition=f"select '{task_id}'"
 
         if not scheduled: # if the DAG is not scheduled we will rely on streams to trigger the underlying dag and check if the scheduled datasets without streams have data using CHANGES
-            changes = dict() # tracks the datasets that have to be checked
+            changes = dict() # tracks the datasets whose changes have to be checked
 
             if least_frequent_datasets:
                 print(f"least frequent datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
