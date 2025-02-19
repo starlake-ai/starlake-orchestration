@@ -140,6 +140,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     from datetime import datetime
                     for dataset, cron_expr in changes.items():
                         # enabling change tracking for the dataset
+                        print(f"Enabling change tracking for dataset {dataset}")
                         session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect()
                         try:
                             croniter(cron_expr)
@@ -154,7 +155,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 sl_end_date = previous
                             sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
                             format = '%Y-%m-%d %H:%M:%S%z'
-                            df = session.sql(query=f"SELECT * FROM {dataset} WHERE CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')")
+                            change = f"SELECT * FROM {dataset} WHERE CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')"
+                            print(f"Checking changes for dataset {dataset} from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)} -> {change}")
+                            df = session.sql(query=change)
                             rows = df.collect()
                             if rows.__len__() == 0:
                                 raise ValueError(f"Dataset {dataset} has no changes from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
