@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ai.starlake.job import StarlakeOrchestrator
 
-from ai.starlake.dataset import str
+from ai.starlake.dataset import StarlakeDataset
 from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, StarlakeDependencies, AbstractPipeline, AbstractTaskGroup, AbstractTask, AbstractDependency
 
 from ai.starlake.snowflake.starlake_snowflake_job import StarlakeSnowflakeJob
@@ -11,8 +11,8 @@ from snowflake.core.task.dagv1 import DAG, DAGTask, _dag_context_stack
 
 from typing import Any, List, Optional, Union
 
-class SnowflakePipeline(AbstractPipeline[DAG, str], str):
-    def __init__(self, job: StarlakeSnowflakeJob, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[DAG, DAGTask, List[DAGTask], str]] = None, **kwargs) -> None:
+class SnowflakePipeline(AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset], StarlakeDataset):
+    def __init__(self, job: StarlakeSnowflakeJob, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[DAG, DAGTask, List[DAGTask], StarlakeDataset]] = None, **kwargs) -> None:
         super().__init__(job, orchestration_cls=SnowflakeOrchestration, dag=None, schedule=schedule, dependencies=dependencies, orchestration=orchestration, **kwargs)
 
         snowflake_schedule: Union[Cron, None] = None
@@ -30,6 +30,7 @@ class SnowflakePipeline(AbstractPipeline[DAG, str], str):
             stage_location=job.stage_location,
             packages=job.packages,
         )
+
     def __enter__(self):
         _dag_context_stack.append(self.dag)
         return super().__enter__()
@@ -48,8 +49,11 @@ class SnowflakePipeline(AbstractPipeline[DAG, str], str):
             def update_dependencies(upstream_dependencies, root_key):
                 root = group.get_dependency(root_key)
                 temp_root_node = get_node(root)
-                if isinstance(temp_root_node, List[DAGTask]):
-                    root_node = temp_root_node[-1] # get the last task
+                if isinstance(temp_root_node, list):
+                    if temp_root_node.__len__() >= 1:
+                        root_node = temp_root_node[-1] # get the last task
+                    else:
+                        root_node = temp_root_node
                 else:
                     root_node = temp_root_node
                 if isinstance(root, AbstractTaskGroup) and root_key != group.group_id:
@@ -60,11 +64,15 @@ class SnowflakePipeline(AbstractPipeline[DAG, str], str):
                         temp_downstream_node = get_node(downstream)
                         if isinstance(downstream, AbstractTaskGroup) and key != group.group_id:
                             update_group_dependencies(downstream)
-                        if isinstance(temp_downstream_node, List[DAGTask]):
-                            downstream_node = temp_downstream_node[0] # get the first task
+                        if isinstance(temp_downstream_node, list):
+                            if temp_downstream_node.__len__() >= 1:
+                                downstream_node = temp_downstream_node[0] # get the first task
+                            else:
+                                downstream_node = None
                         else:
                             downstream_node = temp_downstream_node
-                        downstream_node.add_predecessors(root_node)
+                        if downstream_node is not None and root_node is not None:
+                            downstream_node.add_predecessors(root_node)
                         update_dependencies(upstream_dependencies, key)
 
             upstream_dependencies = group.upstream_dependencies
@@ -90,7 +98,7 @@ class SnowflakeTaskGroup(AbstractTaskGroup[List[DAGTask]]):
     def __exit__(self, exc_type, exc_value, traceback):
         return super().__exit__(exc_type, exc_value, traceback)
 
-class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], str]):
+class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], StarlakeDataset]):
     def __init__(self, job: StarlakeSnowflakeJob, **kwargs) -> None:
         """Overrides AbstractOrchestration.__init__()
         Args:
@@ -102,7 +110,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
     def sl_orchestrator(cls) -> str:
         return StarlakeOrchestrator.SNOWFLAKE
 
-    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[DAG, str]:
+    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset]:
         """Create the Starlake pipeline to orchestrate.
 
         Args:
@@ -110,7 +118,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
             dependencies (Optional[StarlakeDependencies]): The optional dependencies
         
         Returns:
-            AbstractPipeline[DAG, str]: The pipeline to orchestrate.
+            AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset]: The pipeline to orchestrate.
         """
         return SnowflakePipeline(
             self.job, 
@@ -119,7 +127,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
             self
         )
 
-    def sl_create_task(self, task_id: str, task: Optional[Union[DAGTask, List[DAGTask]]], pipeline: AbstractPipeline[DAG, str]) -> Optional[Union[AbstractTask[DAGTask], AbstractTaskGroup[List[DAGTask]]]]:
+    def sl_create_task(self, task_id: str, task: Optional[Union[DAGTask, List[DAGTask]]], pipeline: AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset]) -> Optional[Union[AbstractTask[DAGTask], AbstractTaskGroup[List[DAGTask]]]]:
         if task is None:
             return None
 
@@ -161,10 +169,10 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
             return task_group
 
         else:
-            task.dag = pipeline.dag
+            task._dag = pipeline.dag
             return AbstractTask(task_id, task)
 
-    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, str], **kwargs) -> AbstractTaskGroup[List[DAGTask]]:
+    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset], **kwargs) -> AbstractTaskGroup[List[DAGTask]]:
         return SnowflakeTaskGroup(
             group_id, 
             group=[],
