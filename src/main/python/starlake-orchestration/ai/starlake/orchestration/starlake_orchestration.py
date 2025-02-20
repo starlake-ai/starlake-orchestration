@@ -221,7 +221,7 @@ class TaskGroupContext(AbstractDependency):
         return [self.get_dependency(id) for id in self.leaves_keys]
 
     def __repr__(self):
-        return f"TaskGroup(id={self.group_id}, parent={self.parent.id if self.parent else ''}, dependencies=[{','.join([dep.id for dep in self.dependencies])}], roots=[{','.join([key for key in self.roots_keys])}], leaves=[{','.join([key for key in self.get_leaves_keys()])}])"
+        return f"TaskGroup(id={self.group_id}, parent={self.parent.id if self.parent else ''}, dependencies=[{','.join([dep.id for dep in self.dependencies])}], roots=[{','.join([key for key in self.roots_keys])}], leaves=[{','.join([key for key in self.leaves_keys])}])"
 
 class AbstractTaskGroup(Generic[GT], TaskGroupContext):
     """Abstract interface to define a task group."""
