@@ -18,63 +18,92 @@ connection_parameters = {
 
 
 
-expectations = {
+expectation_items = {
   "kpi.order_items_analysis" : [ {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   } ],
   "kpi.order_summary" : [ {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   } ],
   "kpi.product_summary" : [ {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   } ],
   "kpi.revenue_summary" : [ {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
+    "name" : "is_col_value_not_unique",
+    "params" : "id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT , count(*) as cnt FROM sl_this GROUP BY ) AS COL_COUNT",
     "failOnError" : "no"
   }, {
-    "expect" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
     "failOnError" : "no"
   } ]
 }
-
-
-
 
 statements = {
   "kpi.order_items_analysis" : {
@@ -119,7 +148,7 @@ def sl_plit_domain_task(task: str) -> Tuple[str, str]:
    return domain, task
 
 
-def sl_log_expectation(session: Session, task: str, success: bool, sql: str, count: int, exception: str, ts: datetime):
+def sl_log_expectation(session: Session, task: str, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime):
    try:
       domain, task = sl_plit_domain_task(task)
       sql = expectations.get("mainSqlIfExists", [])[0]
@@ -244,23 +273,25 @@ def sl_run_task(session: Session, task: str):
 def sl_run_expectations(session: Session, task: str):
    for expectation in expectations.get(task, []):
       print(expectation)
-      expect = expectation.get("expect")
+      name = expectation.get("name")
+      params = expectation.get("params")
+      query = expectation.get("query")
       failOnError = expectation.get("failOnError")
       count = 0
       try:
-         df: DataFrame = session.sql(expect)
+         df: DataFrame = session.sql(query)
          rows: List[Row] = df.collect()
          if rows.__len__ != 1:
-            raise Exception(f'Expectation failed for {task}: {expect}. Expected 1 row but got {rows.__len__()}')
+            raise Exception(f'Expectation failed for {task}: {query}. Expected 1 row but got {rows.__len__()}')
          count = rows.collect()[0]("cnt")
          #  log expectations as audit in expectation table here
          if count != 0:
-            raise Exception(f'Expectation failed for {task}: {expect}. Expected count to be equal to 0 but got {count}')
-         sl_log_expectation(session, task, True, expect, count, "", datetime.datetime.now())
+            raise Exception(f'Expectation failed for {task}: {query}. Expected count to be equal to 0 but got {count}')
+         sl_log_expectation(session, task, True, name, params, query, count, "", datetime.datetime.now())
       except Exception as e:
          error_message = str(e)
          print(error_message)
-         sl_log_expectation(session, task, False, expect, count, error_message, datetime.datetime.now())
+         sl_log_expectation(session, task, False, name, params, query, count, error_message, datetime.datetime.now())
          if failOnError == "yes":
             raise e
 
