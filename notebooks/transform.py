@@ -149,11 +149,13 @@ def sl_plit_domain_task(task: str) -> Tuple[str, str]:
 
 
 def sl_log_expectation(session: Session, task: str, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime):
+   from snowflake.core.task.context import TaskContext
    try:
+      jobid = TaskContext(session).get_current_task_name()
       domain, task = sl_plit_domain_task(task)
       sql = expectations.get("mainSqlIfExists", [])[0]
       formatted_sql =sql.format(
-         jobid = "???",
+         jobid = jobid, # should be the full name of the snowflake task including the id of the dag
          database = "",
          domain = domain,
          schema = task,
@@ -170,11 +172,13 @@ def sl_log_expectation(session: Session, task: str, success: bool, name: str, pa
       error_message = str(e)
       print(error_message)
 def sl_log_audit(session: Session, task: str, success: bool, duration: int, message: str, ts: datetime):
+   from snowflake.core.task.context import TaskContext
    try:
+      jobid = TaskContext(session).get_current_task_name()
       domain, task = sl_plit_domain_task(task)
       sql = audit.get("mainSqlIfExists", [])[0]
       formatted_sql =sql.format(
-         jobid = "???",
+         jobid = jobid, # should be the full name of the snowflake task including the id of the dag
          paths = task,
          domain = domain,
          schema = task,
