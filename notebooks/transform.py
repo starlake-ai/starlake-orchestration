@@ -4,6 +4,7 @@ from snowflake.snowpark.row import Row
 import pandas as pd
 from typing import List, Optional, Tuple, Union
 import os
+import datetime
 
 connection_parameters = {
    "account": os.environ['SNOWFLAKE_ACCOUNT'],
@@ -73,12 +74,6 @@ expectations = {
 }
 
 
-audit = {
-  "preActions" : [ "USE SCHEMA audit" ],
-  "mainSqlIfNotExists" : [ "\n          SELECT\n            '{{jobid}}' AS JOBID,\n            '{{paths}}' AS PATHS,\n            '{{domain}}' AS DOMAIN,\n            '{{schema}}' AS SCHEMA,\n            {{success}} AS SUCCESS,\n            {{count}} AS COUNT,\n            {{countAccepted}} AS COUNTACCEPTED,\n            {{countRejected}} AS COUNTREJECTED,\n            TO_TIMESTAMP('{{timestamp}}') AS TIMESTAMP,\n            {{duration}} AS DURATION,\n            '{{message}}' AS MESSAGE,\n            '{{step}}' AS STEP,\n            '{{database}}' AS DATABASE,\n            '{{tenant}}' AS TENANT\n        " ],
-  "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE audit.audit (\n                              JOBID VARCHAR NOT NULL,\n                              PATHS TEXT NOT NULL,\n                              DOMAIN VARCHAR NOT NULL,\n                              SCHEMA VARCHAR NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION BIGINT NOT NULL,\n                              MESSAGE VARCHAR NOT NULL,\n                              STEP VARCHAR NOT NULL,\n                              DATABASE VARCHAR,\n                              TENANT VARCHAR\n                             )\n    " ],
-  "mainSqlIfExists" : [ "\n          SELECT\n            '{{jobid}}' AS JOBID,\n            '{{paths}}' AS PATHS,\n            '{{domain}}' AS DOMAIN,\n            '{{schema}}' AS SCHEMA,\n            {{success}} AS SUCCESS,\n            {{count}} AS COUNT,\n            {{countAccepted}} AS COUNTACCEPTED,\n            {{countRejected}} AS COUNTREJECTED,\n            TO_TIMESTAMP('{{timestamp}}') AS TIMESTAMP,\n            {{duration}} AS DURATION,\n            '{{message}}' AS MESSAGE,\n            '{{step}}' AS STEP,\n            '{{database}}' AS DATABASE,\n            '{{tenant}}' AS TENANT\n        " ]
-}
 
 
 statements = {
@@ -104,27 +99,99 @@ statements = {
   }
 }
 
+
+audit = {
+  "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID STRING NOT NULL,\n                              PATHS STRING NOT NULL,\n                              DOMAIN STRING NOT NULL,\n                              SCHEMA STRING NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION LONG NOT NULL,\n                              MESSAGE STRING NOT NULL,\n                              STEP STRING NOT NULL,\n                              DATABASE STRING,\n                              TENANT STRING\n                             ) USING delta\n    " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{paths}' AS PATHS,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            {success} AS SUCCESS,\n            {count} AS COUNT,\n            {countAccepted} AS COUNTACCEPTED,\n            {countRejected} AS COUNTREJECTED,\n            TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            {duration} AS DURATION,\n            '{message}' AS MESSAGE,\n            '{step}' AS STEP,\n            '{database}' AS DATABASE,\n            '{tenant}' AS TENANT\n\n        " ],
+  "connectionType" : [ "SNOWFLAKE_LOG" ]
+}
+
 expectations = {
-  "createSchemaSql" : [ "CREATE TABLE IF NOT EXISTS audit.expectations (\n                            JOBID VARCHAR NOT NULL,\n                            DATABASE VARCHAR,\n                            DOMAIN VARCHAR NOT NULL,\n                            SCHEMA VARCHAR NOT NULL,\n                            TIMESTAMP TIMESTAMP NOT NULL,\n                            NAME VARCHAR NOT NULL,\n                            PARAMS VARCHAR NOT NULL,\n                            SQL VARCHAR NOT NULL,\n                            COUNT BIGINT NOT NULL,\n                            EXCEPTION VARCHAR NOT NULL,\n                            SUCCESS BOOLEAN NOT NULL\n                          )\n        " ],
-  "mainSqlIfExists" : [ "\n          SELECT\n            '{{jobid}}' AS JOBID,\n            '{{database}}' AS DATABASE,\n            '{{domain}}' AS DOMAIN,\n            '{{schema}}' AS SCHEMA,\n            TO_TIMESTAMP('{{timestamp}}') AS TIMESTAMP,\n            '{{name}}' AS NAME,\n            '{{params}}' AS PARAMS,\n            '{{sql}}' AS SQL,\n            {{count}} AS COUNT,\n            '{{exception}}' AS EXCEPTION,\n            {{success}} AS SUCCESS\n        " ]
+  "createSchemaSql" : [ "CREATE TABLE IF NOT EXISTS audit.expectations (\n                            JOBID STRING NOT NULL,\n                            DATABASE STRING,\n                            DOMAIN STRING NOT NULL,\n                            SCHEMA STRING NOT NULL,\n                            TIMESTAMP TIMESTAMP NOT NULL,\n                            NAME STRING NOT NULL,\n                            PARAMS STRING NOT NULL,\n                            SQL STRING NOT NULL,\n                            COUNT BIGINT NOT NULL,\n                            EXCEPTION STRING NOT NULL,\n                            SUCCESS BOOLEAN NOT NULL\n                          ) USING {writeFormat}\n        " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{database}' AS DATABASE,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            '{name}' AS NAME,\n            '{params}' AS PARAMS,\n            '{sql}' AS SQL,\n            {count} AS COUNT,\n            '{exception}' AS EXCEPTION,\n            {success} AS SUCCESS\n        " ],
+  "connectionType" : [ "SNOWFLAKE_LOG" ]
 }
 
 acl = {}
 
+def sl_plit_domain_task(task: str) -> Tuple[str, str]:
+   domain, task = task.split('.')
+   return domain, task
+
+
+def sl_log_expectation(session: Session, task: str, success: bool, sql: str, count: int, exception: str, ts: datetime):
+   try:
+      domain, task = sl_plit_domain_task(task)
+      sql = expectations.get("mainSqlIfExists", [])[0]
+      formatted_sql =sql.format(
+         jobid = "???",
+         database = "",
+         domain = domain,
+         schema = task,
+         count = count,
+         exception = exception,
+         timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+         success = str(success),
+         name = "???",
+         params = "???",
+         sql = sql
+      )
+      session.sql(formatted_sql)
+   except Exception as e:
+      error_message = str(e)
+      print(error_message)
+def sl_log_audit(session: Session, task: str, success: bool, duration: int, message: str, ts: datetime):
+   try:
+      domain, task = sl_plit_domain_task(task)
+      sql = audit.get("mainSqlIfExists", [])[0]
+      formatted_sql =sql.format(
+         jobid = "???",
+         paths = task,
+         domain = domain,
+         schema = task,
+         success = str(success),
+         count = "-1",
+         countAccepted = "-1",
+         countRejected = "-1",
+         timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+         duration = str(duration),
+         message = message,
+         step = "TRANSFORM",
+         database = "",
+         tenant = ""
+      )
+      session.sql(formatted_sql)
+   except Exception as e:
+      error_message = str(e)
+      print(error_message)
+
+
 def sl_main(session: Session, task: str): 
-   for statement in statements.get(task, {}).get("preActions", []):
-      session.sql(statement)
-   sl_table_exists = sl_table_exists(session, task)
-   if  not sl_table_exists:
-      print(f'{task} table does not exist')
-      sqls: List[str] = statements.get(task, {}).get('mainSqlIfNotExists', [])
-      for sql in sqls:
-            session.sql(sql)
-   else:
-      print(f'{task} table exists')
-      sqls: List[str] = statements.get(task, {}).get('mainSqlIfExists', [])
-      for sql in sqls:
-            session.sql(sql)
+   start = datetime.datetime.now()
+   try:
+      for statement in statements.get(task, {}).get("preActions", []):
+         session.sql(statement)
+      sl_table_exists = sl_table_exists(session, task)
+      if  not sl_table_exists:
+         print(f'{task} table does not exist')
+         sqls: List[str] = statements.get(task, {}).get('mainSqlIfNotExists', [])
+         for sql in sqls:
+               session.sql(sql)
+      else:
+         print(f'{task} table exists')
+         sqls: List[str] = statements.get(task, {}).get('mainSqlIfExists', [])
+         for sql in sqls:
+               session.sql(sql)
+      end = datetime.datetime.now()
+      duration = (end - start).total_seconds()
+      sl_log_audit(session, task, True, duration, "success", end)
+   except Exception as e:
+      end = datetime.datetime.now()
+      duration = (end - start).total_seconds()
+      error_message = str(e)
+      print(error_message)
+      sl_log_audit(session, task, True, duration, error_message, end)
+      raise e
 
 def sl_table_exists(session: Session, table_name: str) -> bool:
     df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{table_name}'") 
@@ -186,12 +253,14 @@ def sl_run_expectations(session: Session, task: str):
          if rows.__len__ != 1:
             raise Exception(f'Expectation failed for {task}: {expect}. Expected 1 row but got {rows.__len__()}')
          count = rows.collect()[0]("cnt")
-         # todo log expectations in expectation table here
+         #  log expectations as audit in expectation table here
          if count != 0:
             raise Exception(f'Expectation failed for {task}: {expect}. Expected count to be equal to 0 but got {count}')
+         sl_log_expectation(session, task, True, expect, count, "", datetime.datetime.now())
       except Exception as e:
          error_message = str(e)
          print(error_message)
+         sl_log_expectation(session, task, False, expect, count, error_message, datetime.datetime.now())
          if failOnError == "yes":
             raise e
 
