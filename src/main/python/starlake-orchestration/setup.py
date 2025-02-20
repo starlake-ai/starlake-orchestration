@@ -19,7 +19,7 @@ setup(name='starlake-orchestration',
       packages=find_packages(include=['ai', 'ai.*']),
       extras_require={
         "airflow": ["starlake-airflow>=0.2.5"],
-        "dagster": ["starlake-dagster>=0.2.4"],
+        "dagster": ["starlake-dagster>=0.2.5"],
         "snowflake": ["starlake-snowflake>=0.1.0"],
         "shell": [],
         "gcp": [],

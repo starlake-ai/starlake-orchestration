@@ -22,42 +22,38 @@ import warnings
 warnings.simplefilter("default", DeprecationWarning)
 
 class StarlakeDependency():
-    def __init__(self, sink: str, dependency_type: StarlakeDependencyType, cron: Optional[str]= None, dependencies: List[StarlakeDependency]= [], stream: Optional[str]= None, **kwargs):
+    def __init__(self, name: str, dependency_type: StarlakeDependencyType, cron: Optional[str]= None, dependencies: List[StarlakeDependency]= [], stream: Optional[str]= None, **kwargs):
         """Initializes a new StarlakeDependency instance.
 
         Args:
-            sink (str): The required dependency sink.
+            name (str): The required dependency name.
             dependency_type (StarlakeDependencyType): The required dependency dependency_type.
             cron (str): The optional cron.
             dependencies (List[StarlakeDependency]): The optional dependencies.
             stream (str): The optional stream.
         """
-        self._sink = sink
-        domain_table = sink.split(".")
+        self._name = name
+        domain_table = name.split(".")
         self._domain = domain_table[0]
         self._table = domain_table[-1]
+        self._uri = sanitize_id(name).lower()
         self._dependency_type = dependency_type
         if cron is not None:
             if cron.lower().strip() == 'none':
                 cron = None
             elif not is_valid_cron(cron):
-                raise ValueError(f"Invalid cron expression: {cron} for dependency {sink}")
+                raise ValueError(f"Invalid cron expression: {cron} for dependency {name}")
         self._cron = cron
         self._dependencies = dependencies
         self._stream = stream
 
     @property
     def name(self) -> str:
-        warnings.warn("name is deprecated, use sink instead", DeprecationWarning)
-        return self.sink
-
-    @property
-    def sink(self) -> str:
-        return self._sink
+        return self._name
 
     @property
     def uri(self) -> str:
-        return sanitize_id(self.sink).lower()
+        return self._uri
 
     @property
     def domain(self) -> str:
@@ -104,12 +100,10 @@ class StarlakeDependencies():
 
             cron: Optional[str] = data.get('cron', None)
 
-            sink = data.get('sink', name)
-
             stream: Optional[str] = data.get('stream', None)
 
             return StarlakeDependency(
-                sink=sink,
+                name=name,
                 dependency_type=dependency_type, 
                 cron=cron, 
                 dependencies=[generate_dependency(dependency) for dependency in task.get('children', [])],
@@ -129,12 +123,12 @@ class StarlakeDependencies():
         def load_task_dependencies(task: StarlakeDependency):
             if len(task.dependencies) > 0:
                 for dependency in task.dependencies:
-                    all_dependencies.add(dependency.sink)
+                    all_dependencies.add(dependency.name)
                     load_task_dependencies(dependency)
 
         for task in self.dependencies:
-            sink = task.sink
-            first_level_tasks.add(sink)
+            name = task.name
+            first_level_tasks.add(name)
             filtered_datasets.add(task.uri)
             load_task_dependencies(task)
 
@@ -168,8 +162,9 @@ class StarlakeDependencies():
             def load_datasets(task: StarlakeDependency):
                 if len(task.dependencies) > 0:
                     for dependency in task.dependencies:
-                        sink = dependency.sink
+                        name = dependency.name
                         uri = dependency.uri
+                        stream = dependency.stream
                         if uri not in uris and uri not in temp_filtered_datasets:
                             kw = dict()
                             if dependency.cron is not None:
@@ -178,7 +173,9 @@ class StarlakeDependencies():
                                 kw['sl_schedule_parameter_name'] = sl_schedule_parameter_name
                             if sl_schedule_format is not None:
                                 kw['sl_schedule_format'] = sl_schedule_format
-                            dataset = StarlakeDataset(sink, **kw)
+                            if stream is not None:
+                                kw['stream'] = stream
+                            dataset = StarlakeDataset(name=name, **kw)
                             uris.add(uri)
                             datasets.append(dataset)
 

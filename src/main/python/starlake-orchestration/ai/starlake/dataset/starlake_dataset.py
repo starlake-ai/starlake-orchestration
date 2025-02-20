@@ -7,15 +7,15 @@ from ai.starlake.common import asQueryParameters, sanitize_id, sl_schedule, sl_s
 from typing import Generic, List, Optional, TypeVar
 
 class StarlakeDataset():
-    def __init__(self, sink: str, parameters: Optional[dict] = None, cron: Optional[str] = None, **kwargs):
+    def __init__(self, name: str, parameters: Optional[dict] = None, cron: Optional[str] = None, stream: Optional[str] = None, **kwargs):
         """Initializes a new StarlakeDataset instance.
 
         Args:
-            sink (str): The required dataset sink.
+            name (str): The required dataset name.
             parameters (dict, optional): The optional dataset parameters. Defaults to None.
         """
-        self._sink = sink
-        domain_table = sink.split(".")
+        self._name = name
+        domain_table = name.split(".")
         self._domain = domain_table[0]
         self._table = domain_table[-1]
         if cron is None:
@@ -38,14 +38,15 @@ class StarlakeDataset():
             schedule_parameter_value = sl_schedule(cron=cron, format=kwargs.get('sl_schedule_format', sl_schedule_format))
             temp_parameters[schedule_parameter_name] = schedule_parameter_value
         self._cron = cron
-        self._uri = sanitize_id(sink).lower()
+        self._uri = sanitize_id(name).lower()
         self._queryParameters = asQueryParameters(temp_parameters)
         self._parameters = parameters
         self._url = self.uri + self.queryParameters
+        self._stream = stream
 
     @property
-    def sink(self) -> str:
-        return self._sink
+    def name(self) -> str:
+        return self._name
 
     @property
     def cron(self) -> Optional[str]:
@@ -75,8 +76,12 @@ class StarlakeDataset():
     def table(self) -> str:
         return self._table
 
+    @property
+    def stream(self) -> Optional[str]:
+        return self._stream
+
     def refresh(self) -> StarlakeDataset:
-        return StarlakeDataset(self.sink, self.parameters, self.cron)
+        return StarlakeDataset(self.name, self.parameters, self.cron, self.stream)
 
     @staticmethod
     def refresh_datasets(datasets: Optional[List[StarlakeDataset]]) -> Optional[List[StarlakeDataset]]:
