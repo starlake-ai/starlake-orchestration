@@ -64,14 +64,13 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
         transform_options = pipeline.sl_transform_options(cron_expr)
 
         # create a task
-        def create_task(task_id: str, task_name: str, task_type: StarlakeDependencyType, task_sink: Optional[str] = None) -> Union[AbstractTask, AbstractTaskGroup]:
+        def create_task(task_id: str, task_name: str, task_type: StarlakeDependencyType) -> Union[AbstractTask, AbstractTaskGroup]:
             if (task_type == StarlakeDependencyType.TASK):
                 return pipeline.sl_transform(
                     task_id=task_id, 
                     transform_name=task_name,
                     transform_options=transform_options,
                     spark_config=pipeline.sl_spark_config(task_name.lower()),
-                    sink=task_sink,
                     params={'cron':cron, 'cron_expr':cron_expr},
                 )
             else:
@@ -88,7 +87,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
         # build group of tasks recursively
         def generate_task_group_for_task(task: StarlakeDependency, parent_group_id: Optional[str] = None) -> Union[AbstractTaskGroup, AbstractTask]:
-            task_name = task.sink
+            task_name = task.name
             task_group_id = task.uri
             task_type = task.dependency_type
             task_id = f"{task_group_id}_{task_type}"
@@ -121,7 +120,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
         else:
             start >> all_transform_tasks
 
-        end = pipeline.end_task(output_datasets=[StarlakeDataset(uri=pipeline_id, cron=cron)])
+        end = pipeline.end_task(output_datasets=[StarlakeDataset(name=pipeline_id, cron=cron)])
 
         trigger_least_frequent_datasets = pipeline.trigger_least_frequent_datasets_task()
         if trigger_least_frequent_datasets:

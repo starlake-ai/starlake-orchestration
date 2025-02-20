@@ -22,7 +22,7 @@ from typing import Any, List, Optional, TypeVar, Union
 
 J = TypeVar("J", bound=StarlakeAirflowJob)
 
-class AirflowPipeline(AbstractPipeline[DAG, Dataset], AirflowDataset):
+class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], AirflowDataset):
     def __init__(self, job: J, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[DAG, BaseOperator, TaskGroup, Dataset]] = None, **kwargs) -> None:
         super().__init__(job, orchestration_cls=AirflowOrchestration, dag=None, schedule=schedule, dependencies=dependencies, orchestration=orchestration, **kwargs)
 
@@ -137,7 +137,7 @@ class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, D
     def sl_orchestrator(cls) -> str:
         return StarlakeOrchestrator.AIRFLOW
 
-    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[DAG, Dataset]:
+    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset]:
         """Create the Starlake pipeline to orchestrate.
 
         Args:
@@ -145,7 +145,7 @@ class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, D
             dependencies (Optional[StarlakeDependencies]): The optional dependencies
         
         Returns:
-            AbstractPipeline[DAG, Dataset]: The pipeline to orchestrate.
+            AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset]: The pipeline to orchestrate.
         """
         return AirflowPipeline(
             self.job, 
@@ -154,7 +154,7 @@ class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, D
             self
         )
 
-    def sl_create_task(self, task_id: str, task: Optional[Union[BaseOperator, TaskGroup]], pipeline: AbstractPipeline[DAG, Dataset]) -> Optional[Union[AbstractTask[BaseOperator], AbstractTaskGroup[TaskGroup]]]:
+    def sl_create_task(self, task_id: str, task: Optional[Union[BaseOperator, TaskGroup]], pipeline: AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset]) -> Optional[Union[AbstractTask[BaseOperator], AbstractTaskGroup[TaskGroup]]]:
         if task is None:
             return None
 
@@ -198,7 +198,7 @@ class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, D
         else:
             return AbstractTask(task_id, task)
 
-    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, Dataset], **kwargs) -> AbstractTaskGroup[TaskGroup]:
+    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], **kwargs) -> AbstractTaskGroup[TaskGroup]:
         return AirflowTaskGroup(
             group_id, 
             group=TaskGroup(group_id=group_id, **kwargs),
