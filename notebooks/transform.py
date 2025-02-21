@@ -130,16 +130,20 @@ statements = {
 
 
 audit = {
+  "domain" : [ "audit" ],
   "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID STRING NOT NULL,\n                              PATHS STRING NOT NULL,\n                              DOMAIN STRING NOT NULL,\n                              SCHEMA STRING NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION LONG NOT NULL,\n                              MESSAGE STRING NOT NULL,\n                              STEP STRING NOT NULL,\n                              DATABASE STRING,\n                              TENANT STRING\n                             ) USING delta\n    " ],
   "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{paths}' AS PATHS,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            {success} AS SUCCESS,\n            {count} AS COUNT,\n            {countAccepted} AS COUNTACCEPTED,\n            {countRejected} AS COUNTREJECTED,\n            TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            {duration} AS DURATION,\n            '{message}' AS MESSAGE,\n            '{step}' AS STEP,\n            '{database}' AS DATABASE,\n            '{tenant}' AS TENANT\n\n        " ],
   "connectionType" : [ "SNOWFLAKE_LOG" ]
 }
 
 expectations = {
+  "domain" : [ "audit" ],
   "createSchemaSql" : [ "CREATE TABLE IF NOT EXISTS audit.expectations (\n                            JOBID STRING NOT NULL,\n                            DATABASE STRING,\n                            DOMAIN STRING NOT NULL,\n                            SCHEMA STRING NOT NULL,\n                            TIMESTAMP TIMESTAMP NOT NULL,\n                            NAME STRING NOT NULL,\n                            PARAMS STRING NOT NULL,\n                            SQL STRING NOT NULL,\n                            COUNT BIGINT NOT NULL,\n                            EXCEPTION STRING NOT NULL,\n                            SUCCESS BOOLEAN NOT NULL\n                          ) USING {writeFormat}\n        " ],
   "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{database}' AS DATABASE,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            '{name}' AS NAME,\n            '{params}' AS PARAMS,\n            '{sql}' AS SQL,\n            {count} AS COUNT,\n            '{exception}' AS EXCEPTION,\n            {success} AS SUCCESS\n        " ],
   "connectionType" : [ "SNOWFLAKE_LOG" ]
 }
+
+
 
 acl = {}
 
@@ -153,8 +157,9 @@ def sl_log_expectation(session: Session, task: str, success: bool, name: str, pa
    try:
       jobid = TaskContext(session).get_current_task_name()
       domain, task = sl_plit_domain_task(task)
-      sql = expectations.get("mainSqlIfExists", [])[0]
-      formatted_sql =sql.format(
+      expectation_sql = expectations.get("mainSqlIfExists", [])[0]
+      expectation_domain = expectations.get("domain", [])[0]
+      formatted_sql = expectation_sql.format(
          jobid = jobid, # should be the full name of the snowflake task including the id of the dag
          database = "",
          domain = domain,
@@ -163,21 +168,24 @@ def sl_log_expectation(session: Session, task: str, success: bool, name: str, pa
          exception = exception,
          timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
          success = str(success),
-         name = "???",
-         params = "???",
+         name = name,
+         params = params,
          sql = sql
       )
-      session.sql(formatted_sql)
+      insert_sql = f"INSERT INTO {expectation_domain}.expectations {formatted_sql}"
+      session.sql(insert_sql)
    except Exception as e:
       error_message = str(e)
       print(error_message)
+
 def sl_log_audit(session: Session, task: str, success: bool, duration: int, message: str, ts: datetime):
    from snowflake.core.task.context import TaskContext
    try:
       jobid = TaskContext(session).get_current_task_name()
       domain, task = sl_plit_domain_task(task)
-      sql = audit.get("mainSqlIfExists", [])[0]
-      formatted_sql =sql.format(
+      audit_sql = audit.get("mainSqlIfExists", [])[0]
+      audit_domain = audit.get("domain", [])[0]
+      formatted_sql = audit_sql.format(
          jobid = jobid, # should be the full name of the snowflake task including the id of the dag
          paths = task,
          domain = domain,
@@ -193,18 +201,26 @@ def sl_log_audit(session: Session, task: str, success: bool, duration: int, mess
          database = "",
          tenant = ""
       )
-      session.sql(formatted_sql)
+      insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
+      session.sql(insert_sql)
    except Exception as e:
       error_message = str(e)
       print(error_message)
 
 
-def sl_main(session: Session, task: str): 
+
+def sl_run_task(session: Session, task: str): 
    start = datetime.datetime.now()
    try:
+      session.sql("BEGIN")
       for statement in statements.get(task, {}).get("preActions", []):
          session.sql(statement)
       sl_table_exists = sl_table_exists(session, task)
+
+      pre_sql = statements.get(task, {}).get('preSqls', [])
+      for sql in pre_sql:
+         session.sql(sql)
+
       if  not sl_table_exists:
          print(f'{task} table does not exist')
          sqls: List[str] = statements.get(task, {}).get('mainSqlIfNotExists', [])
@@ -212,13 +228,23 @@ def sl_main(session: Session, task: str):
                session.sql(sql)
       else:
          print(f'{task} table exists')
+         scd2_sql = statements.get(task, {}).get('addSCD2ColumnsSqls', [])
+         for sql in scd2_sql:
+            session.sql(sql)
          sqls: List[str] = statements.get(task, {}).get('mainSqlIfExists', [])
          for sql in sqls:
                session.sql(sql)
+
+      post_sql = statements.get(task, {}).get('postSqls', [])
+      for sql in post_sql:
+         session.sql(sql)
+      session.sql("END")
+      
       end = datetime.datetime.now()
       duration = (end - start).total_seconds()
       sl_log_audit(session, task, True, duration, "success", end)
    except Exception as e:
+      session.sql("ROLLBACK")
       end = datetime.datetime.now()
       duration = (end - start).total_seconds()
       error_message = str(e)
@@ -259,20 +285,6 @@ def sl_create_acl(session: Session, task: str):
 
 
 
-session = Session.builder.configs(connection_parameters).create()
-
-def sl_run_task(session: Session, task: str):
-   try:
-      session.sql("BEGIN")
-      sl_create_audit_table(session)
-      sl_main(session, task)
-      session.sql("END")
-   except Exception as e:
-      session.sql("ROLLBACK")
-      error_message = str(e)
-      print(error_message)
-      raise e
-
 
 def sl_run_expectations(session: Session, task: str):
    for expectation in expectations.get(task, []):
@@ -287,7 +299,7 @@ def sl_run_expectations(session: Session, task: str):
          rows: List[Row] = df.collect()
          if rows.__len__ != 1:
             raise Exception(f'Expectation failed for {task}: {query}. Expected 1 row but got {rows.__len__()}')
-         count = rows.collect()[0]("cnt")
+         count = rows.collect()[0][0]
          #  log expectations as audit in expectation table here
          if count != 0:
             raise Exception(f'Expectation failed for {task}: {query}. Expected count to be equal to 0 but got {count}')
@@ -300,10 +312,18 @@ def sl_run_expectations(session: Session, task: str):
             raise e
 
 
-def sl_main():
+
+def sl_main(session: Session):
    sl_create_audit_table(session)
    sl_create_expectations_table(session)
    for task in statements.keys():
       sl_run_task(session, task)
       sl_run_expectations(session, task)
 
+
+
+session = Session.builder.configs(connection_parameters).create()
+try:
+   sl_main(session)
+finally:
+   session.close()
