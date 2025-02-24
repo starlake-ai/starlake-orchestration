@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta, datetime
 
-from typing import Optional, List, Union, Tuple
+from typing import Optional, List, Union
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOrchestrator
 
@@ -77,23 +77,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
         return StarlakeOrchestrator.AIRFLOW
-
-    def update_events(self, event: Dataset, **kwargs) -> Tuple[(str, List[Dataset])]:
-        """Add the event to the list of Airflow datasets that will be triggered.
-
-        Args:
-            event (Dataset): The event to add.
-
-        Returns:
-            Tuple[(str, List[Dataset]): The tuple containing the list of datasets to trigger.
-        """
-        dataset = event
-        dag: Optional[DAG] = kwargs.get('dag', None)
-        if dag is not None:
-            dataset.extra['source'] = dag.dag_id
-        outlets = kwargs.get('outlets', [])
-        outlets.append(dataset)
-        return 'outlets', outlets
 
     def sl_import(self, task_id: str, domain: str, tables: set=set(), **kwargs) -> BaseOperator:
         """Overrides IStarlakeJob.sl_import()

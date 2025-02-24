@@ -157,8 +157,8 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         """
         self._events = events
 
-    def update_events(self, event: E, **kwargs) -> Tuple[(str, List[E])]:
-        pass
+    def update_events(self, event: E, **kwargs) -> Optional[Tuple[(str, List[E])]]:
+        return None
 
     @final
     def __add_event(self, name: str, **kwargs) -> E:
@@ -187,7 +187,8 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         else:
             tmp_domain = domain
         tuple_events = self.update_events(self.__add_event(tmp_domain, **kwargs))
-        kwargs.update({tuple_events[0]: tuple_events[1]})
+        if tuple_events:
+            kwargs.update({tuple_events[0]: tuple_events[1]})
         task_id = f"import_{tmp_domain}" if not task_id else task_id
         kwargs.pop("task_id", None)
         arguments = ["import", "--domains", domain, "--tables", ",".join(tables), "--options", "SL_RUN_MODE=main,SL_LOG_LEVEL=info"]
@@ -293,7 +294,8 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         task_id = kwargs.get("task_id", f"load_{domain}_{table}") if not task_id else task_id
         kwargs.pop("task_id", None)
         tuple_events = self.update_events(self.__add_event(f'{domain}.{table}', **kwargs))
-        kwargs.update({tuple_events[0]: tuple_events[1]})
+        if tuple_events:
+            kwargs.update({tuple_events[0]: tuple_events[1]})
         arguments = ["load", "--domains", domain, "--tables", table]
         if spark_config is None:
             spark_config = self.get_spark_config(
@@ -322,7 +324,8 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         task_id = kwargs.get("task_id", f"{transform_name}") if not task_id else task_id
         kwargs.pop("task_id", None)
         tuple_events = self.update_events(self.__add_event(transform_name, **kwargs))
-        kwargs.update({tuple_events[0]: tuple_events[1]})
+        if tuple_events:
+            kwargs.update({tuple_events[0]: tuple_events[1]})
         arguments = ["transform", "--name", transform_name]
         options = list()
         if transform_options:
