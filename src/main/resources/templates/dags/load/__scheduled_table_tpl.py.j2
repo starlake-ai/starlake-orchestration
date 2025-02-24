@@ -128,7 +128,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
             end = pipeline.end_task(
                 task_id=f'end_{schedule_name}', 
-                output_datasets=[StarlakeDataset(uri=pipeline_id, cron=schedule.cron)]
+                output_datasets=[StarlakeDataset(name=pipeline_id, cron=schedule.cron)]
             )
 
             if pre_tasks:
