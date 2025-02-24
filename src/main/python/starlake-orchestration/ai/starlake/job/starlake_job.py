@@ -162,7 +162,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
 
     @final
     def __add_event(self, name: str, **kwargs) -> E:
-        event = self.to_event(StarlakeDataset(name, **kwargs), source=kwargs.get('source', self.source))
+        event = self.to_event(StarlakeDataset(name=name, **kwargs), source=kwargs.get('source', self.source))
         events = self.events
         events.append(event)
         self.events = events
@@ -368,7 +368,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         return None
 
     @abstractmethod
-    def sl_job(self, task_id: str, arguments: list, spark_config: Optional[StarlakeSparkConfig]=None, **kwargs) -> T:
+    def sl_job(self, task_id: str, arguments: list, spark_config: Optional[StarlakeSparkConfig]=None, dataset: Optional[str]=None, **kwargs) -> T:
         """Generic job.
         Generate the scheduler task that will run the starlake command.
 
@@ -376,6 +376,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
+            dataset (str): The optional dataset to publish.
         
         Returns:
             T: The scheduler task.

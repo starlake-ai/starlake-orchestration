@@ -16,7 +16,7 @@ from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
 from airflow import DAG
 
-from airflow.datasets import Dataset
+from airflow.datasets import Dataset, DatasetAlias
 
 from airflow.models.baseoperator import BaseOperator
 
@@ -43,10 +43,6 @@ class AirflowDataset(AbstractEvent[Dataset]):
         extra = {}
         if source:
             extra["source"] = source
-        # if dataset.cron:
-        #     url = f"{{{{sl_scheduled_dataset('{dataset.uri}', '{dataset.cron}', data_interval_end | ts, '{dataset.sl_schedule_parameter_name}', '{dataset.sl_schedule_format}')}}}}"
-        # else:
-        #     url = dataset.url
         return Dataset(dataset.refresh().url, extra)
 
 class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOptions, AirflowDataset):
@@ -295,3 +291,25 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             pass
         dag_args.update({'start_date': self.start_date, 'retry_delay': timedelta(seconds=self.retry_delay), 'retries': self.retries})
         return dag_args
+
+from airflow.lineage import prepare_lineage
+
+class StarlakeDatasetMixin:
+    """Mixin to update Airflow outlets with Starlake datasets."""
+    def __init__(self, task_id: str, dataset: Optional[str] = None, source: Optional[str] = None, **kwargs):
+        self.alias = f"{task_id}_dataset"
+        outlets = kwargs.get("outlets", [])
+        if dataset:
+            outlets.append(DatasetAlias(self.alias))
+        kwargs["outlets"] = outlets
+        self.source = source
+        self.dataset = dataset
+        self.template_fields = getattr(self, "template_fields", tuple()) + ("dataset",)
+        super().__init__(task_id=task_id, **kwargs)  # Appelle l'init de l'opérateur principal
+
+    @prepare_lineage
+    def pre_execute(self, context):
+        if self.dataset:
+            uri = self.render_template(self.dataset, context)
+            context["outlet_events"][self.alias].add(Dataset(uri, {"source": self.source}))
+        return super().pre_execute(context)

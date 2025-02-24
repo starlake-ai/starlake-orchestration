@@ -19,11 +19,12 @@ class StarlakeDataset():
         domain_table = name.split(".")
         self._domain = domain_table[0]
         self._table = domain_table[-1]
+        params = kwargs.get('params', dict())
         if cron is None:
             if parameters is not None and 'cron' in parameters:
                 cron = parameters['cron']
-            elif 'params' in kwargs:
-                cron = kwargs['params'].get('cron', None)
+            else:
+                cron = params.get('cron', None)
         if cron:
             if cron.lower().strip() == 'none':
                 cron = None
@@ -34,8 +35,8 @@ class StarlakeDataset():
         temp_parameters: dict = dict()
         if parameters is not None:
             temp_parameters.update(parameters)
-        self._sl_schedule_parameter_name = kwargs.get('sl_schedule_parameter_name', 'sl_schedule')
-        self._sl_schedule_format = kwargs.get('sl_schedule_format', sl_schedule_format)
+        self._sl_schedule_parameter_name = kwargs.get('sl_schedule_parameter_name', params.get('sl_schedule_parameter_name', 'sl_schedule'))
+        self._sl_schedule_format = kwargs.get('sl_schedule_format', params.get('sl_schedule_format', sl_schedule_format))
         if cron is not None:
             temp_parameters[self.sl_schedule_parameter_name] = sl_schedule(cron=cron, format=self.sl_schedule_format)
         self._cron = cron

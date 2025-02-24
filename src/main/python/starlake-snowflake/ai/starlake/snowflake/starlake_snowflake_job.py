@@ -1,8 +1,8 @@
 from typing import List, Optional, Tuple, Union
 
-from functools import partial
+from functools import partial, update_wrapper
 
-from ai.starlake.common import MissingEnvironmentVariable
+from ai.starlake.common import MissingEnvironmentVariable, sanitize_id
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, StarlakeExecutionEnvironment
 
@@ -153,7 +153,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     for dataset, cron_expr in changes.items():
                         # enabling change tracking for the dataset
                         print(f"Enabling change tracking for dataset {dataset}")
-                        session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect()
+                        session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect() # should be done once and when we create our datasets
                         try:
                             croniter(cron_expr)
                             iter = croniter(cron_expr, start_time)
@@ -176,12 +176,18 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         except CroniterBadCronError:
                             raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-                definition = StoredProcedureCall(
-                    func = partial(
+                partial_fun = partial(
                         fun,
                         changes=changes,
                         format=format
-                    ), 
+                    )
+
+                update_wrapper(partial_fun, fun)
+
+                partial_fun.__name__ = f"fun_{sanitize_id(task_id)}"
+
+                definition = StoredProcedureCall(
+                    func = partial_fun, 
                     stage_location=self.stage_location,
                     packages=self.packages
                 )
@@ -263,12 +269,18 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             if failed:
                 raise ValueError(f"upstream task {upstream_task_id} failed")
 
+        partial_fun = partial(
+            fun,
+            upstream_task_id=upstream_task.name,
+        )
+
+        update_wrapper(partial_fun, fun)
+
+        partial_fun.__name__ = f"fun_{sanitize_id(task_id)}"
+
         return DAGTask(
             name=task_id, 
-            definition=partial(
-                fun,
-                upstream_task_id=upstream_task.name,
-            ), 
+            definition=partial_fun, 
             comment=comment, 
             **kwargs
         )
@@ -291,13 +303,15 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         kwargs.update({'sink': sink})
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, **kwargs)
 
-    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, **kwargs) -> DAGTask:
+    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[str]=None, **kwargs) -> DAGTask:
         """Overrides IStarlakeJob.sl_job()
         Generate the Snowflake task that will run the starlake command.
 
         Args:
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
+            spark_config (StarlakeSparkConfig, optional): The optional spark configuration. Defaults to None.
+            dataset (Optional[str], optional): The optional dataset name. Defaults to None.
 
         Returns:
             DAGTask: The Snowflake task.
@@ -403,20 +417,28 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             stmt: str = text(sql).bindparams(**params)
                             session.sql(stmt).collect()
 
+                        session.sql(query=f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE").collect()
+
                     kwargs.pop('params', None)
                     kwargs.pop('events', None)
+
+                    partial_fun = partial(
+                        fun, 
+                        sink=sink, 
+                        statements=statements, 
+                        params=options, 
+                        cron_expr=cron_expr,
+                        format=format
+                    )
+
+                    update_wrapper(partial_fun, fun)
+
+                    partial_fun.__name__ = f"fun_{sanitize_id(task_id)}"
 
                     return DAGTask(
                         name=task_id, 
                         definition=StoredProcedureCall(
-                            func = partial(
-                                fun, 
-                                sink=sink, 
-                                statements=statements, 
-                                params=options, 
-                                cron_expr=cron_expr,
-                                format=format
-                            ), 
+                            func = partial_fun, 
                             stage_location=self.stage_location,
                             packages=self.packages
                         ), 
