@@ -43,7 +43,11 @@ class AirflowDataset(AbstractEvent[Dataset]):
         extra = {}
         if source:
             extra["source"] = source
-        return Dataset(dataset.refresh().url, extra)
+        if dataset.cron:
+            url = f"{{{{sl_scheduled_dataset('{dataset.uri}', '{dataset.cron}', data_interval_end | ts, '{dataset.sl_schedule_parameter_name}', '{dataset.sl_schedule_format}')}}}}"
+        else:
+            url = dataset.url
+        return Dataset(url, extra)
 
 class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOptions, AirflowDataset):
     def __init__(self, filename: str, module_name: str, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None], options: dict=None, **kwargs) -> None:

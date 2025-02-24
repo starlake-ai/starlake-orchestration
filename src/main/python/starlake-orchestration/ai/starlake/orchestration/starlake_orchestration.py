@@ -277,6 +277,8 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         self._pipeline_id = pipeline_id
         self._schedule = schedule
         self._schedule_name = schedule_name
+        self._sl_schedule_parameter_name = job.sl_schedule_parameter_name
+        self._sl_schedule_format = job.sl_schedule_format
 
         tags = self.get_context_var(var_name='tags', default_value="").split()
 
@@ -312,8 +314,8 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 cron=cron, 
                 load_dependencies=load_dependencies,
                 filtered_datasets=filtered_datasets,
-                sl_schedule_parameter_name=job.sl_schedule_parameter_name,
-                sl_schedule_format=job.sl_schedule_format
+                sl_schedule_parameter_name=self.sl_schedule_parameter_name,
+                sl_schedule_format=self.sl_schedule_format
             )
 
             if computed_schedule is not None:
@@ -375,6 +377,16 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     @property
     def schedule_name(self) -> Optional[str]:
         return self._schedule_name
+
+    @final
+    @property
+    def sl_schedule_parameter_name(self) -> str:
+        return self._sl_schedule_parameter_name
+
+    @final
+    @property
+    def sl_schedule_format(self) -> str:
+        return self._sl_schedule_format
 
     @final
     @property
