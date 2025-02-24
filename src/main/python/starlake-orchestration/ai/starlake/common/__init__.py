@@ -51,7 +51,8 @@ def asQueryParameters(parameters: Union[dict,None]=None) -> str:
         return ''
 
 def cron_start_time() -> datetime:
-    return datetime.fromtimestamp(datetime.now().timestamp())
+    import pytz
+    return datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone('UTC'))
 
 sl_schedule_format = '%Y%m%dT%H%M'
 
@@ -143,14 +144,16 @@ def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts: str, parameter_n
             raise ValueError(f"Invalid cron expression: {cron} for dataset {dataset}")
         try:
             # Convert ts to a datetime object
-            from datetime import datetime
-            start_time = datetime.fromisoformat(ts)
+            from dateutil import parser
+            import pytz
+            start_time = parser.isoparse(ts).astimezone(pytz.timezone('UTC'))
             parameters = dict()
-            parameters[parameter_name] = sl_schedule(cron, start_time, format)
+            parameters[parameter_name] = croniter(cron, start_time).get_current(datetime).strftime(format)
             return f"{sanitize_id(dataset).lower()}{asQueryParameters(parameters)}"
         except Exception as e:
             print(f"Error converting timestamp to datetime: {e}")
-            return sanitize_id(dataset).lower()
+            # return sanitize_id(dataset).lower()
+            raise e
     return sanitize_id(dataset).lower()
 
 def is_valid_cron(cron_expr: str) -> bool:

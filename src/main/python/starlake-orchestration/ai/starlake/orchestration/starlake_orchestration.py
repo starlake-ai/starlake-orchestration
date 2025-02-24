@@ -406,6 +406,16 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             return sl_cron_start_end_dates(cron_expr) #FIXME using execution date from context
         return None
 
+    def sl_dataset_url(self, name: str, **kwargs) -> str:
+        params: dict = kwargs.get('params', dict())
+        params.update({
+            'sl_schedule_parameter_name': self.sl_schedule_parameter_name, 
+            'sl_schedule_format': self.sl_schedule_format
+        })
+        kwargs['params'] = params
+        dataset = StarlakeDataset(name, **kwargs)
+        return dataset.url
+
     @final
     @property
     def caller_globals(self) -> dict:
@@ -513,7 +523,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         kwargs.pop('task_id', None)
         return self.dummy_task(
             task_id=task_id, 
-            output_datasets=self.least_frequent_datasets, 
+            output_datasets=self.least_frequent_datasets, #FIXME should take into account the execution date time of the underlying task
             **kwargs
         )
 
@@ -618,6 +628,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 domain=domain, 
                 table=table, 
                 spark_config=spark_config, 
+                dataset=self.sl_dataset_url(f"{domain}.{table}", **kwargs),
                 **kwargs
             ),
             self
@@ -632,6 +643,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 transform_name=transform_name, 
                 transform_options=transform_options, 
                 spark_config=spark_config, 
+                dataset=self.sl_dataset_url(transform_name, **kwargs),
                 **kwargs
             ),
             self

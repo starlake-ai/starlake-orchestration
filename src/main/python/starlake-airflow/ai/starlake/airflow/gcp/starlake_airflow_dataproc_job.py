@@ -10,7 +10,7 @@ from ai.starlake.gcp import StarlakeDataprocClusterConfig, StarlakeDataprocMaste
 
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment
 
-from ai.starlake.airflow import StarlakeAirflowJob, StarlakeAirflowOptions
+from ai.starlake.airflow import StarlakeAirflowJob, StarlakeAirflowOptions, StarlakeDatasetMixin
 
 from airflow.models.baseoperator import BaseOperator
 
@@ -169,6 +169,8 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
         jar_list: list=None,
         main_class: str=None,
         arguments: list=None,
+        dataset: Optional[str]=None,
+        source: Optional[str]=None,
         **kwargs) -> BaseOperator:
         """Create a dataproc job on the specified cluster"""
         cluster_id = self.cluster_config.cluster_id if not cluster_id else cluster_id
@@ -204,6 +206,8 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
 
         return DataprocJobOperator(
             task_id=task_id,
+            dataset=dataset,
+            source=source,
             project_id=self.cluster_config.project_id,
             region=self.cluster_config.region,
             job={
@@ -232,13 +236,15 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
         super().__init__(filename, module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
         self.cluster = StarlakeAirflowDataprocCluster(StarlakeAirflowDataprocClusterConfig.from_module(filename, module_name, self.options), options=self.options, pool=self.pool) if not cluster else cluster
 
-    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, **kwargs) -> BaseOperator:
+    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[str]=None, **kwargs) -> BaseOperator:
         """Overrides StarlakeAirflowJob.sl_job()
         Generate the Airflow task that will run the starlake command.
         
         Args:
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
+            spark_config (Optional[StarlakeSparkConfig], optional): The optional spark configuration. Defaults to None.
+            dataset (Optional[str], optional): The optional dataset name. Defaults to None.
         
         Returns:
             BaseOperator: The Airflow task.
@@ -247,6 +253,8 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
             task_id=task_id,
             arguments=arguments,
             spark_config=spark_config,
+            dataset=dataset,
+            source=self.source,
             **kwargs
         )
 
@@ -275,7 +283,7 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
 
 from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
 
-class DataprocJobOperator(DataprocSubmitJobOperator):
+class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
     """Dataproc Job Operator"""
     def __init__(self, project_id: str, region: str, job: dict, **kwargs):
         kwargs.pop("asynchronous", None) # TODO handle asynchronous dataproc jobs
