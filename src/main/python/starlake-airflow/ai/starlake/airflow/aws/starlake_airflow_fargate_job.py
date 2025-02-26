@@ -1,5 +1,7 @@
 from typing import Any, Dict, Optional, Union
 
+from ai.starlake.dataset import StarlakeDataset
+
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
@@ -26,7 +28,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
         self.fargate_async_poke_interval = float(__class__.get_context_var('fargate_async_poke_interval', "30", self.options))
         self.retry_on_failure = __class__.get_context_var("retry_on_failure", "False", self.options).lower() == 'true'
 
-    def sl_job(self, task_id: str, arguments: list, spark_config: Optional[StarlakeSparkConfig] = None, dataset: Optional[str]=None, **kwargs) -> BaseOperator:
+    def sl_job(self, task_id: str, arguments: list, spark_config: Optional[StarlakeSparkConfig] = None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> BaseOperator:
         """Overrides StarlakeAirflowJob.sl_job()
         Generate the Airflow task that will run the starlake command.
 
@@ -34,7 +36,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
             spark_config (Optional[StarlakeSparkConfig], optional): The optional spark configuration. Defaults to None.
-            dataset (Optional[str], optional): The optional dataset name. Defaults to None.
+            dataset (Optional[Union[StarlakeDataset, str]], optional): The optional dataset to materialize. Defaults to None.
 
         Returns:
             BaseOperator: The Airflow task.

@@ -157,12 +157,11 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         """
         self._events = events
 
-    def update_events(self, event: E, **kwargs) -> Optional[Tuple[(str, List[E])]]:
-        return None
-
     @final
-    def __add_event(self, name: str, **kwargs) -> E:
-        event = self.to_event(StarlakeDataset(name=name, **kwargs), source=kwargs.get('source', self.source))
+    def __add_event(self, dataset: Union[str, StarlakeDataset], **kwargs) -> E:
+        if isinstance(dataset, str):
+            dataset = StarlakeDataset(name=dataset, **kwargs)
+        event = self.to_event(dataset, source=kwargs.get('source', self.source))
         events = self.events
         events.append(event)
         self.events = events
@@ -189,9 +188,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             tmp_domain = f'{domain}_{schedule}'
         else:
             tmp_domain = domain
-        tuple_events = self.update_events(self.__add_event(tmp_domain, **kwargs))
-        if tuple_events:
-            kwargs.update({tuple_events[0]: tuple_events[1]})
+        self.__add_event(tmp_domain, **kwargs)
         task_id = f"import_{tmp_domain}" if not task_id else task_id
         kwargs.pop("task_id", None)
         arguments = ["import", "--domains", domain, "--tables", ",".join(tables), "--options", "SL_RUN_MODE=main,SL_LOG_LEVEL=info"]
@@ -281,7 +278,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
 
             return self.sl_job(task_id=task_id, arguments=arguments, **kwargs)
 
-    def sl_load(self, task_id: str, domain: str, table: str, spark_config: Optional[StarlakeSparkConfig]=None, **kwargs) -> T:
+    def sl_load(self, task_id: str, domain: str, table: str, spark_config: Optional[StarlakeSparkConfig]=None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> T:
         """Load job.
         Generate the scheduler task that will run the starlake `load` command.
 
@@ -290,15 +287,22 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             domain (str): The required domain of the table to load.
             table (str): The required table to load.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
+            dataset (Union[StarlakeDataset, str]): The optional dataset to materialize.
         
         Returns:
             T: The scheduler task.
         """
         task_id = kwargs.get("task_id", f"load_{domain}_{table}") if not task_id else task_id
         kwargs.pop("task_id", None)
-        tuple_events = self.update_events(self.__add_event(f'{domain}.{table}', **kwargs))
-        if tuple_events:
-            kwargs.update({tuple_events[0]: tuple_events[1]})
+        if not dataset:
+            params: dict = kwargs.get('params', dict())
+            params.update({
+                'sl_schedule_parameter_name': self.sl_schedule_parameter_name, 
+                'sl_schedule_format': self.sl_schedule_format
+            })
+            kwargs['params'] = params
+            dataset = StarlakeDataset(name=f'{domain}.{table}', **kwargs)
+        self.__add_event(dataset, **kwargs)
         arguments = ["load", "--domains", domain, "--tables", table]
         if spark_config is None:
             spark_config = self.get_spark_config(
@@ -309,9 +313,9 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
                 ), 
                 **self.caller_globals.get('spark_properties', {})
             )
-        return self.sl_job(task_id=task_id, arguments=arguments, spark_config=spark_config, **kwargs)
+        return self.sl_job(task_id=task_id, arguments=arguments, spark_config=spark_config, dataset=dataset, **kwargs)
 
-    def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig]=None, **kwargs) -> T:
+    def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig]=None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> T:
         """Transform job.
         Generate the scheduler task that will run the starlake `transform` command.
 
@@ -320,15 +324,22 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             transform_name (str): The transform to run.
             transform_options (str): The optional transform options to use.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
+            dataset (Union[StarlakeDataset, str]): The optional dataset to materialize.
         
         Returns:
             T: The scheduler task.
         """
         task_id = kwargs.get("task_id", f"{transform_name}") if not task_id else task_id
         kwargs.pop("task_id", None)
-        tuple_events = self.update_events(self.__add_event(transform_name, **kwargs))
-        if tuple_events:
-            kwargs.update({tuple_events[0]: tuple_events[1]})
+        if not dataset:
+            params: dict = kwargs.get('params', dict())
+            params.update({
+                'sl_schedule_parameter_name': self.sl_schedule_parameter_name, 
+                'sl_schedule_format': self.sl_schedule_format
+            })
+            kwargs['params'] = params
+            dataset = StarlakeDataset(name=transform_name, **kwargs)
+        self.__add_event(dataset, **kwargs)
         arguments = ["transform", "--name", transform_name]
         options = list()
         if transform_options:
@@ -347,7 +358,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
                 ), 
                 **self.caller_globals.get('spark_properties', {})
             )
-        return self.sl_job(task_id=task_id, arguments=arguments, spark_config=spark_config, **kwargs)
+        return self.sl_job(task_id=task_id, arguments=arguments, spark_config=spark_config, dataset=dataset, **kwargs)
 
     def pre_tasks(self, *args, **kwargs) -> Optional[T]: #TODO rename to pre_ops
         """Pre tasks."""
@@ -361,9 +372,11 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         """Start operation."""
         events = kwargs.get('events', [])
         kwargs.pop('events', None)
-        if least_frequent_datasets:
-            events += list(map(lambda dataset: self.to_event(dataset=dataset, source=self.source), least_frequent_datasets))
-        return self.dummy_op(task_id, events, **kwargs)
+        if not scheduled and least_frequent_datasets:
+            datasets = least_frequent_datasets
+        else:
+            datasets = None
+        return self.dummy_op(task_id, list(map(lambda dataset: self.to_event(dataset=dataset, source=self.source), datasets or [])), **kwargs)
 
     def end_op(self, task_id: str, events: Optional[List[E]] = None, **kwargs) -> Optional[T]:
         """End operation."""
@@ -378,7 +391,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         return None
 
     @abstractmethod
-    def sl_job(self, task_id: str, arguments: list, spark_config: Optional[StarlakeSparkConfig]=None, dataset: Optional[str]=None, **kwargs) -> T:
+    def sl_job(self, task_id: str, arguments: list, spark_config: Optional[StarlakeSparkConfig]=None, dataset: Optional[Union[StarlakeDataset, str]]=None, **kwargs) -> T:
         """Generic job.
         Generate the scheduler task that will run the starlake command.
 
@@ -386,7 +399,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
-            dataset (str): The optional dataset to publish.
+            dataset (Union[StarlakeDataset, str]): The optional dataset to publish.
         
         Returns:
             T: The scheduler task.

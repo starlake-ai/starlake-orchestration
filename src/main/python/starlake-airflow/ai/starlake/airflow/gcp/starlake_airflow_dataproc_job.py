@@ -6,6 +6,8 @@ from typing import Optional, Union
 
 from ai.starlake.common import TODAY
 
+from ai.starlake.dataset import StarlakeDataset
+
 from ai.starlake.gcp import StarlakeDataprocClusterConfig, StarlakeDataprocMasterConfig, StarlakeDataprocWorkerConfig
 
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment
@@ -169,7 +171,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
         jar_list: list=None,
         main_class: str=None,
         arguments: list=None,
-        dataset: Optional[str]=None,
+        dataset: Optional[Union[StarlakeDataset, str]]=None,
         source: Optional[str]=None,
         **kwargs) -> BaseOperator:
         """Create a dataproc job on the specified cluster"""
@@ -236,7 +238,7 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
         super().__init__(filename, module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
         self.cluster = StarlakeAirflowDataprocCluster(StarlakeAirflowDataprocClusterConfig.from_module(filename, module_name, self.options), options=self.options, pool=self.pool) if not cluster else cluster
 
-    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[str]=None, **kwargs) -> BaseOperator:
+    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[Union[StarlakeDataset, str]]=None, **kwargs) -> BaseOperator:
         """Overrides StarlakeAirflowJob.sl_job()
         Generate the Airflow task that will run the starlake command.
         
@@ -244,7 +246,7 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
             spark_config (Optional[StarlakeSparkConfig], optional): The optional spark configuration. Defaults to None.
-            dataset (Optional[str], optional): The optional dataset name. Defaults to None.
+            dataset (Optional[Union[StarlakeDataset, str]], optional): The optional dataset to materialize. Defaults to None.
         
         Returns:
             BaseOperator: The Airflow task.
