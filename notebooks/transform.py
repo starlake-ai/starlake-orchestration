@@ -1,8 +1,7 @@
 from snowflake.snowpark import Session
 from snowflake.snowpark import DataFrame
 from snowflake.snowpark.row import Row
-import pandas as pd
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple
 import os
 import datetime
 
@@ -15,7 +14,6 @@ connection_parameters = {
 #   "schema": "<your snowflake schema>",  # optional
    "database": os.environ['SNOWFLAKE_DB'],  # optional
 }
-
 
 
 expectation_items = {
@@ -105,47 +103,62 @@ expectation_items = {
   } ]
 }
 
+#statements = {{ context.statements }}
+
+#expectation_items = {{ context.expectationItems }}
+
+#audit = {{ context.audit }}
+
+#expectations = {{ context.expectations }}
+
+#acl = {{ context.acl }}
+
+
 statements = {
-  "kpi.order_items_analysis" : {
-    "preActions" : [ "USE SCHEMA kpi" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.order_items_analysis  AS WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, List( p.name || ' (' || o.quantity || ')' ) AS purchased_items\n, Sum( o.quantity * p.price ) AS total_order_value\nFROM starbake.order_line o\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.order_items_analysis", "INSERT INTO kpi.order_items_analysis WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, List( p.name || ' (' || o.quantity || ')' ) AS purchased_items\n, Sum( o.quantity * p.price ) AS total_order_value\nFROM starbake.order_line o\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id" ]
+  "sales_kpi.byseller_kpi0" : {
+    "preActions" : [ "USE SCHEMA sales_kpi" ],
+    "domain" : [ "sales_kpi" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE sales_kpi.byseller_kpi  AS with mycte as (\nselect o.amount, c.id, CURRENT_TIMESTAMP() as timestamp\nfrom sales.orders o, sales.customers c\nwhere o.customer_id = c.id\n)\nselect id, sum(amount) as sum, timestamp\nfrom mycte\ngroup by mycte.id, mycte.timestamp;" ],
+    "mainSqlIfExists" : [ "INSERT INTO sales_kpi.byseller_kpi with mycte as (\nselect o.amount, c.id, CURRENT_TIMESTAMP() as timestamp\nfrom sales.orders o, sales.customers c\nwhere o.customer_id = c.id\n)\nselect id, sum(amount) as sum, timestamp\nfrom mycte\ngroup by mycte.id, mycte.timestamp" ],
+    "table" : [ "byseller_kpi" ],
+    "connectionType" : [ "JDBC" ]
   },
-  "kpi.order_summary" : {
-    "preActions" : [ "USE SCHEMA kpi" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.order_summary  AS SELECT\nps.order_id,\nps.order_date,\nrs.total_revenue,\nps.profit,\nps.total_units_sold\nFROM\nkpi.product_summary ps\nJOIN kpi.revenue_summary rs ON ps.order_id = rs.order_id;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.order_summary", "INSERT INTO kpi.order_summary SELECT\nps.order_id,\nps.order_date,\nrs.total_revenue,\nps.profit,\nps.total_units_sold\nFROM\nkpi.product_summary ps\nJOIN kpi.revenue_summary rs ON ps.order_id = rs.order_id" ]
+  "sales_kpi.byseller_kpi1" : {
+    "preActions" : [ "USE SCHEMA sales_kpi" ],
+    "domain" : [ "sales_kpi" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE sales_kpi.byseller_kpi1  AS select count(*) as cnt from sales.orders;" ],
+    "mainSqlIfExists" : [ "INSERT INTO sales_kpi.byseller_kpi1 select count(*) as cnt from sales.orders" ],
+    "table" : [ "byseller_kpi1" ],
+    "connectionType" : [ "JDBC" ]
   },
-  "kpi.product_summary" : {
-    "preActions" : [ "USE SCHEMA kpi" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.product_summary  AS SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.timestamp AS order_date\nFROM\nstarbake.product p\nJOIN starbake.order_line ol ON p.product_id = ol.product_id\nJOIN starbake.order o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.timestamp;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.product_summary", "INSERT INTO kpi.product_summary SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.timestamp AS order_date\nFROM\nstarbake.product p\nJOIN starbake.order_line ol ON p.product_id = ol.product_id\nJOIN starbake.order o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.timestamp" ]
-  },
-  "kpi.revenue_summary" : {
-    "preActions" : [ "USE SCHEMA kpi" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.revenue_summary  AS SELECT\no.order_id,\no.timestamp AS order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.order o\nJOIN starbake.order_line ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.timestamp;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.revenue_summary", "INSERT INTO kpi.revenue_summary SELECT\no.order_id,\no.timestamp AS order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.order o\nJOIN starbake.order_line ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.timestamp" ]
+  "bqtest.table1" : {
+    "preActions" : [ "USE SCHEMA bqtest" ],
+    "domain" : [ "bqtest" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE bqtest.table1111  AS select 'a' as id, date('2020-01-01') as due, 'newname' as name;" ],
+    "mainSqlIfExists" : [ "DELETE FROM bqtest.table1111 \nWHERE due IN (SELECT DISTINCT due FROM (select 'a' as id, date('2020-01-01') as due, 'newname' as name))", "\nINSERT INTO bqtest.table1111(id,due,name) select 'a' as id, date('2020-01-01') as due, 'newname' as name;" ],
+    "table" : [ "table1111" ],
+    "connectionType" : [ "JDBC" ]
   }
 }
 
+expectation_items = { }
 
 audit = {
+  "preActions" : [ "USE SCHEMA audit" ],
   "domain" : [ "audit" ],
-  "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID STRING NOT NULL,\n                              PATHS STRING NOT NULL,\n                              DOMAIN STRING NOT NULL,\n                              SCHEMA STRING NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION LONG NOT NULL,\n                              MESSAGE STRING NOT NULL,\n                              STEP STRING NOT NULL,\n                              DATABASE STRING,\n                              TENANT STRING\n                             ) USING delta\n    " ],
-  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{paths}' AS PATHS,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            {success} AS SUCCESS,\n            {count} AS COUNT,\n            {countAccepted} AS COUNTACCEPTED,\n            {countRejected} AS COUNTREJECTED,\n            TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            {duration} AS DURATION,\n            '{message}' AS MESSAGE,\n            '{step}' AS STEP,\n            '{database}' AS DATABASE,\n            '{tenant}' AS TENANT\n\n        " ],
-  "connectionType" : [ "SNOWFLAKE_LOG" ]
+  "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID VARCHAR NOT NULL,\n                              PATHS TEXT NOT NULL,\n                              DOMAIN VARCHAR NOT NULL,\n                              SCHEMA VARCHAR NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION BIGINT NOT NULL,\n                              MESSAGE VARCHAR NOT NULL,\n                              STEP VARCHAR NOT NULL,\n                              DATABASE VARCHAR,\n                              TENANT VARCHAR\n                             )\n    " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{paths}' AS PATHS,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            {success} AS SUCCESS,\n            {count} AS COUNT,\n            {countAccepted} AS COUNTACCEPTED,\n            {countRejected} AS COUNTREJECTED,\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            {duration} AS DURATION,\n            '{message}' AS MESSAGE,\n            '{step}' AS STEP,\n            '{database}' AS DATABASE,\n            '{tenant}' AS TENANT\n        " ],
+  "connectionType" : [ "JDBC" ]
 }
 
 expectations = {
   "domain" : [ "audit" ],
-  "createSchemaSql" : [ "CREATE TABLE IF NOT EXISTS audit.expectations (\n                            JOBID STRING NOT NULL,\n                            DATABASE STRING,\n                            DOMAIN STRING NOT NULL,\n                            SCHEMA STRING NOT NULL,\n                            TIMESTAMP TIMESTAMP NOT NULL,\n                            NAME STRING NOT NULL,\n                            PARAMS STRING NOT NULL,\n                            SQL STRING NOT NULL,\n                            COUNT BIGINT NOT NULL,\n                            EXCEPTION STRING NOT NULL,\n                            SUCCESS BOOLEAN NOT NULL\n                          ) USING {writeFormat}\n        " ],
-  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{database}' AS DATABASE,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            '{name}' AS NAME,\n            '{params}' AS PARAMS,\n            '{sql}' AS SQL,\n            {count} AS COUNT,\n            '{exception}' AS EXCEPTION,\n            {success} AS SUCCESS\n        " ],
-  "connectionType" : [ "SNOWFLAKE_LOG" ]
+  "createSchemaSql" : [ "CREATE TABLE IF NOT EXISTS audit.expectations (\n                            JOBID VARCHAR NOT NULL,\n                            DATABASE VARCHAR,\n                            DOMAIN VARCHAR NOT NULL,\n                            SCHEMA VARCHAR NOT NULL,\n                            TIMESTAMP TIMESTAMP NOT NULL,\n                            NAME VARCHAR NOT NULL,\n                            PARAMS VARCHAR NOT NULL,\n                            SQL VARCHAR NOT NULL,\n                            COUNT BIGINT NOT NULL,\n                            EXCEPTION VARCHAR NOT NULL,\n                            SUCCESS BOOLEAN NOT NULL\n                          )\n        " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{database}' AS DATABASE,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            '{name}' AS NAME,\n            '{params}' AS PARAMS,\n            '{sql}' AS SQL,\n            {count} AS COUNT,\n            '{exception}' AS EXCEPTION,\n            {success} AS SUCCESS\n        " ],
+  "connectionType" : [ "JDBC" ]
 }
 
-
-
-acl = {}
+acl = { }
 
 def sl_plit_domain_task(task: str) -> Tuple[str, str]:
    domain, task = task.split('.')
@@ -173,7 +186,7 @@ def sl_log_expectation(session: Session, task: str, success: bool, name: str, pa
          sql = sql
       )
       insert_sql = f"INSERT INTO {expectation_domain}.expectations {formatted_sql}"
-      session.sql(insert_sql)
+      session.sql(insert_sql).collect()
    except Exception as e:
       error_message = str(e)
       print(error_message)
@@ -202,71 +215,78 @@ def sl_log_audit(session: Session, task: str, success: bool, duration: int, mess
          tenant = ""
       )
       insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
-      session.sql(insert_sql)
+      session.sql(insert_sql).collect()
    except Exception as e:
       error_message = str(e)
       print(error_message)
 
 
 
-def sl_run_task(session: Session, task: str): 
+def sl_run_task(session: Session, task: str):
    start = datetime.datetime.now()
    try:
-      session.sql("BEGIN")
+      session.sql("BEGIN").collect()
+      taskDomain = statements.get(task).get("domain")[0]
+      taskTable = statements.get(task).get("table")[0]
+      sl_create_domain(session, taskDomain)
       for statement in statements.get(task, {}).get("preActions", []):
-         session.sql(statement)
-      sl_table_exists = sl_table_exists(session, task)
+         print(statement)
+         session.sql(statement).collect()
+      table_exists = sl_table_exists(session, f"{taskDomain}.{taskTable}")
 
       pre_sql = statements.get(task, {}).get('preSqls', [])
       for sql in pre_sql:
-         session.sql(sql)
+         session.sql(sql).collect()
 
-      if  not sl_table_exists:
+      if  not table_exists:
          print(f'{task} table does not exist')
          sqls: List[str] = statements.get(task, {}).get('mainSqlIfNotExists', [])
          for sql in sqls:
-               session.sql(sql)
+               print(sql)
+               session.sql(sql).collect()
       else:
          print(f'{task} table exists')
          scd2_sql = statements.get(task, {}).get('addSCD2ColumnsSqls', [])
          for sql in scd2_sql:
-            session.sql(sql)
+            print(sql)
+            session.sql(sql).collect()
          sqls: List[str] = statements.get(task, {}).get('mainSqlIfExists', [])
          for sql in sqls:
-               session.sql(sql)
+            print(sql)
+            session.sql(sql).collect()
 
       post_sql = statements.get(task, {}).get('postSqls', [])
       for sql in post_sql:
-         session.sql(sql)
-      session.sql("END")
-      
+         session.sql(sql).collect()
+      session.sql("COMMIT").collect()
+
       end = datetime.datetime.now()
       duration = (end - start).total_seconds()
       sl_log_audit(session, task, True, duration, "success", end)
    except Exception as e:
-      session.sql("ROLLBACK")
+      session.sql("ROLLBACK").collect()
       end = datetime.datetime.now()
       duration = (end - start).total_seconds()
       error_message = str(e)
       print(error_message)
-      sl_log_audit(session, task, True, duration, error_message, end)
+      sl_log_audit(session, task, False, duration, error_message, end)
       raise e
 
 def sl_table_exists(session: Session, table_name: str) -> bool:
-    df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{table_name}'") 
+    df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{table_name}'")
     rows: List[Row] = df.collect()
     return rows.__len__() > 0
 
 
 def sl_create_audit_table(session: Session):
    for statement in audit.get("preActions", []):
-      session.sql(statement)
+      session.sql(statement).collect()
    sl_audit_table_exists = sl_table_exists(session, 'audit.audit')
    if  not sl_audit_table_exists:
       print('AUDIT table does not exist')
       sqls: List[str] = audit.get('createSchemaSql', [])
       for sql in sqls:
-            session.sql(sql)
+            session.sql(sql).collect()
 
 def sl_create_expectations_table(session: Session):
    sl_expectation_table_exists = sl_table_exists(session, 'audit.expectations')
@@ -274,14 +294,18 @@ def sl_create_expectations_table(session: Session):
       print('EXPECTATIONS table does not exist')
       sqls: List[str] = expectations.get('createSchemaSql', [])
       for sql in sqls:
-            session.sql(sql)
+            session.sql(sql).collect()
 
+
+def sl_create_domain(session: Session, domain: str):
+   sql = f"CREATE SCHEMA IF NOT EXISTS {domain}"
+   session.sql(sql).collect()
 
 def sl_create_acl(session: Session, task: str):
     if acl.get(task, None) is not None:
       sqls: List[str] = acl.get(task)
       for sql in sqls:
-         session.sql(sql)
+         session.sql(sql).collect()
 
 
 
@@ -295,7 +319,7 @@ def sl_run_expectations(session: Session, task: str):
       failOnError = expectation.get("failOnError")
       count = 0
       try:
-         df: DataFrame = session.sql(query)
+         df: DataFrame = session.sql(query).collect()
          rows: List[Row] = df.collect()
          if rows.__len__ != 1:
             raise Exception(f'Expectation failed for {task}: {query}. Expected 1 row but got {rows.__len__()}')
@@ -319,6 +343,7 @@ def sl_main(session: Session):
    for task in statements.keys():
       sl_run_task(session, task)
       sl_run_expectations(session, task)
+      sl_create_acl(session, task)
 
 
 
