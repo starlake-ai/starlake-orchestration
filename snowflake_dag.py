@@ -17,6 +17,8 @@ options={
     'retries':'1',
     'retry_delay':'30',
     'stage_location':'staging',
+    'schema': 'starbake',
+    'warehouse':'COMPUTE_WH',
 }
 
 from ai.starlake.job import StarlakeJobFactory
@@ -415,13 +417,40 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             all_done >> post_tasks >> end
 
     print(f"Pipeline {pipeline_id} created") 
-    from snowflake.core.task.dagv1 import DAG
-    dag: DAG = pipeline.dag
-    for task in dag.tasks:
-        print(f"Task {task.full_name} created")
-        for predecessor in task.predecessors:
-            print(f"Task {task.full_name} depends on {predecessor.full_name}")
-    for dataset in pipeline.least_frequent_datasets:
-        print(f"Dataset {dataset.name} is least frequent -> {dataset.cron}")
-    for dataset in pipeline.most_frequent_datasets:
-        print(f"Dataset {dataset.name} is most frequent -> {dataset.cron}")
+
+from snowflake.core import Root
+from snowflake.core._common import CreateMode
+from snowflake.core.task.dagv1 import DAG, DAGOperation
+from snowflake.snowpark import Session
+
+dag: DAG = pipeline.dag
+for task in dag.tasks:
+    for pre in task.predecessors:
+        print(f"Task {task.name} depends on {pre.name}")
+
+def get_dag_operation(session: Session, database: str, schema: str) -> DAGOperation:
+  session.sql(f"USE DATABASE {database}").collect()
+  session.sql(f"USE SCHEMA {schema}").collect()
+  session.sql(f"USE WAREHOUSE {options.get('warehouse', 'COMPUTE_WH').upper()}").collect()
+  root = Root(session)
+  schema = root.databases[database].schemas[schema]
+  return DAGOperation(schema)
+
+def deploy_dag(session: Session, database: str, schema: str) -> None:
+  stage_name = f"{database}.{schema}.{options.get('stage_location', 'staging')}".upper()
+  result = session.sql(f"SHOW STAGES LIKE '{stage_name.split('.')[-1]}'").collect()
+  if not result:
+      session.sql(f"CREATE STAGE {stage_name}").collect()
+
+  session.custom_package_usage_config = {"enabled": True, "force_push": True}
+  op = get_dag_operation(session, database, schema)
+  # op.delete(pipeline_id)
+  op.deploy(dag, mode = CreateMode.or_replace)
+  print(f"Pipeline {pipeline_id} deployed")
+  # op.run(dag)
+  # print(f"Pipeline {pipeline_id} run")
+
+def run_dag(session: Session, database: str, schema: str) -> None:
+  op = get_dag_operation(session, database, schema)
+  op.run(dag)
+  print(f"Pipeline {pipeline_id} run")
