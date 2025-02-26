@@ -2,27 +2,27 @@ from __future__ import annotations
 
 from datetime import timedelta, datetime
 
-from typing import Optional, List, Union
+from typing import Any, Optional, List, Union
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOrchestrator
 
 from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
-from ai.starlake.common import MissingEnvironmentVariable
+from ai.starlake.common import MissingEnvironmentVariable, sanitize_id
 
 from ai.starlake.job.starlake_job import StarlakeOrchestrator
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
-from airflow import DAG
-
 from airflow.datasets import Dataset, DatasetAlias
 
 from airflow.models.baseoperator import BaseOperator
 
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 
 from airflow.operators.python import ShortCircuitOperator
+
+from airflow.utils.task_group import TaskGroup
 
 import logging
 
@@ -127,6 +127,32 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             kwargs['ti'].xcom_push(key='return_value', value=return_code)
             print(str(e.stdout, 'utf-8'))
             raise # Re-raise the exception to mark the task as failed
+
+    def start_op(self, task_id, scheduled: bool, not_scheduled_datasets: Optional[List[StarlakeDataset]], least_frequent_datasets: Optional[List[StarlakeDataset]], most_frequent_datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[BaseOperator]:
+        """Overrides IStarlakeJob.start_op()
+        It represents the first task of a pipeline, it will define the optional condition that may trigger the DAG.
+        Args:
+            task_id (str): The required task id.
+            scheduled (bool): whether the dag is scheduled or not.
+            not_scheduled_datasets (Optional[List[StarlakeDataset]]): The optional not scheduled datasets.
+            least_frequent_datasets (Optional[List[StarlakeDataset]]): The optional least frequent datasets.
+            most_frequent_datasets (Optional[List[StarlakeDataset]]): The optional most frequent datasets.
+        Returns:
+            Optional[BaseOperator]: The optional Airflow task.
+        """
+        if not scheduled and least_frequent_datasets:
+            with TaskGroup(group_id=f'{task_id}') as start:
+                with TaskGroup(group_id=f'trigger_least_frequent_datasets') as trigger_least_frequent_datasets:
+                    for dataset in least_frequent_datasets:
+                        StarlakeEmptyOperator(
+                            task_id=f"trigger_{dataset.uri}",
+                            dataset=dataset,
+                            previous=True,
+                            source=self.source,
+                            **kwargs.copy())
+            return start 
+        else:
+            return super().start_op(task_id, scheduled, not_scheduled_datasets, least_frequent_datasets, most_frequent_datasets, **kwargs)
 
     def sl_pre_load(self, domain: str, tables: set=set(), pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None, **kwargs) -> Optional[BaseOperator]:
         """Overrides IStarlakeJob.sl_pre_load()
@@ -262,7 +288,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         if events:
             outlets += events
         kwargs.update({'outlets': outlets})
-        return DummyOperator(task_id=task_id, **kwargs)
+        return EmptyOperator(task_id=task_id, **kwargs)
 
     def default_dag_args(self) -> dict:
         import json
@@ -275,24 +301,57 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         dag_args.update({'start_date': self.start_date, 'retry_delay': timedelta(seconds=self.retry_delay), 'retries': self.retries})
         return dag_args
 
-from airflow.lineage import prepare_lineage
+from airflow.lineage import prepare_lineage, apply_lineage
 
 class StarlakeDatasetMixin:
     """Mixin to update Airflow outlets with Starlake datasets."""
-    def __init__(self, task_id: str, dataset: Optional[str] = None, source: Optional[str] = None, **kwargs):
-        self.alias = f"{task_id}_dataset"
+    def __init__(self, task_id: str, dataset: Optional[Union[str, StarlakeDataset]] = None, previous:bool= False, source: Optional[str] = None, **kwargs):
+        params: dict = kwargs.get("params", dict())
         outlets = kwargs.get("outlets", [])
         if dataset:
+            kwargs["outlets"] = outlets
+            if isinstance(dataset, StarlakeDataset):
+                params.update({
+                    'uri': dataset.uri,
+                    'sl_schedule': dataset.cron,
+                    'sl_schedule_parameter_name': dataset.sl_schedule_parameter_name, 
+                    'sl_schedule_format': dataset.sl_schedule_format,
+                    'previous': previous
+                })
+                kwargs['params'] = params
+                self.dataset = "{{sl_scheduled_dataset(params.uri, params.sl_schedule, data_interval_end | ts, params.sl_schedule_parameter_name, params.sl_schedule_format, params.previous)}}"
+            else:
+                self.dataset = dataset
+            self.alias = sanitize_id(params.get("uri", task_id)).lower()
             outlets.append(DatasetAlias(self.alias))
-        kwargs["outlets"] = outlets
-        self.source = source
-        self.dataset = dataset
-        self.template_fields = getattr(self, "template_fields", tuple()) + ("dataset",)
+            self.template_fields = getattr(self, "template_fields", tuple()) + ("dataset",)
+            extra = params
+            extra.update({"source": source})
+            self.extra = extra
         super().__init__(task_id=task_id, **kwargs)  # Appelle l'init de l'opérateur principal
 
     @prepare_lineage
     def pre_execute(self, context):
         if self.dataset:
+            from urllib.parse import urlparse, parse_qs
             uri = self.render_template(self.dataset, context)
-            context["outlet_events"][self.alias].add(Dataset(uri, {"source": self.source}))
+            parsed_uri = urlparse(uri)
+            self.extra.update(parse_qs(parsed_uri.query))
+            context["outlet_events"][self.alias].add(Dataset(uri, self.extra))
         return super().pre_execute(context)
+
+    @apply_lineage
+    def post_execute(self, context: Any, result: Any = None):
+        """
+        Execute right after self.execute() is called.
+
+        It is passed the execution context and any results returned by the operator.
+        """
+        if self.dataset:
+            context["outlet_events"][self.alias].extra = self.extra
+        return super().post_execute(context, result)
+
+class StarlakeEmptyOperator(StarlakeDatasetMixin, EmptyOperator):
+    """StarlakeEmptyOperator."""
+    def __init__(self, task_id: str, **kwargs):
+        super().__init__(task_id=task_id, **kwargs)

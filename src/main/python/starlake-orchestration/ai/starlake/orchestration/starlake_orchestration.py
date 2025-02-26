@@ -7,7 +7,7 @@ import os
 import importlib
 import inspect
 
-from ai.starlake.common import StarlakeCronPeriod, sl_cron_start_end_dates, sort_crons_by_frequency, is_valid_cron
+from ai.starlake.common import StarlakeCronPeriod, sl_cron_start_end_dates, sort_crons_by_frequency, is_valid_cron, sanitize_id
 
 from ai.starlake.job import StarlakeSparkConfig, IStarlakeJob, StarlakePreLoadStrategy
 
@@ -265,7 +265,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             raise ValueError("Either a schedule or dependencies must be provided")
         pipeline_id = job.caller_filename.replace(".py", "").replace(".pyc", "").lower()
         if schedule:
-            schedule_name = schedule.name
+            schedule_name = sanitize_id(schedule.name).lower()
         else:
             schedule_name = None
         if schedule_name:
@@ -273,6 +273,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         super().__init__(group_id=pipeline_id, orchestration_cls=orchestration_cls, group=dag, **kwargs)
         self._orchestration = orchestration
         self._job = job
+        self._options = job.options
         self._dag = dag
         self._pipeline_id = pipeline_id
         self._schedule = schedule
@@ -321,7 +322,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             if computed_schedule is not None:
                 if isinstance(computed_schedule, str):
                     cron = computed_schedule
-                elif isinstance(computed_schedule, list):
+                else:
                     datasets = computed_schedule
 
         self._tags = tags
@@ -334,6 +335,19 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
         self._datasets = datasets
 
+        uris: Set[str] = set(map(lambda dataset: dataset.uri, datasets or []))
+        if cron:
+            cron_expr = cron
+        elif len(uris) == len(self.scheduled_datasets) and len(set(self.scheduled_datasets.values())) > 0:
+            sorted_crons = sort_crons_by_frequency(set(
+                self.scheduled_datasets.values()), 
+                period=self.cron_period_frequency
+            )
+            cron_expr = sorted_crons[0][0]
+        else:
+            cron_expr = None
+
+        self._cron_expr = cron_expr
         ...
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -392,6 +406,11 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     @property
     def cron(self) -> Optional[str]:
         return self._cron
+
+    @final
+    @property
+    def computed_cron_expr(self) -> Optional[str]:
+        return self._cron_expr
 
     @property
     def catchup(self) -> bool:
@@ -465,7 +484,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     @property
     def most_frequent_datasets(self) -> List[StarlakeDataset]:
         least_frequent_datasets: List[str] = list(map(lambda dataset: dataset.name, self.least_frequent_datasets or []))
-        return [dataset for dataset in self.datasets or [] if dataset.name not in least_frequent_datasets]
+        return [dataset for dataset in self.datasets or [] if dataset.cron and dataset.name not in least_frequent_datasets]
 
     @final
     @property
@@ -483,11 +502,16 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         return self.job.cron_period_frequency
 
     @final
+    @property
+    def options(self) -> dict:
+        return self._options
+
+    @final
     def get_context_var(self, var_name: str, default_value: Any) -> Any:
         return self.job.get_context_var(
             var_name=var_name, 
             default_value=default_value, 
-            options=self.job.options
+            options=self.options
         )
 
     @final
@@ -529,7 +553,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
     @final
     def start_task(self, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
-        task_id = kwargs.get('task_id', 'start')
+        task_id = kwargs.get('task_id', f'start_{self.schedule_name}' if self.schedule_name else 'start')
         kwargs.pop('task_id', None)
         return self.orchestration.sl_create_task(
             task_id, 
@@ -556,6 +580,12 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
     @final
     def sl_pre_load(self, domain: str, tables: Set[str], **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+        params: dict = kwargs.get('params', dict())
+        params.update({
+            'cron': self.cron,
+            'schedule': self.schedule_name
+        })
+        kwargs['params'] = params
         task_id = kwargs.get('task_id', IStarlakeJob.get_sl_pre_load_task_id(domain, self.pre_load_strategy, **kwargs))
         kwargs.pop('task_id', None)
         return self.orchestration.sl_create_task(
@@ -608,6 +638,12 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
     @final
     def sl_import(self, task_id: str, domain: str, tables: set=set(), **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+        params: dict = kwargs.get('params', dict())
+        params.update({
+            'cron': self.cron,
+            'schedule': self.schedule_name
+        })
+        kwargs['params'] = params
         return self.orchestration.sl_create_task(
             task_id,
             self.job.sl_import(
@@ -620,29 +656,47 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         )
 
     @final
-    def sl_load(self, task_id: str, domain: str, table: str, spark_config: StarlakeSparkConfig, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+    def sl_load(self, task_id: str, domain: str, table: str, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+        name=f'{domain}.{table}'
+        params: dict = kwargs.get('params', dict())
+        params.update({
+            'cron': self.cron
+        })
+        kwargs['params'] = params
+        kwargs.pop('spark_config', None)
+        kwargs.pop('dataset', None)
         return self.orchestration.sl_create_task(
             task_id, 
             self.job.sl_load(
                 task_id=task_id, 
                 domain=domain, 
                 table=table, 
-                spark_config=spark_config, 
-                dataset=self.sl_dataset_url(f"{domain}.{table}", **kwargs),
+                spark_config=self.sl_spark_config(name.lower()), 
+                dataset=self.sl_dataset_url(name, **kwargs),
                 **kwargs
             ),
             self
         )
 
     @final
-    def sl_transform(self, task_id: str, transform_name: str, transform_options: str = None, spark_config: StarlakeSparkConfig = None, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+    def sl_transform(self, task_id: str, transform_name: str, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+        params: dict = kwargs.get('params', dict())
+        params.update({
+            'cron': self.cron,
+            'cron_expr': self.computed_cron_expr
+        })
+        kwargs['params'] = params
+        kwargs.pop('transform_name', None)
+        kwargs.pop('transform_options', None)
+        kwargs.pop('spark_config', None)
+        kwargs.pop('dataset', None)
         return self.orchestration.sl_create_task(
             task_id, 
                 self.job.sl_transform(
                 task_id=task_id, 
                 transform_name=transform_name, 
-                transform_options=transform_options, 
-                spark_config=spark_config, 
+                transform_options=self.sl_transform_options(self.computed_cron_expr), 
+                spark_config=self.sl_spark_config(transform_name.lower()), 
                 dataset=self.sl_dataset_url(transform_name, **kwargs),
                 **kwargs
             ),
@@ -660,11 +714,14 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         )
 
     @final
-    def end_task(self, output_datasets: Optional[List[StarlakeDataset]] = None, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+    def end_task(self, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
         pipeline_id = self.pipeline_id
+        output_datasets=[StarlakeDataset(name=pipeline_id, cron=self.cron)]
         events = list(map(lambda dataset: self.to_event(dataset=dataset, source=pipeline_id), output_datasets or []))
-        task_id = kwargs.get('task_id', 'end')
+        task_id = kwargs.get('task_id', f"end_{self.schedule_name}" if self.schedule_name else 'end')
         kwargs.pop('task_id', None)
+        kwargs.pop('events', None)
+        kwargs.pop('output_datasets', None)
         end = self.orchestration.sl_create_task(
             task_id, 
             self.job.end_op(
