@@ -285,7 +285,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             **kwargs
         )
 
-    def sl_transform(self, task_id: str, transform_name: str, transform_options: str = None, spark_config: StarlakeSparkConfig = None, **kwargs) -> DAGTask:
+    def sl_transform(self, task_id: str, transform_name: str, transform_options: str = None, spark_config: StarlakeSparkConfig = None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> DAGTask:
         """Overrides IStarlakeJob.sl_transform()
         Generate the Snowflake task that will run the starlake `transform` command.
 
@@ -294,6 +294,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             transform_name (str): The required transform name.
             transform_options (str, optional): The optional transform options. Defaults to None.
             spark_config (StarlakeSparkConfig, optional): The optional spark configuration. Defaults to None.
+            dataset (Optional[Union[StarlakeDataset, str]], optional): The optional dataset to materialize. Defaults to None.
 
         Returns:
             DAGTask: The Snowflake task.
@@ -301,9 +302,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         kwargs.update({'transform': True})
         sink = kwargs.get('sink', transform_name)
         kwargs.update({'sink': sink})
-        return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, **kwargs)
+        return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset, **kwargs)
 
-    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[str]=None, **kwargs) -> DAGTask:
+    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> DAGTask:
         """Overrides IStarlakeJob.sl_job()
         Generate the Snowflake task that will run the starlake command.
 
@@ -311,7 +312,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
             spark_config (StarlakeSparkConfig, optional): The optional spark configuration. Defaults to None.
-            dataset (Optional[str], optional): The optional dataset name. Defaults to None.
+            dataset (Optional[Union[StarlakeDataset, str]], optional): The optional dataset to materialize. Defaults to None.
 
         Returns:
             DAGTask: The Snowflake task.

@@ -237,7 +237,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             **kwargs
         )
 
-    def sl_load(self, task_id: str, domain: str, table: str, spark_config: Optional[StarlakeSparkConfig] = None, **kwargs) -> BaseOperator:
+    def sl_load(self, task_id: str, domain: str, table: str, spark_config: Optional[StarlakeSparkConfig] = None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> BaseOperator:
         """Overrides IStarlakeJob.sl_load()
         Generate the Airflow task that will run the starlake `load` command.
 
@@ -246,15 +246,16 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             domain (str): The required domain of the table to load.
             table (str): The required table to load.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
+            dataset (Optional[Union[StarlakeDataset, str]]): The optional dataset to materialize.
         
         Returns:
             BaseOperator: The Airflow task.
         """
         kwargs.update({'doc': kwargs.get('doc', f'Load table {table} within {domain} domain.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
-        return super().sl_load(task_id=task_id, domain=domain, table=table, spark_config=spark_config, **kwargs)
+        return super().sl_load(task_id=task_id, domain=domain, table=table, spark_config=spark_config, dataset=dataset, **kwargs)
 
-    def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig] = None, **kwargs) -> BaseOperator:
+    def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig] = None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> BaseOperator:
         """Overrides IStarlakeJob.sl_transform()
         Generate the Airflow task that will run the starlake `transform` command.
 
@@ -263,13 +264,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             transform_name (str): The transform to run.
             transform_options (str): The optional transform options to use.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
+            dataset (Optional[Union[StarlakeDataset, str]]): The optional dataset to materialize.
         
         Returns:
             BaseOperator: The Airflow task.
         """
         kwargs.update({'doc': kwargs.get('doc', f'Run {transform_name} transform.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
-        return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, **kwargs)
+        return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset,  **kwargs)
 
     def dummy_op(self, task_id, events: Optional[List[Dataset]] = None, **kwargs) -> BaseOperator :
         """Dummy op.

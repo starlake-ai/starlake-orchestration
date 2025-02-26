@@ -114,16 +114,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             return "{{sl_dates(params.cron_expr, ts_as_datetime(data_interval_end | ts))}}"
         return None
 
-    def sl_dataset_url(self, name: str, **kwargs) -> str:
-        params: dict = kwargs.get('params', dict())
-        params.update({
-            'uri': name,
-            'sl_schedule_parameter_name': self.sl_schedule_parameter_name, 
-            'sl_schedule_format': self.sl_schedule_format
-        })
-        kwargs['params'] = params
-        return "{{sl_scheduled_dataset(params.uri, params.cron, data_interval_end | ts, params.sl_schedule_parameter_name, params.sl_schedule_format)}}"
-
 class AirflowTaskGroup(AbstractTaskGroup[TaskGroup]):
     def __init__(self, group_id: str, group: TaskGroup, **kwargs) -> None:
         super().__init__(group_id, orchestration_cls=AirflowOrchestration, group=group)
