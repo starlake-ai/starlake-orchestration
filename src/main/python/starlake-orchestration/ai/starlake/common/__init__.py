@@ -129,7 +129,7 @@ def sl_cron_start_end_dates(cron_expr: str, start_time: datetime = cron_start_ti
     sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
     return f"sl_start_date='{sl_start_date.strftime(format)}',sl_end_date='{sl_end_date.strftime(format)}'"
 
-def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts: str, parameter_name: str = 'sl_schedule', format: str = sl_timestamp_format) -> str:
+def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts: str, parameter_name: str = 'sl_schedule', format: str = sl_timestamp_format, previous: bool=False) -> str:
     """
     Returns the dataset url with the schedule parameter added if a cron expression has been provided.
     Args:
@@ -148,7 +148,10 @@ def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts: str, parameter_n
             import pytz
             start_time = parser.isoparse(ts).astimezone(pytz.timezone('UTC'))
             parameters = dict()
-            parameters[parameter_name] = croniter(cron, start_time).get_current(datetime).strftime(format)
+            if previous:
+                parameters[parameter_name] = croniter(cron, start_time).get_prev(datetime).strftime(format)
+            else:
+                parameters[parameter_name] = croniter(cron, start_time).get_current(datetime).strftime(format)
             return f"{sanitize_id(dataset).lower()}{asQueryParameters(parameters)}"
         except Exception as e:
             print(f"Error converting timestamp to datetime: {e}")

@@ -168,6 +168,9 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         self.events = events
         return event
 
+    def sl_dataset_url(self, dataset: StarlakeDataset, **kwargs) -> str:
+        return dataset.url
+
     def sl_import(self, task_id: str, domain: str, tables: set=set(), **kwargs) -> T:
         """Import job.
         Generate the scheduler task that will run the starlake `import` command.
@@ -356,7 +359,11 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
 
     def start_op(self, task_id: str, scheduled: bool, not_scheduled_datasets: Optional[List[StarlakeDataset]], least_frequent_datasets: Optional[List[StarlakeDataset]], most_frequent_datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[T]:
         """Start operation."""
-        return self.dummy_op(task_id, **kwargs)
+        events = kwargs.get('events', [])
+        kwargs.pop('events', None)
+        if least_frequent_datasets:
+            events += list(map(lambda dataset: self.to_event(dataset=dataset, source=self.source), least_frequent_datasets))
+        return self.dummy_op(task_id, events, **kwargs)
 
     def end_op(self, task_id: str, events: Optional[List[E]] = None, **kwargs) -> Optional[T]:
         """End operation."""
