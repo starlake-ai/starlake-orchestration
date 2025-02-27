@@ -323,6 +323,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             if sink:
                 kwargs.pop('sink', None)
                 statements = self.caller_globals.get('statements', dict()).get(sink, None)
+                #expectations = self.caller_globals.get('expectations', dict())
+                #expectation_items = self.caller_globals.get('expectation_items', dict()).get(sink, None)
                 if statements:
                     comment = kwargs.get('comment', f'Starlake {sink} task')
                     kwargs.pop('comment', None)
@@ -344,8 +346,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                     format = '%Y-%m-%d %H:%M:%S%z'
 
+                    audit = self.caller_globals.get('audit', dict())
+
                     # create the function that will execute the transform
-                    def fun(session: Session, sink: str, statements: dict, params: dict, cron_expr: Optional[str], format: str) -> None:
+                    def fun(session: Session, sink: str, statements: dict, audit: dict, params: dict, cron_expr: Optional[str], format: str) -> None:
                         from sqlalchemy import text
 
                         if cron_expr:
@@ -377,48 +381,153 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             except CroniterBadCronError:
                                 raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-                        schemaAndTable = sink.split('.')
-                        schema = schemaAndTable[0]
-                        table = schemaAndTable[1]
+                        jobid = TaskContext(session).get_current_task_name()
 
-                        # create SQL schema
-                        session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {schema}").collect() # use templating
+                        def check_if_schema_exists(domain: str, schema: str) -> bool:
+                            df = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE = '{domain}.{schema}'")
+                            rows = df.collect()
+                            return rows.__len__() > 0
 
-                        # execute preActions
-                        preActions: List[str] = statements.get('preActions', [])
-                        for action in preActions:
-                            stmt: str = text(action).bindparams(**params)
-                            session.sql(stmt).collect()
+                        def check_if_audit_schema_exists() -> bool:
+                            if audit:
+                                try:
+                                    # create SQL domain
+                                    domain = audit.get('domain', ['audit'])[0]
+                                    session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {domain}").collect()
+                                    # execute SQL preActions
+                                    preActions: List[str] = audit.get('preActions', [])
+                                    for action in preActions:
+                                        stmt: str = text(action).bindparams(**params)
+                                        session.sql(stmt).collect()
+                                    # check if the audit schema exists
+                                    if not check_if_schema_exists(domain, 'audit'):
+                                        # execute SQL mainSqlIfNotExists
+                                        sqls: List[str] = audit.get('createSchemaSql', []) # should be mainSqlIfNotExists
+                                        for sql in sqls:
+                                            stmt: str = text(sql)#.bindparams(**params)
+                                            session.sql(stmt).collect()
+                                        return True
+                                    else:
+                                        return True
+                                except Exception as e:
+                                    print(f"Error creating audit schema: {str(e)}")
+                                    return False
+                            else:
+                                return False
 
-                        # execute preSqls
-                        preSqls: List[str] = statements.get('preSqls', [])
-                        for sql in preSqls:
-                            stmt: str = text(sql).bindparams(**params)
-                            session.sql(stmt).collect()
+                        def log_audit(domain: str, schema: str, success: bool, duration: int, message: str, ts: datetime) -> bool :
+                            if audit:
+                                audit_domain = audit.get('domain', ['audit'])[0]
+                                audit_sqls = audit.get('mainSqlIfExists', None)
+                                if audit_sqls:
+                                    try:
+                                        audit_sql = audit_sqls[0]
+                                        formatted_sql = audit_sql.format(
+                                            jobid = jobid,
+                                            paths = schema,
+                                            domain = domain,
+                                            schema = schema,
+                                            success = str(success),
+                                            count = "-1",
+                                            countAccepted = "-1",
+                                            countRejected = "-1",
+                                            timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                            duration = str(duration),
+                                            message = message,
+                                            step = "TRANSFORM",
+                                            database = "",
+                                            tenant = ""
+                                        )
+                                        insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
+                                        session.sql(insert_sql).collect()
+                                        return True
+                                    except Exception as e:
+                                        print(f"Error inserting audit record: {str(e)}")
+                                        return False
+                                else:
+                                    return False
+                            else:
+                                return False
 
-                        # check if the sink exists
-                        df: DataFrame = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}'") # use templating
-                        rows: List[Row] = df.collect()
-                        if rows.__len__() > 0:
-                            # execute mainSqlIfExists
-                            sqls: List[str] = statements.get('mainSqlIfExists', [])
-                            for sql in sqls:
+                        start = datetime.datetime.now()
+
+                        try:
+                            # BEGIN transaction
+                            session.sql("BEGIN").collect()
+
+                            domainAndTable = sink.split('.')
+                            domain = domainAndTable[0]
+                            schema = domainAndTable[-1]
+
+                            # create SQL domain
+                            session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {domain}").collect() # use templating
+
+                            # execute preActions
+                            preActions: List[str] = statements.get('preActions', [])
+                            for action in preActions:
+                                stmt: str = text(action).bindparams(**params)
+                                session.sql(stmt).collect()
+
+                            # execute preSqls
+                            preSqls: List[str] = statements.get('preSqls', [])
+                            for sql in preSqls:
                                 stmt: str = text(sql).bindparams(**params)
                                 session.sql(stmt).collect()
-                        else:
-                            # execute mainSqlIfNotExists
-                            sqls: List[str] = statements.get('mainSqlIfNotExists', [])
-                            for sql in sqls:
+
+                            if check_if_schema_exists(domain, schema):
+                                # execute mainSqlIfExists
+                                sqls: List[str] = statements.get('mainSqlIfExists', [])
+                                for sql in sqls:
+                                    stmt: str = text(sql).bindparams(**params)
+                                    session.sql(stmt).collect()
+                            else:
+                                # execute mainSqlIfNotExists
+                                sqls: List[str] = statements.get('mainSqlIfNotExists', [])
+                                for sql in sqls:
+                                    stmt: str = text(sql).bindparams(**params)
+                                    session.sql(stmt).collect()
+
+                            # execute postSqls
+                            postSqls: List[str] = statements.get('postSqls', [])
+                            for sql in postSqls:
                                 stmt: str = text(sql).bindparams(**params)
                                 session.sql(stmt).collect()
 
-                        # execute postSqls
-                        postSqls: List[str] = statements.get('postSqls', [])
-                        for sql in postSqls:
-                            stmt: str = text(sql).bindparams(**params)
-                            session.sql(stmt).collect()
+                            session.sql(query=f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE").collect()
 
-                        session.sql(query=f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE").collect()
+                            # COMMIT transaction
+                            session.sql("COMMIT").collect()
+                            end = datetime.datetime.now()
+                            duration = (end - start).total_seconds()
+                            print(f"Duration in seconds: {duration}")
+                            if audit and check_if_audit_schema_exists():
+                                print("Audit schema exists")
+                                # insert audit record
+                                if log_audit(domain, schema, True, duration, 'Success', end):
+                                    print("Audit record inserted")
+                                else:
+                                    print("Error inserting audit record")
+                            else:
+                                print("Audit schema does not exist")
+
+                        except Exception as e:
+                            # ROLLBACK transaction
+                            session.sql("ROLLBACK").collect()
+                            end = datetime.datetime.now()
+                            duration = (end - start).total_seconds()
+                            error_message = str(e)
+                            print(f"Duration in seconds: {duration}")
+                            print(f"Error: {error_message}")
+                            if audit and check_if_audit_schema_exists():
+                                print("Audit schema exists")
+                                # insert audit record
+                                if log_audit(domain, schema, False, duration, error_message, end):
+                                    print("Audit record inserted")
+                                else:
+                                    print("Error inserting audit record")
+                            else:
+                                print("Audit schema does not exist")
+                            raise e
 
                     kwargs.pop('params', None)
                     kwargs.pop('events', None)
@@ -427,6 +536,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         fun, 
                         sink=sink, 
                         statements=statements, 
+                        audit=audit,
                         params=options, 
                         cron_expr=cron_expr,
                         format=format
