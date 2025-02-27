@@ -311,16 +311,6 @@ audit = {
 with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
     with orchestration.sl_create_pipeline(dependencies=dependencies) as pipeline:
 
-        pipeline_id=pipeline.pipeline_id
-
-        datasets = pipeline.datasets
-
-        scheduled_datasets = pipeline.scheduled_datasets
-
-        cron = pipeline.cron
-
-        uris: Set[str] = set(map(lambda dataset: dataset.uri, datasets or []))
-
         first_level_tasks: Set[str] = dependencies.first_level_tasks
 
         all_dependencies: Set[str] = dependencies.all_dependencies
@@ -331,28 +321,12 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
         pre_tasks = pipeline.pre_tasks()
 
-        if cron:
-            cron_expr = cron
-        elif len(uris) == len(scheduled_datasets) and len(set(scheduled_datasets.values())) > 0:
-            sorted_crons = sort_crons_by_frequency(set(
-                scheduled_datasets.values()), 
-                period=pipeline.cron_period_frequency
-            )
-            cron_expr = sorted_crons[0][0]
-        else:
-            cron_expr = None
-
-        transform_options = pipeline.sl_transform_options(cron_expr)
-
         # create a task
         def create_task(task_id: str, task_name: str, task_type: StarlakeDependencyType) -> Union[AbstractTask, AbstractTaskGroup]:
             if (task_type == StarlakeDependencyType.TASK):
                 return pipeline.sl_transform(
                     task_id=task_id, 
                     transform_name=task_name,
-                    transform_options=transform_options,
-                    spark_config=pipeline.sl_spark_config(task_name.lower()),
-                    params={'cron':cron, 'cron_expr':cron_expr},
                 )
             else:
                 load_domain_and_table = task_name.split(".", 1)
@@ -362,8 +336,6 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
                     task_id=task_id, 
                     domain=domain, 
                     table=table,
-                    spark_config=pipeline.sl_spark_config(task_name.lower()),
-                    params={'cron':cron},
                 )
 
         # build group of tasks recursively
@@ -401,11 +373,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
         else:
             start >> all_transform_tasks
 
-        end = pipeline.end_task(output_datasets=[StarlakeDataset(name=pipeline_id, cron=cron)])
-
-        trigger_least_frequent_datasets = pipeline.trigger_least_frequent_datasets_task()
-        if trigger_least_frequent_datasets:
-            start >> trigger_least_frequent_datasets >> end
+        end = pipeline.end_task()
 
         end << all_transform_tasks
 
@@ -416,7 +384,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             all_done << all_transform_tasks
             all_done >> post_tasks >> end
 
-    print(f"Pipeline {pipeline_id} created") 
+    print(f"Pipeline {pipeline.pipeline_id} created") 
 
 from snowflake.core import Root
 from snowflake.core._common import CreateMode
@@ -446,11 +414,11 @@ def deploy_dag(session: Session, database: str, schema: str) -> None:
   op = get_dag_operation(session, database, schema)
   # op.delete(pipeline_id)
   op.deploy(dag, mode = CreateMode.or_replace)
-  print(f"Pipeline {pipeline_id} deployed")
+  print(f"Pipeline {pipeline.pipeline_id} deployed")
   # op.run(dag)
   # print(f"Pipeline {pipeline_id} run")
 
 def run_dag(session: Session, database: str, schema: str) -> None:
   op = get_dag_operation(session, database, schema)
   op.run(dag)
-  print(f"Pipeline {pipeline_id} run")
+  print(f"Pipeline {pipeline.pipeline_id} run")
