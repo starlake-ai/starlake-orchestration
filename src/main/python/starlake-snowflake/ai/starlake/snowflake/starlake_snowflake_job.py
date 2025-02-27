@@ -27,7 +27,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             self._warehouse = kwargs.get('warehouse', __class__.get_context_var(var_name='warehouse', options=self.options))
         except MissingEnvironmentVariable:
             self._warehouse = None
-        self._packages=["croniter", "sqlalchemy", "python-dateutil"]
+        self._packages=["croniter", "python-dateutil"]
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -314,12 +314,14 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             if sink:
                 kwargs.pop('sink', None)
                 statements = self.caller_globals.get('statements', dict()).get(sink, None)
-                #expectations = self.caller_globals.get('expectations', dict())
-                #expectation_items = self.caller_globals.get('expectation_items', dict()).get(sink, None)
+                expectations = self.caller_globals.get('expectations', dict())
+                expectation_items = self.caller_globals.get('expectation_items', dict()).get(sink, None)
                 if statements:
                     comment = kwargs.get('comment', f'Starlake {sink} task')
                     kwargs.pop('comment', None)
                     options = self.sl_env_vars.copy() # Copy the current sl env variables
+                    from collections import defaultdict
+                    safe_params = defaultdict(lambda: 'NULL', options)
                     for index, arg in enumerate(arguments):
                         if arg == "--options" and arguments.__len__() > index + 1:
                             opts = arguments[index+1]
@@ -340,9 +342,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     audit = self.caller_globals.get('audit', dict())
 
                     # create the function that will execute the transform
-                    def fun(session: Session, sink: str, statements: dict, audit: dict, params: dict, cron_expr: Optional[str], format: str) -> None:
-                        from sqlalchemy import text
-
+                    def fun(session: Session, sink: str, statements: dict, audit: dict, expectations: dict, expectation_items: list, params: dict, cron_expr: Optional[str], format: str) -> None:
                         if cron_expr:
                             from croniter import croniter
                             from croniter.croniter import CroniterBadCronError
@@ -374,6 +374,20 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                         jobid = TaskContext(session).get_current_task_name()
 
+                        def bindParams(stmt: str) -> str:
+                            return stmt.format_map(params)
+
+                        def str_to_bool(value: str) -> bool:
+                            truthy = {'yes', 'y', 'true', '1'}
+                            falsy = {'no', 'n', 'false', '0'}
+
+                            value = value.strip().lower()
+                            if value in truthy:
+                                return True
+                            elif value in falsy:
+                                return False
+                            raise ValueError(f"Valeur invalide : {value}")
+
                         def check_if_schema_exists(domain: str, schema: str) -> bool:
                             df = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE = '{domain}.{schema}'")
                             rows = df.collect()
@@ -387,21 +401,43 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {domain}").collect()
                                     # execute SQL preActions
                                     preActions: List[str] = audit.get('preActions', [])
-                                    for action in preActions:
-                                        stmt: str = text(action).bindparams(**params)
+                                    for sql in preActions:
+                                        stmt: str = bindParams(sql)
                                         session.sql(stmt).collect()
                                     # check if the audit schema exists
                                     if not check_if_schema_exists(domain, 'audit'):
-                                        # execute SQL mainSqlIfNotExists
-                                        sqls: List[str] = audit.get('createSchemaSql', []) # should be mainSqlIfNotExists
+                                        # execute SQL createSchemaSql
+                                        sqls: List[str] = audit.get('createSchemaSql', [])
                                         for sql in sqls:
-                                            stmt: str = text(sql)#.bindparams(**params)
+                                            stmt: str = bindParams(sql)
                                             session.sql(stmt).collect()
                                         return True
                                     else:
                                         return True
                                 except Exception as e:
                                     print(f"Error creating audit schema: {str(e)}")
+                                    return False
+                            else:
+                                return False
+
+                        def check_if_expectations_schema_exists() -> bool:
+                            if expectations:
+                                try:
+                                    # create SQL domain
+                                    domain = expectations.get('domain', ['audit'])[0]
+                                    session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {domain}").collect()
+                                    # check if the expectations schema exists
+                                    if not check_if_schema_exists(domain, 'expectations'):
+                                        # execute SQL createSchemaSql
+                                        sqls: List[str] = expectations.get('createSchemaSql', [])
+                                        for sql in sqls:
+                                            stmt: str = bindParams(sql)
+                                            session.sql(stmt).collect()
+                                        return True
+                                    else:
+                                        return True
+                                except Exception as e:
+                                    print(f"Error creating expectations schema: {str(e)}")
                                     return False
                             else:
                                 return False
@@ -440,51 +476,114 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             else:
                                 return False
 
+                        def log_expectation(domain: str, schema: str, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime) -> bool :
+                            if expectations:
+                                expectation_domain = expectations.get('domain', ['audit'])[0]
+                                expectation_sqls = expectations.get('mainSqlIfExists', None)
+                                if expectation_sqls:
+                                    try:
+                                        expectation_sql = expectation_sqls[0]
+                                        formatted_sql = expectation_sql.format(
+                                            jobid = jobid,
+                                            database = "",
+                                            domain = domain,
+                                            schema = schema,
+                                            count = count,
+                                            exception = exception,
+                                            timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                            success = str(success),
+                                            name = name,
+                                            params = params,
+                                            sql = sql
+                                        )
+                                        insert_sql = f"INSERT INTO {expectation_domain}.expectations {formatted_sql}"
+                                        session.sql(insert_sql).collect()
+                                        return True
+                                    except Exception as e:
+                                        print(f"Error inserting expectations record: {str(e)}")
+                                        return False
+                                else:
+                                    return False
+                            else:
+                                return False
+
+                        def run_expectation(name: str, params: str, query: str, failOnError: bool = False) -> None:
+                            count = 0
+                            try:
+                                if query:
+                                    stmt: str = bindParams(query)
+                                    df = session.sql(stmt)
+                                    rows = df.collect()
+                                    if rows.__len__ != 1:
+                                        raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
+                                    count = rows.collect()[0][0]
+                                    #  log expectations as audit in expectation table here
+                                    if count != 0:
+                                        raise Exception(f'Expectation failed for {sink}: {query}. Expected count to be equal to 0 but got {count}')
+                                    log_expectation(domain, schema, True, name, params, query, count, "", datetime.datetime.now())
+                                else:
+                                    raise Exception(f'Expectation failed for {sink}: {name}. Query not found')
+                            except Exception as e:
+                                print(f"Error running expectation {name}: {str(e)}")
+                                log_expectation(domain, schema, False, name, params, query, count, str(e), datetime.datetime.now())
+                                if failOnError:
+                                    raise e
+
                         start = datetime.datetime.now()
 
                         try:
                             # BEGIN transaction
                             session.sql("BEGIN").collect()
 
-                            domainAndTable = sink.split('.')
-                            domain = domainAndTable[0]
-                            schema = domainAndTable[-1]
+                            domainAndSchema = sink.split('.')
+                            domain = domainAndSchema[0]
+                            schema = domainAndSchema[-1]
 
                             # create SQL domain
                             session.sql(query=f"CREATE SCHEMA IF NOT EXISTS {domain}").collect() # use templating
 
                             # execute preActions
                             preActions: List[str] = statements.get('preActions', [])
-                            for action in preActions:
-                                stmt: str = text(action).bindparams(**params)
-                                session.sql(stmt).collect()
+                            for sql in preActions:
+                                stmt: str = bindParams(sql)
+                                session.sql(stmt, **params).collect()
 
                             # execute preSqls
                             preSqls: List[str] = statements.get('preSqls', [])
                             for sql in preSqls:
-                                stmt: str = text(sql).bindparams(**params)
+                                stmt: str = bindParams(sql)
                                 session.sql(stmt).collect()
 
                             if check_if_schema_exists(domain, schema):
+                                # execute addSCD2ColumnsSqls
+                                scd2_sqls: List[str] = statements.get('addSCD2ColumnsSqls', [])
+                                for sql in scd2_sqls:
+                                    stmt: str = bindParams(sql)
+                                    session.sql(stmt).collect()
                                 # execute mainSqlIfExists
                                 sqls: List[str] = statements.get('mainSqlIfExists', [])
                                 for sql in sqls:
-                                    stmt: str = text(sql).bindparams(**params)
+                                    stmt: str = bindParams(sql)
                                     session.sql(stmt).collect()
                             else:
                                 # execute mainSqlIfNotExists
                                 sqls: List[str] = statements.get('mainSqlIfNotExists', [])
                                 for sql in sqls:
-                                    stmt: str = text(sql).bindparams(**params)
+                                    stmt: str = bindParams(sql)
                                     session.sql(stmt).collect()
 
                             # execute postSqls
                             postSqls: List[str] = statements.get('postSqls', [])
                             for sql in postSqls:
-                                stmt: str = text(sql).bindparams(**params)
+                                stmt: str = bindParams(sql)
                                 session.sql(stmt).collect()
 
                             session.sql(query=f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE").collect()
+
+                            # run expectations
+                            if expectation_items and check_if_expectations_schema_exists():
+                                for expectation in expectation_items:
+                                    run_expectation(expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')))
 
                             # COMMIT transaction
                             session.sql("COMMIT").collect()
@@ -530,7 +629,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         sink=sink, 
                         statements=statements, 
                         audit=audit,
-                        params=options, 
+                        expectations=expectations,
+                        expectation_items=expectation_items,
+                        params=safe_params, 
                         cron_expr=cron_expr,
                         format=format
                     )
