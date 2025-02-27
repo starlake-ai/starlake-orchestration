@@ -15,14 +15,12 @@ class StarlakeDependencyType(str, Enum):
     def __str__(self):
         return self.value
 
-#StarlakeDependencyType = Enum("StarlakeDependencyType", ["task", "table"])
-
 import warnings
 
 warnings.simplefilter("default", DeprecationWarning)
 
 class StarlakeDependency():
-    def __init__(self, name: str, dependency_type: StarlakeDependencyType, cron: Optional[str]= None, dependencies: List[StarlakeDependency]= [], stream: Optional[str]= None, **kwargs):
+    def __init__(self, name: str, dependency_type: StarlakeDependencyType, cron: Optional[str]= None, dependencies: List[StarlakeDependency]= [], sink: Optional[str]= None, stream: Optional[str]= None, **kwargs):
         """Initializes a new StarlakeDependency instance.
 
         Args:
@@ -30,13 +28,17 @@ class StarlakeDependency():
             dependency_type (StarlakeDependencyType): The required dependency dependency_type.
             cron (str): The optional cron.
             dependencies (List[StarlakeDependency]): The optional dependencies.
+            sink (str): The optional sink.
             stream (str): The optional stream.
         """
         self._name = name
-        domain_table = name.split(".")
+        if sink:
+            domain_table = sink.split(".")
+        else:
+            domain_table = name.split(".")
         self._domain = domain_table[0]
         self._table = domain_table[-1]
-        self._uri = sanitize_id(name).lower()
+        self._uri = sanitize_id(self.sink).lower()
         self._dependency_type = dependency_type
         if cron is not None:
             if cron.lower().strip() == 'none':
@@ -79,6 +81,12 @@ class StarlakeDependency():
     def stream(self) -> Optional[str]:
         return self._stream
 
+    @property
+    def sink(self) -> Optional[str]:
+        return f"{self.domain}.{self.table}"
+
+    def __repr__(self) -> str:
+        return f"StarlakeDependency(name={self.name}, dependency_type={self.dependency_type}, cron={self.cron}, dependencies={self.dependencies}, sink={self.sink}, stream={self.stream})"
 class StarlakeDependencies():
     def __init__(self, dependencies: Union[str, List[StarlakeDependency]], **kwargs):
         """Initializes a new StarlakeDependencies instance.
@@ -100,6 +108,8 @@ class StarlakeDependencies():
 
             cron: Optional[str] = data.get('cron', None)
 
+            sink = data.get('sink', None)
+
             stream: Optional[str] = data.get('stream', None)
 
             return StarlakeDependency(
@@ -107,6 +117,7 @@ class StarlakeDependencies():
                 dependency_type=dependency_type, 
                 cron=cron, 
                 dependencies=[generate_dependency(dependency) for dependency in task.get('children', [])],
+                sink=sink,
                 stream=stream
             )
 
@@ -163,6 +174,7 @@ class StarlakeDependencies():
                 if len(task.dependencies) > 0:
                     for dependency in task.dependencies:
                         name = dependency.name
+                        sink = dependency.sink
                         uri = dependency.uri
                         stream = dependency.stream
                         if uri not in uris and uri not in temp_filtered_datasets:
@@ -173,6 +185,8 @@ class StarlakeDependencies():
                                 kw['sl_schedule_parameter_name'] = sl_schedule_parameter_name
                             if sl_schedule_format is not None:
                                 kw['sl_schedule_format'] = sl_schedule_format
+                            if sink is not None:
+                                kw['sink'] = sink
                             if stream is not None:
                                 kw['stream'] = stream
                             dataset = StarlakeDataset(name=name, **kw)

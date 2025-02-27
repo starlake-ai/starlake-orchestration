@@ -54,19 +54,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         """
         return StarlakeExecutionEnvironment.SQL
 
-    def update_events(self, event: StarlakeDataset, **kwargs) -> Tuple[(str, List[StarlakeDataset])]:
-        """Add the event to the list of Snowflake events that will be triggered.
-
-        Args:
-            event (StarlakeDataset): The event to add.
-
-        Returns:
-            Tuple[(str, List[StarlakeDataset]): The tuple containing the list of snowflake events to trigger.
-        """
-        events: List[StarlakeDataset] = kwargs.get('events', [])
-        events.append(event)
-        return 'events', events
-
     def start_op(self, task_id, scheduled: bool, not_scheduled_datasets: Optional[List[StarlakeDataset]], least_frequent_datasets: Optional[List[StarlakeDataset]], most_frequent_datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[DAGTask]:
         """Overrides IStarlakeJob.start_op()
         It represents the first task of a pipeline, it will define the optional condition that may trigger the DAG.
@@ -92,25 +79,25 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             changes = dict() # tracks the datasets whose changes have to be checked
 
             if least_frequent_datasets:
-                print(f"least frequent datasets: {','.join(list(map(lambda x: x.name, least_frequent_datasets)))}")
+                print(f"least frequent datasets: {','.join(list(map(lambda x: x.sink, least_frequent_datasets)))}")
                 for dataset in least_frequent_datasets:
-                    changes.update({dataset.name: dataset.cron})
+                    changes.update({dataset.sink: dataset.cron})
 
             not_scheduled_streams = set() # set of streams which underlying datasets are not scheduled
             not_scheduled_datasets_without_streams = []
             if not_scheduled_datasets:
-                print(f"not scheduled datasets: {','.join(list(map(lambda x: x.name, not_scheduled_datasets)))}")
+                print(f"not scheduled datasets: {','.join(list(map(lambda x: x.sink, not_scheduled_datasets)))}")
                 for dataset in not_scheduled_datasets:
                     if dataset.stream:
                         not_scheduled_streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
                     else:
                         not_scheduled_datasets_without_streams.append(dataset)
             if not_scheduled_datasets_without_streams:
-                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, not_scheduled_datasets_without_streams)))}")
+                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.sink, not_scheduled_datasets_without_streams)))}")
                 ... # nothing to do here
 
             if most_frequent_datasets:
-                print(f"most frequent datasets: {','.join(list(map(lambda x: x.name, most_frequent_datasets)))}")
+                print(f"most frequent datasets: {','.join(list(map(lambda x: x.sink, most_frequent_datasets)))}")
             streams = set()
             most_frequent_datasets_without_streams = []
             if most_frequent_datasets:
@@ -119,9 +106,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
                     else:
                         most_frequent_datasets_without_streams.append(dataset)
-                        changes.update({dataset.name: dataset.cron})
+                        changes.update({dataset.sink: dataset.cron})
             if most_frequent_datasets_without_streams:
-                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.name, most_frequent_datasets_without_streams)))}")
+                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.sink, most_frequent_datasets_without_streams)))}")
                 ...
 
             if streams:
@@ -300,7 +287,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             DAGTask: The Snowflake task.
         """
         kwargs.update({'transform': True})
-        sink = kwargs.get('sink', transform_name)
+        if dataset:
+            sink = dataset.sink
+        else:
+            params = kwargs.get('params', dict())
+            sink = params.get('sink', kwargs.get('sink', transform_name))
         kwargs.update({'sink': sink})
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset, **kwargs)
 
@@ -509,6 +500,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     print("Error inserting audit record")
                             else:
                                 print("Audit schema does not exist")
+                            
+                            # RUN expectations
 
                         except Exception as e:
                             # ROLLBACK transaction

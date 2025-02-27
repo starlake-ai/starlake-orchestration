@@ -17,10 +17,6 @@ sl_job = StarlakeJobFactory.create_job(
 
 cron = "{{ context.cron }}"
 
-from ai.starlake.common import sanitize_id, sort_crons_by_frequency
-
-from ai.starlake.dataset import StarlakeDataset
-
 from ai.starlake.orchestration import StarlakeDependencies, StarlakeDependency, StarlakeDependencyType, OrchestrationFactory, AbstractTaskGroup, AbstractTask
 
 from typing import List, Optional, Set, Union
@@ -41,11 +37,12 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
         pre_tasks = pipeline.pre_tasks()
 
         # create a task
-        def create_task(task_id: str, task_name: str, task_type: StarlakeDependencyType) -> Union[AbstractTask, AbstractTaskGroup]:
+        def create_task(task_id: str, task_name: str, task_type: StarlakeDependencyType, task_sink:str) -> Union[AbstractTask, AbstractTaskGroup]:
             if (task_type == StarlakeDependencyType.TASK):
                 return pipeline.sl_transform(
                     task_id=task_id, 
                     transform_name=task_name,
+                    params={'sink': task_sink},
                 )
             else:
                 load_domain_and_table = task_name.split(".", 1)
@@ -63,6 +60,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             task_group_id = task.uri
             task_type = task.dependency_type
             task_id = f"{task_group_id}_{task_type}"
+            task_sink = task.sink
             
             if load_dependencies and parent_group_id:
                 task_id = parent_group_id + "_" + task_id # to ensure task_id uniqueness
@@ -78,11 +76,11 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             if children.__len__() > 0:
                 with orchestration.sl_create_task_group(group_id=task_group_id, pipeline=pipeline) as task_group:
                     upstream_tasks = [generate_task_group_for_task(child, parent_group_id=task_group_id) for child in children]
-                    task = create_task(task_id, task_name, task_type)
+                    task = create_task(task_id, task_name, task_type, task_sink)
                     task << upstream_tasks
                 return task_group
             else:
-                task = create_task(task_id=task_id, task_name=task_name, task_type=task_type)
+                task = create_task(task_id=task_id, task_name=task_name, task_type=task_type, task_sink=task_sink)
                 return task
 
         all_transform_tasks = [generate_task_group_for_task(task) for task in dependencies if task.name not in all_dependencies]

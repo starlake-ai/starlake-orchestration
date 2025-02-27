@@ -39,17 +39,13 @@ sl_job = StarlakeJobFactory.create_job(
 
 cron = "None"
 
-from ai.starlake.common import sanitize_id, sort_crons_by_frequency
-
-from ai.starlake.dataset import StarlakeDataset
-
 from ai.starlake.orchestration import StarlakeDependencies, StarlakeDependency, StarlakeDependencyType, OrchestrationFactory, AbstractTaskGroup, AbstractTask
 
 from typing import List, Optional, Set, Union
 
 dependencies=StarlakeDependencies(dependencies="""[ {
   "data" : {
-    "name" : "kpi.order_items_analysis",
+    "name" : "kpi.order_items_analysis0",
     "typ" : "task",
     "parent" : "starbake.order_line",
     "parentTyp" : "table",
@@ -277,7 +273,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
 } ]""")
 
 statements = {
-  "kpi.order_items_analysis" : {
+  "kpi.order_items_analysis0" : {
     "preActions" : [ "USE kpi" ],
     "mainSqlIfNotExists" : [ "CREATE TABLE kpi.order_items_analysis AS WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, List( p.name || ' (' || o.quantity || ')' ) AS purchased_items\n, Sum( o.quantity * p.price ) AS total_order_value\nFROM starbake.order_line o\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id;" ],
     "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.order_items_analysis", "INSERT INTO kpi.order_items_analysis WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, List( p.name || ' (' || o.quantity || ')' ) AS purchased_items\n, Sum( o.quantity * p.price ) AS total_order_value\nFROM starbake.order_line o\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id" ]
@@ -322,11 +318,12 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
         pre_tasks = pipeline.pre_tasks()
 
         # create a task
-        def create_task(task_id: str, task_name: str, task_type: StarlakeDependencyType) -> Union[AbstractTask, AbstractTaskGroup]:
+        def create_task(task_id: str, task_name: str, task_type: StarlakeDependencyType, task_sink:str) -> Union[AbstractTask, AbstractTaskGroup]:
             if (task_type == StarlakeDependencyType.TASK):
                 return pipeline.sl_transform(
                     task_id=task_id, 
                     transform_name=task_name,
+                    params={'sink': task_sink},
                 )
             else:
                 load_domain_and_table = task_name.split(".", 1)
@@ -344,6 +341,7 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             task_group_id = task.uri
             task_type = task.dependency_type
             task_id = f"{task_group_id}_{task_type}"
+            task_sink = task.sink
             
             if load_dependencies and parent_group_id:
                 task_id = parent_group_id + "_" + task_id # to ensure task_id uniqueness
@@ -359,11 +357,11 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             if children.__len__() > 0:
                 with orchestration.sl_create_task_group(group_id=task_group_id, pipeline=pipeline) as task_group:
                     upstream_tasks = [generate_task_group_for_task(child, parent_group_id=task_group_id) for child in children]
-                    task = create_task(task_id, task_name, task_type)
+                    task = create_task(task_id, task_name, task_type, task_sink)
                     task << upstream_tasks
                 return task_group
             else:
-                task = create_task(task_id=task_id, task_name=task_name, task_type=task_type)
+                task = create_task(task_id=task_id, task_name=task_name, task_type=task_type, task_sink=task_sink)
                 return task
 
         all_transform_tasks = [generate_task_group_for_task(task) for task in dependencies if task.name not in all_dependencies]
@@ -391,6 +389,8 @@ dag: DAG = pipeline.dag
 for task in dag.tasks:
     for pre in task.predecessors:
         print(f"Task {task.name} depends on {pre.name}")
+for dep in dependencies.dependencies:
+    print(f"Dependency {dep.name} with sink {dep.sink} has {len(dep.dependencies)} children")
 
 from ai.starlake.orchestration import AbstractPipeline
 from snowflake.core import Root
