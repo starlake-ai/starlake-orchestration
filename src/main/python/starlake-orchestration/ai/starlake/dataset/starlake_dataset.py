@@ -7,18 +7,24 @@ from ai.starlake.common import asQueryParameters, sanitize_id, sl_schedule, sl_s
 from typing import Generic, List, Optional, TypeVar
 
 class StarlakeDataset():
-    def __init__(self, name: str, parameters: Optional[dict] = None, cron: Optional[str] = None, stream: Optional[str] = None, **kwargs):
+    def __init__(self, name: str, parameters: Optional[dict] = None, cron: Optional[str] = None, sink: Optional[str] = None, stream: Optional[str] = None, **kwargs):
         """Initializes a new StarlakeDataset instance.
 
         Args:
             name (str): The required dataset name.
             parameters (dict, optional): The optional dataset parameters. Defaults to None.
+            cron (str, optional): The optional cron. Defaults to None.
+            sink (str, optional): The optional sink. Defaults to None.
+            stream (str, optional): The optional stream. Defaults to None.
         """
         self._name = name
-        self._uri = sanitize_id(name).lower()
-        domain_table = name.split(".")
+        if sink:
+            domain_table = sink.split(".")
+        else:
+            domain_table = name.split(".")
         self._domain = domain_table[0]
         self._table = domain_table[-1]
+        self._uri = sanitize_id(self.sink).lower()
         params = kwargs.get('params', dict())
         if cron is None:
             if parameters is not None and 'cron' in parameters:
@@ -89,8 +95,12 @@ class StarlakeDataset():
     def stream(self) -> Optional[str]:
         return self._stream
 
+    @property
+    def sink(self) -> Optional[str]:
+        return f"{self.domain}.{self.table}"
+
     def refresh(self) -> StarlakeDataset:
-        return StarlakeDataset(self.name, self.parameters, self.cron, self.stream, sl_schedule_parameter_name=self.sl_schedule_parameter_name, sl_schedule_format=self.sl_schedule_format)
+        return StarlakeDataset(self.name, self.parameters, self.cron, self.sink, self.stream, sl_schedule_parameter_name=self.sl_schedule_parameter_name, sl_schedule_format=self.sl_schedule_format)
 
     @staticmethod
     def refresh_datasets(datasets: Optional[List[StarlakeDataset]]) -> Optional[List[StarlakeDataset]]:
