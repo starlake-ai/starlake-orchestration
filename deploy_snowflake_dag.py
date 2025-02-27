@@ -1,4 +1,4 @@
-from snowflake_dag import deploy_dag
+from snowflake_dag import deploy_dag, pipeline
 from snowflake.snowpark import Session
 
 import os
@@ -12,4 +12,4 @@ options = {
 #    "warehouse": os.environ['SNOWFLAKE_WAREHOUSE'],
 }
 session = Session.builder.configs(options).create()
-deploy_dag(session, os.environ['SNOWFLAKE_DATABASE'], os.environ['SNOWFLAKE_SCHEMA'])
+deploy_dag(session, pipeline, os.environ['SNOWFLAKE_DATABASE'], os.environ['SNOWFLAKE_SCHEMA'])
