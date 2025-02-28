@@ -160,11 +160,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             else:
                                 sl_end_date = previous
                             sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
-                            change = f"SELECT * FROM {dataset} WHERE CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')"
+                            change = f"SELECT count(*) FROM {dataset} WHERE CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')"
                             print(f"Checking changes for dataset {dataset} from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)} -> {change}")
                             df = session.sql(query=change)
-                            rows = df.collect()
-                            if rows.__len__() == 0:
+                            count = df.collect()[0][0]
+                            if count == 0:
                                 raise ValueError(f"Dataset {dataset} has no changes from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
                             print(f"Dataset {dataset} has data from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
                         except CroniterBadCronError:
