@@ -28,6 +28,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         except MissingEnvironmentVariable:
             self._warehouse = None
         self._packages=["croniter", "python-dateutil"]
+        timezone = kwargs.get('timezone', __class__.get_context_var(var_name='timezone', default_value='Europe/Paris', options=self.options))
+        self._timezone = timezone
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -40,6 +42,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
     @property
     def packages(self) -> List[str]:
         return self._packages
+
+    @property
+    def timezone(self) -> str:
+        return self._timezone
 
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
