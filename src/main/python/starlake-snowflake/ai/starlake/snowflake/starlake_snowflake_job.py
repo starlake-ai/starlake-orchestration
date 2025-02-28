@@ -169,18 +169,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         except CroniterBadCronError:
                             raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-                partial_fun = partial(
-                        fun,
-                        changes=changes,
-                        format=format
-                    )
-
-                update_wrapper(partial_fun, fun)
-
-                partial_fun.__name__ = f"fun_{sanitize_id(task_id)}"
-
                 definition = StoredProcedureCall(
-                    func = partial_fun, 
+                    func = fun, 
+                    args=[changes, format],
                     stage_location=self.stage_location,
                     packages=self.packages
                 )
@@ -262,18 +253,14 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             if failed:
                 raise ValueError(f"upstream task {upstream_task_id} failed")
 
-        partial_fun = partial(
-            fun,
-            upstream_task_id=upstream_task.name,
-        )
-
-        update_wrapper(partial_fun, fun)
-
-        partial_fun.__name__ = f"fun_{sanitize_id(task_id)}"
-
         return DAGTask(
             name=task_id, 
-            definition=partial_fun, 
+            definition=StoredProcedureCall(
+                func = fun,
+                args=[upstream_task.name],
+                stage_location=self.stage_location,
+                packages=self.packages
+            ), 
             comment=comment, 
             **kwargs
         )
@@ -606,8 +593,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             else:
                                 print("Audit schema does not exist")
                             
-                            # RUN expectations
-
                         except Exception as e:
                             # ROLLBACK transaction
                             session.sql("ROLLBACK").collect()
@@ -630,26 +615,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     kwargs.pop('params', None)
                     kwargs.pop('events', None)
 
-                    partial_fun = partial(
-                        fun, 
-                        sink=sink, 
-                        statements=statements, 
-                        audit=audit,
-                        expectations=expectations,
-                        expectation_items=expectation_items,
-                        params=safe_params, 
-                        cron_expr=cron_expr,
-                        format=format
-                    )
-
-                    update_wrapper(partial_fun, fun)
-
-                    partial_fun.__name__ = f"fun_{sanitize_id(task_id)}"
-
                     return DAGTask(
                         name=task_id, 
                         definition=StoredProcedureCall(
-                            func = partial_fun, 
+                            func = fun,
+                            args=[sink, statements, audit, expectations, expectation_items, safe_params, cron_expr, format], 
                             stage_location=self.stage_location,
                             packages=self.packages
                         ), 
