@@ -1,8 +1,6 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
-from functools import partial, update_wrapper
-
-from ai.starlake.common import MissingEnvironmentVariable, sanitize_id
+from ai.starlake.common import MissingEnvironmentVariable
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, StarlakeExecutionEnvironment
 
@@ -11,8 +9,7 @@ from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 from snowflake.core.task import StoredProcedureCall
 from snowflake.core.task.dagv1 import DAGTask
 
-from snowflake.snowpark import Session, DataFrame
-from snowflake.snowpark.row import Row
+from snowflake.snowpark import Session
 
 class SnowflakeEvent(AbstractEvent[StarlakeDataset]):
     @classmethod
