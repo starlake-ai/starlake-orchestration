@@ -17,10 +17,13 @@ class SnowflakePipeline(AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDa
 
         snowflake_schedule: Union[Cron, None] = None
         if self.cron is not None:
-            snowflake_schedule = Cron(self.cron, "Europe/Paris")
+            snowflake_schedule = Cron(self.cron, self.job.timezone)
         elif self.datasets is not None:
-            # TODO add the logic to convert the starlake datasets to snowflake streams
-            ...
+            if self.computed_cron_expr is not None:
+                snowflake_schedule = Cron(self.computed_cron_expr, self.job.timezone)
+            else:
+                from datetime import timedelta
+                snowflake_schedule = timedelta(minutes=5)
 
         self.dag = DAG(
             name=self.pipeline_id,
