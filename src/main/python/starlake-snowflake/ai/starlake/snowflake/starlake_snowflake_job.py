@@ -144,11 +144,19 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             start_time = original_schedule
                     else:
                         start_time = datetime.fromtimestamp(datetime.now().timestamp())
+
+                    def check_if_dataset_exists(dataset: str) -> bool:
+                        df = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'")
+                        rows = df.collect()
+                        return rows.__len__() > 0
+
                     for dataset, cron_expr in changes.items():
-                        # enabling change tracking for the dataset
-                        print(f"Enabling change tracking for dataset {dataset}")
-                        session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect() # should be done once and when we create our datasets
+                        if not check_if_dataset_exists(dataset):
+                            raise ValueError(f"Dataset {dataset} does not exist")
                         try:
+                            # enabling change tracking for the dataset
+                            print(f"Enabling change tracking for dataset {dataset}")
+                            session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect() # should be done once and when we create our datasets
                             croniter(cron_expr)
                             iter = croniter(cron_expr, start_time)
                             # get the start and end date of the current cron iteration
@@ -169,6 +177,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             print(f"Dataset {dataset} has data from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
                         except CroniterBadCronError:
                             raise ValueError(f"Invalid cron expression: {cron_expr}")
+                        except Exception as e:
+                            raise ValueError(f"Error checking changes for dataset {dataset}: {str(e)}")
 
                 definition = StoredProcedureCall(
                     func = fun, 
@@ -384,7 +394,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             raise ValueError(f"Valeur invalide : {value}")
 
                         def check_if_schema_exists(domain: str, schema: str) -> bool:
-                            df = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE = '{domain}.{schema}'")
+                            df = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{domain}.{schema}'")
                             rows = df.collect()
                             return rows.__len__() > 0
 
