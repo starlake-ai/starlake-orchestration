@@ -7,9 +7,9 @@ options = {
     "account": os.environ['SNOWFLAKE_ACCOUNT'],
     "user": os.environ['SNOWFLAKE_USER'],
     "password": os.environ['SNOWFLAKE_PASSWORD'],
-#    "database": os.environ['SNOWFLAKE_DATABASE'],
+#    "database": os.environ['SNOWFLAKE_DB'],
 #    "schema": "os.environ['SNOWFLAKE_SCHEMA']",
 #    "warehouse": os.environ['SNOWFLAKE_WAREHOUSE'],
 }
 session = Session.builder.configs(options).create()
-deploy_dag(session, pipeline, os.environ['SNOWFLAKE_DATABASE'], os.environ['SNOWFLAKE_SCHEMA'])
+deploy_dag(session, pipeline, os.environ['SNOWFLAKE_DB'], os.environ['SNOWFLAKE_SCHEMA'])
