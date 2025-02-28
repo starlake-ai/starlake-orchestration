@@ -133,14 +133,15 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     from croniter import croniter
                     from croniter.croniter import CroniterBadCronError
                     from datetime import datetime
-                    from snowflake.core.task.context import TaskContext
-                    context = TaskContext(session)
                     # get the original scheduled timestamp of the initial graph run in the current group
                     # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
-                    original_schedule = context.get_current_task_graph_original_schedule()
+                    original_schedule = session.sql(f"select to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))").collect()[0][0]
                     if original_schedule:
-                        from dateutil import parser
-                        start_time = parser.parse(original_schedule)
+                        if isinstance(original_schedule, str):
+                            from dateutil import parser
+                            start_time = parser.parse(original_schedule)
+                        else:
+                            start_time = original_schedule
                     else:
                         start_time = datetime.fromtimestamp(datetime.now().timestamp())
                     for dataset, cron_expr in changes.items():
@@ -340,14 +341,15 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             from croniter import croniter
                             from croniter.croniter import CroniterBadCronError
                             from datetime import datetime
-                            from snowflake.core.task.context import TaskContext
-                            context = TaskContext(session)
                             # get the original scheduled timestamp of the initial graph run in the current group
                             # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
-                            original_schedule = context.get_current_task_graph_original_schedule()
+                            original_schedule = session.sql(f"select to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))").collect()[0][0]
                             if original_schedule:
-                                from dateutil import parser
-                                start_time = parser.parse(original_schedule)
+                                if isinstance(original_schedule, str):
+                                    from dateutil import parser
+                                    start_time = parser.parse(original_schedule)
+                                else:
+                                    start_time = original_schedule
                             else:
                                 start_time = datetime.fromtimestamp(datetime.now().timestamp())
                             try:
@@ -365,7 +367,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             except CroniterBadCronError:
                                 raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-                        jobid = TaskContext(session).get_current_task_name()
+                        jobid = str(session.call("system$current_user_task_name"))
 
                         def bindParams(stmt: str) -> str:
                             return stmt.format_map(params)
