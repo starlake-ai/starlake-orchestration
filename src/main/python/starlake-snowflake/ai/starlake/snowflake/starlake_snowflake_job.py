@@ -347,10 +347,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                     # create the function that will execute the transform
                     def fun(session: Session, sink: str, statements: dict, audit: dict, expectations: dict, expectation_items: list, params: dict, cron_expr: Optional[str], format: str) -> None:
+                        from datetime import datetime
+
                         if cron_expr:
                             from croniter import croniter
                             from croniter.croniter import CroniterBadCronError
-                            from datetime import datetime
                             # get the original scheduled timestamp of the initial graph run in the current group
                             # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
                             original_schedule = session.sql(f"select to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))").collect()[0][0]
@@ -534,7 +535,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 if failOnError:
                                     raise e
 
-                        start = datetime.datetime.now()
+                        start = datetime.now()
 
                         try:
                             # BEGIN transaction
@@ -551,7 +552,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             preActions: List[str] = statements.get('preActions', [])
                             for sql in preActions:
                                 stmt: str = bindParams(sql)
-                                session.sql(stmt, **params).collect()
+                                session.sql(stmt).collect()
 
                             # execute preSqls
                             preSqls: List[str] = statements.get('preSqls', [])
@@ -592,7 +593,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                             # COMMIT transaction
                             session.sql("COMMIT").collect()
-                            end = datetime.datetime.now()
+                            end = datetime.now()
                             duration = (end - start).total_seconds()
                             print(f"Duration in seconds: {duration}")
                             if audit and check_if_audit_schema_exists():
@@ -608,7 +609,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         except Exception as e:
                             # ROLLBACK transaction
                             session.sql("ROLLBACK").collect()
-                            end = datetime.datetime.now()
+                            end = datetime.now()
                             duration = (end - start).total_seconds()
                             error_message = str(e)
                             print(f"Duration in seconds: {duration}")
