@@ -75,7 +75,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "writeStrategy" : {
         "type" : "APPEND"
       },
-      "cron" : "0 * * * *"
+      "cron" : "None"
     },
     "task" : false
   } ],
@@ -125,7 +125,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
         "writeStrategy" : {
           "type" : "APPEND"
         },
-        "cron" : "0 * * * *"
+        "cron" : "None"
       },
       "task" : false
     } ],
@@ -162,7 +162,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
         "writeStrategy" : {
           "type" : "APPEND"
         },
-        "cron" : "0 * * * *"
+        "cron" : "None"
       },
       "task" : false
     }, {
@@ -212,7 +212,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "writeStrategy" : {
         "type" : "APPEND"
       },
-      "cron" : "0 * * * *"
+      "cron" : "None"
     },
     "task" : false
   }, {
@@ -260,7 +260,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "writeStrategy" : {
         "type" : "APPEND"
       },
-      "cron" : "0 * * * *"
+      "cron" : "None"
     },
     "task" : false
   } ],
@@ -302,7 +302,52 @@ statements = {
   }
 }
 
-expectation_items = { }
+expectation_items = {
+  "kpi.order_items_analysis" : [ {
+    "name" : "is_col_value_not_unique",
+    "params" : "order_id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT order_id, count(*) as cnt FROM sl_this GROUP BY order_id) AS COL_COUNT",
+    "failOnError" : "no"
+  }, {
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_items_analysis)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "failOnError" : "no"
+  } ],
+  "kpi.order_summary" : [ {
+    "name" : "is_col_value_not_unique",
+    "params" : "order_id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT order_id, count(*) as cnt FROM sl_this GROUP BY order_id) AS COL_COUNT",
+    "failOnError" : "no"
+  }, {
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.order_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "failOnError" : "no"
+  } ],
+  "kpi.product_summary" : [ {
+    "name" : "is_col_value_not_unique",
+    "params" : "order_id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT order_id, count(*) as cnt FROM sl_this GROUP BY order_id) AS COL_COUNT",
+    "failOnError" : "no"
+  }, {
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.product_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "failOnError" : "no"
+  } ],
+  "kpi.revenue_summary" : [ {
+    "name" : "is_col_value_not_unique",
+    "params" : "order_id",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT order_id, count(*) as cnt FROM sl_this GROUP BY order_id) AS COL_COUNT",
+    "failOnError" : "no"
+  }, {
+    "name" : "is_row_count_to_be_between",
+    "params" : "1, 2",
+    "query" : "WITH SL_THIS AS (SELECT * FROM kpi.revenue_summary)\nselect\n    case\n    when count(*) between 1 and 2 then 1\n    else 0\n    end\n    from SL_THIS",
+    "failOnError" : "no"
+  } ]
+}
 
 audit = {
   "preActions" : [ "USE SCHEMA audit" ],
