@@ -262,8 +262,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             return stmt.format_map(params)
 
                         def str_to_bool(value: str) -> bool:
-                            truthy = ['yes', 'y', 'true', '1']
-                            falsy = ['no', 'n', 'false', '0']
+                            truthy = {'yes', 'y', 'true', '1'}
+                            falsy = {'no', 'n', 'false', '0'}
 
                             value = value.strip().lower()
                             if value in truthy:
