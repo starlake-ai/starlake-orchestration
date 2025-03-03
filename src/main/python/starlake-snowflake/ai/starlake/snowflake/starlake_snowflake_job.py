@@ -262,8 +262,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             return stmt.format_map(params)
 
                         def str_to_bool(value: str) -> bool:
-                            truthy = {'yes', 'y', 'true', '1'}
-                            falsy = {'no', 'n', 'false', '0'}
+                            truthy = ['yes', 'y', 'true', '1']
+                            falsy = ['no', 'n', 'false', '0']
 
                             value = value.strip().lower()
                             if value in truthy:
@@ -398,18 +398,18 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     stmt: str = bindParams(query)
                                     df = session.sql(stmt)
                                     rows = df.collect()
-                                    if rows.__len__ != 1:
+                                    if rows.__len__() != 1:
                                         raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
-                                    count = rows.collect()[0][0]
+                                    count = rows[0][0]
                                     #  log expectations as audit in expectation table here
                                     if count != 0:
                                         raise Exception(f'Expectation failed for {sink}: {query}. Expected count to be equal to 0 but got {count}')
-                                    log_expectation(domain, schema, True, name, params, query, count, "", datetime.datetime.now())
+                                    log_expectation(domain, schema, True, name, params, query, count, "", datetime.now())
                                 else:
                                     raise Exception(f'Expectation failed for {sink}: {name}. Query not found')
                             except Exception as e:
                                 print(f"Error running expectation {name}: {str(e)}")
-                                log_expectation(domain, schema, False, name, params, query, count, str(e), datetime.datetime.now())
+                                log_expectation(domain, schema, False, name, params, query, count, str(e), datetime.now())
                                 if failOnError:
                                     raise e
 
