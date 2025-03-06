@@ -5,6 +5,11 @@ from typing import List, Tuple
 import os
 import datetime
 
+
+
+#
+# au deploiement de dags, l'utilisateur rajoute le nom de la connexion 
+# et le nom du schema de déploiement
 connection_parameters = {
    "account": os.environ['SNOWFLAKE_ACCOUNT'],
    "user": os.environ['SNOWFLAKE_USER'],
@@ -15,6 +20,9 @@ connection_parameters = {
    "database": os.environ['SNOWFLAKE_DB'],  # optional
 }
 
+
+# deploy.scala
+# SNOWFLAKE_ACCOUNT=A SNOWFLAKE_USER=U SNOWFLAKE_PASSWORD=P SNOWFLAKE_WAREHOUSE=W python deploy.py
 
 expectation_items = {
   "kpi.order_items_analysis" : [ {
