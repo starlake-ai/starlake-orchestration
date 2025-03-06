@@ -205,6 +205,7 @@ class SnowflakePipeline(AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDa
             not_scheduled_datasets=self.not_scheduled_datasets,
             least_frequent_datasets=self.least_frequent_datasets,
             most_frequent_datasets=self.most_frequent_datasets,
+            task_auto_retry_attempts=job.retries,
             
         )
 
