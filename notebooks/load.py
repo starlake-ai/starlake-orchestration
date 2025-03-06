@@ -3,8 +3,9 @@ from snowflake.snowpark import DataFrame
 from snowflake.snowpark.row import Row
 from typing import List, Tuple
 import os
-import datetime
+from datetime import datetime
 import json
+from snowflake.snowpark.types import IntegerType, StringType, StructField, StructType, DateType
 
 
 
@@ -147,6 +148,26 @@ json_context = '''{
   "sl_airflow_access_control" : "None"
 }'''
 
+sl_debug = True
+def run_sql(session: Session, sql: str) -> DataFrame:
+  my_schema = StructType([StructField("a", IntegerType())])
+  if sl_debug:
+    print(sql)
+    return session.create_dataframe([], schema=my_schema)
+  else:
+    return session.sql(sql).collect()
+
+def str_to_bool(value: str) -> bool:
+    truthy = {'yes', 'y', 'true', '1'}
+    falsy = {'no', 'n', 'false', '0'}
+
+    value = value.strip().lower()
+    if value in truthy:
+        return True
+    elif value in falsy:
+        return False
+    raise ValueError(f"Valeur invalide : {value}")
+
 def sl_is_true(value: str, default: bool) -> bool:
    if value is None:
       return default
@@ -164,13 +185,19 @@ def sl_get_option(metadata: dict, key: str, metadata_key: str) -> str:
 context = json.loads(json_context)
 schema = context["schema"]
 metadata = schema["metadata"]
+audit = context["audit"]
+expectations = context["expectations"]
+task = context["task"]
+domain = task["domain"]
+table = task["table"]
+expectation_items = context["expectationItems"]
+jobid = task["domain"] + "." + task["table"]
 
 if "options" in metadata:
   options = metadata["options"]
 else:
   options = {}
 
-task = context["task"]
 compression = sl_is_true(sl_get_option(metadata, "compression", None), True)
 if compression:
   compression_format = "COMPRESSION = GZIP" 
@@ -190,22 +217,15 @@ else:
 def sl_put_to_stage(session: Session):
   if context["fileSystem"] == 'file://':
     sql = f"CREATE TEMPORARY STAGE IF NOT EXISTS {context['tempStage']}"
-    print(sql)
-    #session.sql(sql).collect()
+    run_sql(session, sql)
     if (sl_is_true(sl_get_option(metadata, "compression", None), True)):
         auto_compress = "TRUE"
     else:
         auto_compress = "FALSE"
     files=context["schema"]["metadata"]["directory"] + '/' + context["schema"]["pattern"].replace(".*", "*")
     sql = f"PUT {files} @{context['tempStage']}/{context['task']['domain']} AUTO_COMPRESS = {auto_compress}"
-    print(sql)
-    #session.sql(sql).collect()
+    run_sql(session, sql)
 
-def sl_copy(session: Session):
-   if (task['steps'] == '1'):
-      sl_one_step(session)
-   else:
-      sl_two_steps(session)
 
 
    
@@ -222,9 +242,16 @@ def sl_extra_copy_options(metadata: dict, common_options: list[str]) -> str:
       copy_extra_options += f"{k} = {v}\n"
   return copy_extra_options
 
+def sl_purge_option(metadata: dict) -> str:
+  purge = sl_get_option(metadata, "PURGE", None)
+  if purge is None:
+    purge = "FALSE"
+  return purge.upper()
 
 def sl_build_copy_csv(targetTable: str) -> str:
   skipCount = sl_get_option(metadata, "SKIP_HEADER", None)
+  purge = sl_purge_option(metadata)
+
   if skipCount is None and metadata['withHeader']:
     skipCount = '1'
     common_options = [
@@ -240,6 +267,7 @@ def sl_build_copy_csv(targetTable: str) -> str:
     COPY INTO {targetTable} 
     FROM @{context['tempStage']}/{context['task']['domain']} 
     PATTERN = '{schema['pattern']}'
+    PURGE = {purge}
     FILE_FORMAT = (
       TYPE = CSV
       SKIP_HEADER = {skipCount} 
@@ -256,8 +284,8 @@ def sl_build_copy_csv(targetTable: str) -> str:
 
 
 def sl_build_copy_json(targetTable: str) -> str:
+  purge = sl_purge_option(metadata)
   strip_outer_array = sl_get_option(metadata, "STRIP_OUTER_ARRAY", 'array')
-
   common_options = [
       'STRIP_OUTER_ARRAY', 
       'NULL_IF'
@@ -267,6 +295,7 @@ def sl_build_copy_json(targetTable: str) -> str:
     COPY INTO {targetTable} 
     FROM @{context['tempStage']}/{context['task']['domain']} 
     PATTERN = '{schema['pattern']}'
+    PURGE = {purge}
     FILE_FORMAT = (
       TYPE = JSON
       STRIP_OUTER_ARRAY = {strip_outer_array}
@@ -278,6 +307,7 @@ def sl_build_copy_json(targetTable: str) -> str:
   return sql
    
 def sl_build_copy_other(targetTable: str, format: str) -> str:
+  purge = sl_purge_option(metadata)
   common_options = [
       'NULL_IF'
   ]
@@ -286,6 +316,7 @@ def sl_build_copy_other(targetTable: str, format: str) -> str:
     COPY INTO {targetTable} 
     FROM @{context['tempStage']}/{context['task']['domain']} 
     PATTERN = '{schema['pattern']}'
+    PURGE = {purge}
     FILE_FORMAT = (
       TYPE = {format}
       {null_if}
@@ -308,23 +339,266 @@ def sl_build_copy(targetTable: str) -> str:
   else:
     raise ValueError(f"Unsupported format {metadata['format']}")
   
-def sl_one_step(session: Session):
-    sql = sl_build_copy(task['targetTableName'])
-    print(sql)
-    #session.sql(sql).collect()
+def sl_copy_step(session: Session, targetTable: str):
+    sql = sl_build_copy(targetTable)
+    run_sql(session, sql)
 
-def sl_two_steps(session: Session):
+def sl_copy_two_steps(session: Session):
    pass
 
+
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+###################################################################
+
+params = dict()
+def bindParams(stmt: str) -> str:
+    return stmt.format_map(params)
+
+
+
+def check_if_table_exists(domain: str, schema: str) -> bool:
+    sql = f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{domain}.{schema}'"
+    df = run_sql(session, sql)
+    rows = df.collect()
+    return rows.__len__() > 0
+
+def check_if_audit_schema_exists() -> bool:
+    if audit:
+        try:
+            # create SQL domain
+            domain = audit.get('domain', ['audit'])[0]
+            query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
+            run_sql(session, query)
+            # execute SQL preActions
+            preActions: List[str] = audit.get('preActions', [])
+            for sql in preActions:
+                stmt: str = bindParams(sql)
+                run_sql(session, stmt)
+            # check if the audit schema exists
+            if not check_if_table_exists(domain, 'audit'):
+                # execute SQL createSchemaSql
+                sqls: List[str] = audit.get('createSchemaSql', [])
+                for sql in sqls:
+                    stmt: str = bindParams(sql)
+                    run_sql(session, stmt)
+                return True
+            else:
+                return True
+        except Exception as e:
+            print(f"Error creating audit schema: {str(e)}")
+            return False
+    else:
+        return False
+
+def check_if_expectations_schema_exists() -> bool:
+    if expectations:
+        try:
+            # create SQL domain
+            domain = expectations.get('domain', ['audit'])[0]
+            query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
+            run_sql(session, query)
+            # check if the expectations schema exists
+            if not check_if_table_exists(domain, 'expectations'):
+                # execute SQL createSchemaSql
+                sqls: List[str] = expectations.get('createSchemaSql', [])
+                for sql in sqls:
+                    stmt: str = bindParams(sql)
+                    run_sql(session, stmt)
+                return True
+            else:
+                return True
+        except Exception as e:
+            print(f"Error creating expectations schema: {str(e)}")
+            return False
+    else:
+        return False
+
+def log_audit(domain: str, schema: str, success: bool, duration: int, message: str, ts: datetime, step: str) -> bool :
+    if audit:
+        audit_domain = audit.get('domain', ['audit'])[0]
+        audit_sqls = audit.get('mainSqlIfExists', None)
+        if audit_sqls:
+            try:
+                audit_sql = audit_sqls[0]
+                formatted_sql = audit_sql.format(
+                    jobid = jobid,
+                    paths = schema,
+                    domain = domain,
+                    schema = schema,
+                    success = str(success),
+                    count = "-1",
+                    countAccepted = "-1",
+                    countRejected = "-1",
+                    timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+                    duration = str(duration),
+                    message = message,
+                    step = step,
+                    database = "",
+                    tenant = ""
+                )
+                insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
+                run_sql(session, insert_sql)
+                return True
+            except Exception as e:
+                print(f"Error inserting audit record: {str(e)}")
+                return False
+        else:
+            return False
+    else:
+        return False
+
+def log_expectation(domain: str, schema: str, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime) -> bool :
+    if expectations:
+        expectation_domain = expectations.get('domain', ['audit'])[0]
+        expectation_sqls = expectations.get('mainSqlIfExists', None)
+        if expectation_sqls:
+            try:
+                expectation_sql = expectation_sqls[0]
+                formatted_sql = expectation_sql.format(
+                    jobid = jobid,
+                    database = "",
+                    domain = domain,
+                    schema = schema,
+                    count = count,
+                    exception = exception,
+                    timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+                    success = str(success),
+                    name = name,
+                    params = params,
+                    sql = sql
+                )
+                insert_sql = f"INSERT INTO {expectation_domain}.expectations {formatted_sql}"
+                run_sql(session, insert_sql)
+                return True
+            except Exception as e:
+                print(f"Error inserting expectations record: {str(e)}")
+                return False
+        else:
+            return False
+    else:
+        return False
+
+def run_expectation(name: str, params: str, query: str, failOnError: bool = False) -> None:
+    count = 0
+    try:
+        if query:
+            stmt: str = bindParams(query)
+            df = run_sql(session, stmt)
+            rows = df.collect()
+            if rows.__len__() != 1:
+                raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
+            count = rows[0][0]
+            #  log expectations as audit in expectation table here
+            if count != 0:
+                raise Exception(f'Expectation failed for {sink}: {query}. Expected count to be equal to 0 but got {count}')
+            log_expectation(domain, schema, True, name, params, query, count, "", datetime.now())
+        else:
+            raise Exception(f'Expectation failed for {sink}: {name}. Query not found')
+    except Exception as e:
+        print(f"Error running expectation {name}: {str(e)}")
+        log_expectation(domain, schema, False, name, params, query, count, str(e), datetime.now())
+        if failOnError:
+            raise e
+
 session = Session.builder.configs(connection_parameters).create()
+
+
 try:
-#   sl_main(session)
-   print("start")
-   sl_put_to_stage(session)
-   sl_copy(session)
-   print("end")
-finally:
-   session.close()
+    # BEGIN transaction
+    run_sql(session, "BEGIN")
+    start = datetime.now()
+    sl_put_to_stage(session)
+    if task["steps"] == "1":
+      for sql in task["createTable"]:
+        stmt: str = bindParams(sql)
+        run_sql(session, stmt)
+      if task["writeStrategy"] == "WRITE_TRUNCATE":
+        sql = f"TRUNCATE TABLE {task['targetTableName']}"
+        run_sql(session, sql)
+      sl_copy_step(session, task['targetTableName'])
+    elif task["steps"] == "2":
+      for sql in task["firstStep"]:
+        stmt: str = bindParams(sql)
+        run_sql(session, stmt)
+      if task["writeStrategy"] == "WRITE_TRUNCATE":
+        sql = f"TRUNCATE TABLE {task['targetTableName']}"
+        run_sql(session, sql)
+      sl_copy_step(session, task['tempTableName'])
+      second_step = task.get("secondStep", None)
+      # execute preSqls
+      preSqls: List[str] = schema.get('presql', [])
+      for sql in preSqls:
+          stmt: str = bindParams(sql)
+          run_sql(session, stmt)
+      if check_if_table_exists(domain, table):
+        # execute addSCD2ColumnsSqls only if table exists
+        scd2_sqls: List[str] = schema.get('addSCD2ColumnsSqls', [])
+        for sql in scd2_sqls:
+            stmt: str = bindParams(sql)
+            run_sql(session, stmt)
+        sqls = second_step["mainSqlIfExists"]
+      else:
+        # addSCD2ColumnsSqls is in the mainSqlIfNotExists sql list if required
+        sqls = second_step["mainSqlIfNotExists"]
+      for sql in sqls:
+          stmt: str = bindParams(sql)
+          run_sql(session, stmt)
+      drop_first_step = task["dropFirstStep"]
+      stmt: str = bindParams(drop_first_step)
+      run_sql(session, stmt)
+    else:
+        raise ValueError(f"Unsupported steps value: {task['steps']}")
+    # execute postSqls
+    postSqls: List[str] = schema.get('postsql', [])
+    for sql in postSqls:
+        stmt: str = bindParams(sql)
+        run_sql(session, stmt)
 
+    # run expectations
+    if expectation_items and check_if_expectations_schema_exists():
+        for expectation in expectation_items:
+            run_expectation(expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')))
 
-
+    # COMMIT transaction
+    run_sql(session, "COMMIT")
+    end = datetime.now()
+    duration = (end - start).total_seconds()
+    print(f"Duration in seconds: {duration}")
+    if audit and check_if_audit_schema_exists():
+        print("Audit schema exists")
+        # insert audit record
+        if log_audit(domain, schema, True, duration, 'Success', end, "LOAD"):
+            print("Audit record inserted")
+        else:
+            print("Error inserting audit record")
+    else:
+        print("Audit schema does not exist")
+    
+except Exception as e:
+    # ROLLBACK transaction
+    run_sql(session, "ROLLBACK")
+    end = datetime.now()
+    duration = (end - start).total_seconds()
+    error_message = str(e)
+    print(f"Duration in seconds: {duration}")
+    print(f"Error: {error_message}")
+    if audit and check_if_audit_schema_exists():
+        print("Audit schema exists")
+        # insert audit record
+        if log_audit(domain, schema, False, duration, error_message, end, "LOAD"):
+            print("Audit record inserted")
+        else:
+            print("Error inserting audit record")
+    else:
+        print("Audit schema does not exist")
+    raise e
