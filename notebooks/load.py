@@ -22,113 +22,73 @@ connection_parameters = {
    "database": os.environ['SNOWFLAKE_DB'],  # optional
 }
 
+
 json_context = '''{
-  "schema" : {
-    "finalName" : "orders",
-    "name" : "orders",
-    "attributes" : [ {
-      "name" : "order_id",
-      "rename" : "id",
-      "array" : false,
-      "privacy" : "NONE",
-      "type" : "string",
-      "required" : true
-    }, {
-      "name" : "customer_id",
-      "rename" : "customer_id",
-      "array" : false,
-      "privacy" : "NONE",
-      "type" : "customerid",
-      "required" : true
-    }, {
-      "name" : "amount",
-      "rename" : "amount",
-      "array" : false,
-      "privacy" : "NONE",
-      "type" : "decimal",
-      "required" : true
-    }, {
-      "name" : "seller_id",
-      "rename" : "seller_id",
-      "array" : false,
-      "privacy" : "NONE",
-      "type" : "string",
-      "required" : false
-    }, {
-      "name" : "ts",
-      "rename" : "ts",
-      "array" : false,
-      "privacy" : "NONE",
-      "type" : "iso_instant",
-      "required" : false
-    } ],
-    "pattern" : "orders-.*.csv",
-    "metadata" : {
-      "format" : "DSV",
-      "multiline" : false,
-      "separator" : ",",
-      "encoding" : "UTF-8",
-      "quote" : "\\"",
-      "escape" : "\\\\",
-      "emptyIsNull" : true,
-      "withHeader" : true,
-      "directory" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/sales",
-      "array" : false
-    }
-  },
-  "fileSystem" : "file://",
-  "sink" : {
-    "sinkFormat" : "parquet",
-    "sinkConnectionRef" : "snowflake"
+  "hr.flat_locations" : {
+    "schema" : {
+      "finalName" : "flat_locations",
+      "name" : "flat_locations",
+      "attributes" : [ {
+        "name" : "id",
+        "rename" : "id",
+        "array" : "false",
+        "privacy" : "NONE",
+        "type" : "string",
+        "required" : "true"
+      }, {
+        "name" : "city",
+        "rename" : "city",
+        "array" : "false",
+        "privacy" : "NONE",
+        "type" : "string",
+        "required" : "true"
+      }, {
+        "name" : "country",
+        "rename" : "country",
+        "array" : "false",
+        "privacy" : "NONE",
+        "type" : "string",
+        "required" : "true"
+      } ],
+      "expectations" : [ {
+        "query" : "is_col_value_not_unique('id')",
+        "failOnError" : "false"
+      } ],
+      "pattern" : "flat_locations-.*.json",
+      "primaryKey" : [ "id" ],
+      "acl" : [ {
+        "aceRole" : "viewer",
+        "aceGrants" : "user:me@me.com,user:you@me.com"
+      }, {
+        "aceRole" : "owner",
+        "aceGrants" : "user:me@you.com,user:you@you.com"
+      } ],
+      "metadata" : {
+        "format" : "JSON",
+        "multiline" : "false",
+        "separator" : ";",
+        "encoding" : "UTF-8",
+        "quote" : "\\"",
+        "escape" : "\\\\",
+        "emptyIsNull" : "true",
+        "withHeader" : "true",
+        "directory" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/hr",
+        "options" : {
+          "opt1" : "value1",
+          "opt2" : "value2"
+        },
+        "array" : "false"
+      }
+    },
+    "fileSystem" : "file://",
+    "sink" : {
+      "sinkFormat" : "parquet",
+      "sinkConnectionRef" : "snowflake"
+    },
+    "tempStage" : "starlake_load_stage_1QGDWc3jZ4"
   },
   "sl_project_id" : "-1",
   "sl_project_name" : "[noname]",
-  "statements" : {
-    "preActions" : [ "USE SCHEMA sales" ],
-    "domain" : [ "sales" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE sales.orders  AS SELECT id, customer_id, amount, seller_id, ts\\n  FROM (\\n    SELECT id, customer_id, amount, seller_id, ts\\n    FROM sales.orders\\n  ) AS SL_INTERNAL_FROM_SELECT;" ],
-    "mainSqlIfExists" : [ "INSERT INTO sales.orders SELECT id, customer_id, amount, seller_id, ts\\n  FROM (\\n    SELECT id, customer_id, amount, seller_id, ts\\n    FROM sales.orders\\n  ) AS SL_INTERNAL_FROM_SELECT" ],
-    "table" : [ "orders" ],
-    "connectionType" : [ "JDBC" ]
-  },
-  "tempStage" : "starlake_load_stage_HyqlWhsCnO",
-  "task" : {
-    "format" : "DSV",
-    "pattern" : "orders-.*.csv",
-    "domain" : "sales",
-    "writeStrategy" : "WRITE_APPEND",
-    "createTable" : [ "CREATE SCHEMA IF NOT EXISTS sales", "CREATE TABLE IF NOT EXISTS sales.orders (id TEXT, customer_id STRING, amount DECIMAL, seller_id STRING, ts TIMESTAMP) " ],
-    "incomingDir" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/sales",
-    "steps" : "1",
-    "targetTableName" : "sales.orders",
-    "table" : "orders"
-  },
-  "audit" : {
-    "preActions" : [ "USE SCHEMA audit" ],
-    "domain" : [ "audit" ],
-    "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\\n                              JOBID VARCHAR NOT NULL,\\n                              PATHS TEXT NOT NULL,\\n                              DOMAIN VARCHAR NOT NULL,\\n                              SCHEMA VARCHAR NOT NULL,\\n                              SUCCESS BOOLEAN NOT NULL,\\n                              COUNT BIGINT NOT NULL,\\n                              COUNTACCEPTED BIGINT NOT NULL,\\n                              COUNTREJECTED BIGINT NOT NULL,\\n                              TIMESTAMP TIMESTAMP NOT NULL,\\n                              DURATION BIGINT NOT NULL,\\n                              MESSAGE VARCHAR NOT NULL,\\n                              STEP VARCHAR NOT NULL,\\n                              DATABASE VARCHAR,\\n                              TENANT VARCHAR\\n                             )\\n    " ],
-    "mainSqlIfExists" : [ "\\n          SELECT\\n            '{jobid}' AS JOBID,\\n            '{paths}' AS PATHS,\\n            '{domain}' AS DOMAIN,\\n            '{schema}' AS SCHEMA,\\n            {success} AS SUCCESS,\\n            {count} AS COUNT,\\n            {countAccepted} AS COUNTACCEPTED,\\n            {countRejected} AS COUNTREJECTED,\\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\\n            {duration} AS DURATION,\\n            '{message}' AS MESSAGE,\\n            '{step}' AS STEP,\\n            '{database}' AS DATABASE,\\n            '{tenant}' AS TENANT\\n        " ],
-    "table" : [ "audit" ],
-    "connectionType" : [ "JDBC" ]
-  },
-  "schedules" : [ {
-    "schedule" : "None",
-    "domains" : [ {
-      "name" : "sales",
-      "finalName" : "sales",
-      "tables" : [ {
-        "name" : "orders",
-        "finalName" : "orders"
-      } ]
-    } ]
-  } ],
-  "expectations" : {
-    "domain" : [ "audit" ],
-    "createSchemaSql" : [ "CREATE TABLE IF NOT EXISTS audit.expectations (\\n                            JOBID VARCHAR NOT NULL,\\n                            DATABASE VARCHAR,\\n                            DOMAIN VARCHAR NOT NULL,\\n                            SCHEMA VARCHAR NOT NULL,\\n                            TIMESTAMP TIMESTAMP NOT NULL,\\n                            NAME VARCHAR NOT NULL,\\n                            PARAMS VARCHAR NOT NULL,\\n                            SQL VARCHAR NOT NULL,\\n                            COUNT BIGINT NOT NULL,\\n                            EXCEPTION VARCHAR NOT NULL,\\n                            SUCCESS BOOLEAN NOT NULL\\n                          )\\n        " ],
-    "mainSqlIfExists" : [ "\\n          SELECT\\n            '{jobid}' AS JOBID,\\n            '{database}' AS DATABASE,\\n            '{domain}' AS DOMAIN,\\n            '{schema}' AS SCHEMA,\\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\\n            '{name}' AS NAME,\\n            '{params}' AS PARAMS,\\n            '{sql}' AS SQL,\\n            {count} AS COUNT,\\n            '{exception}' AS EXCEPTION,\\n            {success} AS SUCCESS\\n        " ],
-    "table" : [ "expectations" ],
-    "connectionType" : [ "JDBC" ]
-  },
   "config" : {
     "template" : "load/airflow__scheduled_table__shell.py.j2",
     "options" : [ {
@@ -142,6 +102,49 @@ json_context = '''{
   },
   "sl_airflow_access_control" : "None"
 }'''
+
+statements = {
+  "hr.flat_locations" : {
+    "format" : "JSON",
+    "pattern" : "flat_locations-.*.json",
+    "domain" : "hr",
+    "writeStrategy" : "WRITE_TRUNCATE",
+    "createTable" : [ "CREATE SCHEMA IF NOT EXISTS hr", "CREATE TABLE IF NOT EXISTS hr.flat_locations (id STRING, city STRING, country STRING) " ],
+    "incomingDir" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/hr",
+    "steps" : "1",
+    "targetTableName" : "hr.flat_locations",
+    "table" : "flat_locations"
+  }
+}
+
+expectation_items = {
+  "hr.flat_locations" : [ {
+    "name" : "is_col_value_not_unique",
+    "params" : "'id'",
+    "query" : "WITH SL_THIS AS (SELECT * FROM hr.flat_locations)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT id, count(*) as cnt FROM sl_this GROUP BY id) AS COL_COUNT",
+    "failOnError" : "no"
+  } ]
+}
+
+audit = {
+  "name" : "audit-hr-flat_locations--1741367745973",
+  "preActions" : [ "USE SCHEMA audit" ],
+  "domain" : [ "audit" ],
+  "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID VARCHAR NOT NULL,\n                              PATHS TEXT NOT NULL,\n                              DOMAIN VARCHAR NOT NULL,\n                              SCHEMA VARCHAR NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION BIGINT NOT NULL,\n                              MESSAGE VARCHAR NOT NULL,\n                              STEP VARCHAR NOT NULL,\n                              DATABASE VARCHAR,\n                              TENANT VARCHAR\n                             )\n    " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{paths}' AS PATHS,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            {success} AS SUCCESS,\n            {count} AS COUNT,\n            {countAccepted} AS COUNTACCEPTED,\n            {countRejected} AS COUNTREJECTED,\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            {duration} AS DURATION,\n            '{message}' AS MESSAGE,\n            '{step}' AS STEP,\n            '{database}' AS DATABASE,\n            '{tenant}' AS TENANT\n        " ],
+  "table" : [ "audit" ],
+  "connectionType" : [ "JDBC" ]
+}
+
+expectations = {
+  "name" : "audit.expectations",
+  "domain" : [ "audit" ],
+  "createSchemaSql" : [ "CREATE TABLE IF NOT EXISTS audit.expectations (\n                            JOBID VARCHAR NOT NULL,\n                            DATABASE VARCHAR,\n                            DOMAIN VARCHAR NOT NULL,\n                            SCHEMA VARCHAR NOT NULL,\n                            TIMESTAMP TIMESTAMP NOT NULL,\n                            NAME VARCHAR NOT NULL,\n                            PARAMS VARCHAR NOT NULL,\n                            SQL VARCHAR NOT NULL,\n                            COUNT BIGINT NOT NULL,\n                            EXCEPTION VARCHAR NOT NULL,\n                            SUCCESS BOOLEAN NOT NULL\n                          )\n        " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{database}' AS DATABASE,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            '{name}' AS NAME,\n            '{params}' AS PARAMS,\n            '{sql}' AS SQL,\n            {count} AS COUNT,\n            '{exception}' AS EXCEPTION,\n            {success} AS SUCCESS\n        " ],
+  "table" : [ "expectations" ],
+  "connectionType" : [ "JDBC" ]
+}
+
 
 
 sl_debug = False
