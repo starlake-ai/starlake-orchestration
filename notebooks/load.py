@@ -21,55 +21,58 @@ connection_parameters = {
 #   "schema": "<your snowflake schema>",  # optional
    "database": os.environ['SNOWFLAKE_DB'],  # optional
 }
+
 json_context = '''{
   "schema" : {
-    "finalName" : "flat_locations",
-    "name" : "flat_locations",
+    "finalName" : "orders",
+    "name" : "orders",
     "attributes" : [ {
-      "name" : "id",
+      "name" : "order_id",
       "rename" : "id",
       "array" : false,
       "privacy" : "NONE",
       "type" : "string",
       "required" : true
     }, {
-      "name" : "city",
-      "rename" : "city",
+      "name" : "customer_id",
+      "rename" : "customer_id",
+      "array" : false,
+      "privacy" : "NONE",
+      "type" : "customerid",
+      "required" : true
+    }, {
+      "name" : "amount",
+      "rename" : "amount",
+      "array" : false,
+      "privacy" : "NONE",
+      "type" : "decimal",
+      "required" : true
+    }, {
+      "name" : "seller_id",
+      "rename" : "seller_id",
       "array" : false,
       "privacy" : "NONE",
       "type" : "string",
-      "required" : true
+      "required" : false
     }, {
-      "name" : "country",
-      "rename" : "country",
+      "name" : "ts",
+      "rename" : "ts",
       "array" : false,
       "privacy" : "NONE",
-      "type" : "string",
-      "required" : true
+      "type" : "iso_instant",
+      "required" : false
     } ],
-    "expectations" : [ {
-      "expectQuery" : "is_col_value_not_unique('id')",
-      "expectFailOnError" : false
-    } ],
-    "pattern" : "flat_locations-.*.json",
-    "primaryKey" : [ "id" ],
-    "acl" : [ {
-      "aceRole" : "viewer",
-      "aceGrants" : "user:me@me.com,user:you@me.com"
-    }, {
-      "aceRole" : "owner",
-      "aceGrants" : "user:me@you.com,user:you@you.com"
-    } ],
+    "pattern" : "orders-.*.csv",
     "metadata" : {
-      "format" : "JSON",
+      "format" : "DSV",
       "multiline" : false,
-      "separator" : ";",
+      "separator" : ",",
       "encoding" : "UTF-8",
       "quote" : "\\"",
       "escape" : "\\\\",
       "emptyIsNull" : true,
       "withHeader" : true,
-      "directory" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/hr",
+      "directory" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/sales",
       "array" : false
     }
   },
@@ -81,31 +84,24 @@ json_context = '''{
   "sl_project_id" : "-1",
   "sl_project_name" : "[noname]",
   "statements" : {
-    "preActions" : [ "USE SCHEMA hr" ],
-    "domain" : [ "hr" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE hr.flat_locations  AS SELECT id, city, country\\n  FROM (\\n    SELECT id, city, country\\n    FROM hr.flat_locations\\n  ) AS SL_INTERNAL_FROM_SELECT;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE hr.flat_locations", "INSERT INTO hr.flat_locations SELECT id, city, country\\n  FROM (\\n    SELECT id, city, country\\n    FROM hr.flat_locations\\n  ) AS SL_INTERNAL_FROM_SELECT" ],
-    "table" : [ "flat_locations" ],
+    "preActions" : [ "USE SCHEMA sales" ],
+    "domain" : [ "sales" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE sales.orders  AS SELECT id, customer_id, amount, seller_id, ts\\n  FROM (\\n    SELECT id, customer_id, amount, seller_id, ts\\n    FROM sales.orders\\n  ) AS SL_INTERNAL_FROM_SELECT;" ],
+    "mainSqlIfExists" : [ "INSERT INTO sales.orders SELECT id, customer_id, amount, seller_id, ts\\n  FROM (\\n    SELECT id, customer_id, amount, seller_id, ts\\n    FROM sales.orders\\n  ) AS SL_INTERNAL_FROM_SELECT" ],
+    "table" : [ "orders" ],
     "connectionType" : [ "JDBC" ]
   },
-  "acl" : [ "GRANT viewer ON TABLE hr.flat_locations TO USER me@me.com", "GRANT viewer ON TABLE hr.flat_locations TO USER you@me.com", "GRANT owner ON TABLE hr.flat_locations TO USER me@you.com", "GRANT owner ON TABLE hr.flat_locations TO USER you@you.com" ],
-  "tempStage" : "starlake_load_stage_p3j7BgCn6Y",
-  "expectationItems" : [ {
-    "name" : "is_col_value_not_unique",
-    "params" : "'id'",
-    "query" : "WITH SL_THIS AS (SELECT * FROM hr.flat_locations)\\nSELECT COALESCE(max(cnt), 0)\\n    FROM (SELECT id, count(*) as cnt FROM sl_this GROUP BY id) AS COL_COUNT",
-    "failOnError" : "no"
-  } ],
+  "tempStage" : "starlake_load_stage_HyqlWhsCnO",
   "task" : {
-    "format" : "JSON",
-    "pattern" : "flat_locations-.*.json",
-    "domain" : "hr",
-    "writeStrategy" : "WRITE_TRUNCATE",
-    "createTable" : [ "CREATE SCHEMA IF NOT EXISTS hr", "CREATE TABLE IF NOT EXISTS hr.flat_locations (id STRING, city STRING, country STRING) " ],
-    "incomingDir" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/hr",
+    "format" : "DSV",
+    "pattern" : "orders-.*.csv",
+    "domain" : "sales",
+    "writeStrategy" : "WRITE_APPEND",
+    "createTable" : [ "CREATE SCHEMA IF NOT EXISTS sales", "CREATE TABLE IF NOT EXISTS sales.orders (id TEXT, customer_id STRING, amount DECIMAL, seller_id STRING, ts TIMESTAMP) " ],
+    "incomingDir" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/sales",
     "steps" : "1",
-    "targetTableName" : "hr.flat_locations",
-    "table" : "flat_locations"
+    "targetTableName" : "sales.orders",
+    "table" : "orders"
   },
   "audit" : {
     "preActions" : [ "USE SCHEMA audit" ],
@@ -116,14 +112,13 @@ json_context = '''{
     "connectionType" : [ "JDBC" ]
   },
   "schedules" : [ {
-    "schedule" : "0 0 * * *",
-    "cron" : "cron1",
+    "schedule" : "None",
     "domains" : [ {
-      "name" : "hr",
-      "finalName" : "hr",
+      "name" : "sales",
+      "finalName" : "sales",
       "tables" : [ {
-        "name" : "flat_locations",
-        "finalName" : "flat_locations"
+        "name" : "orders",
+        "finalName" : "orders"
       } ]
     } ]
   } ],
@@ -148,13 +143,15 @@ json_context = '''{
   "sl_airflow_access_control" : "None"
 }'''
 
-sl_debug = True
-def run_sql(session: Session, sql: str) -> DataFrame:
+
+sl_debug = False
+def run_sql(session: Session, sql: str) -> List[Row]:
   my_schema = StructType([StructField("a", IntegerType())])
   if sl_debug:
-    print(sql)
-    return session.create_dataframe([], schema=my_schema)
+    print(sql+";")
+    return []
   else:
+    print(sql+";")
     return session.sql(sql).collect()
 
 def str_to_bool(value: str) -> bool:
@@ -179,7 +176,7 @@ def sl_get_option(metadata: dict, key: str, metadata_key: str) -> str:
     if key in options:
         return options[key.lower()]
   if metadata_key is not None and metadata[metadata_key] is not None:
-    return metadata[metadata_key]
+    return metadata[metadata_key].replace('\\', '\\\\')
   return None
 
 context = json.loads(json_context)
@@ -190,7 +187,7 @@ expectations = context["expectations"]
 task = context["task"]
 domain = task["domain"]
 table = task["table"]
-expectation_items = context["expectationItems"]
+expectation_items = context.get("expectationItems", None)
 jobid = task["domain"] + "." + task["table"]
 
 if "options" in metadata:
@@ -216,6 +213,9 @@ else:
 
 def sl_put_to_stage(session: Session):
   if context["fileSystem"] == 'file://':
+    auditDomain = audit.get('domain', ['audit'])[0]
+    sql = f"USE SCHEMA {auditDomain}"
+    run_sql(session, sql)
     sql = f"CREATE TEMPORARY STAGE IF NOT EXISTS {context['tempStage']}"
     run_sql(session, sql)
     if (sl_is_true(sl_get_option(metadata, "compression", None), True)):
@@ -223,7 +223,9 @@ def sl_put_to_stage(session: Session):
     else:
         auto_compress = "FALSE"
     files=context["schema"]["metadata"]["directory"] + '/' + context["schema"]["pattern"].replace(".*", "*")
-    sql = f"PUT {files} @{context['tempStage']}/{context['task']['domain']} AUTO_COMPRESS = {auto_compress}"
+    if not files.startswith("file://"):
+        files = "file://" + files
+    sql = f"PUT {files} @{context['tempStage']}/{context['task']['domain']}/ AUTO_COMPRESS = {auto_compress}"
     run_sql(session, sql)
 
 
@@ -263,10 +265,14 @@ def sl_build_copy_csv(targetTable: str) -> str:
       'ENCODING'
   ]
   copy_extra_options = sl_extra_copy_options(metadata, common_options)
+  if compression:
+    extension = ".gz"
+  else:
+    extension = ""
   sql = f'''
     COPY INTO {targetTable} 
-    FROM @{context['tempStage']}/{context['task']['domain']} 
-    PATTERN = '{schema['pattern']}'
+    FROM @{context['tempStage']}/{context['task']['domain']}/
+    PATTERN = '{schema['pattern']}{extension}'
     PURGE = {purge}
     FILE_FORMAT = (
       TYPE = CSV
@@ -328,7 +334,7 @@ def sl_build_copy_other(targetTable: str, format: str) -> str:
 
 
 def sl_build_copy(targetTable: str) -> str:
-  if metadata['format'] == 'CSV':
+  if metadata['format'] == 'DSV':
     return sl_build_copy_csv(targetTable)
   elif metadata['format'] == 'JSON':
     return sl_build_copy_json(targetTable)
@@ -339,9 +345,9 @@ def sl_build_copy(targetTable: str) -> str:
   else:
     raise ValueError(f"Unsupported format {metadata['format']}")
   
-def sl_copy_step(session: Session, targetTable: str):
+def sl_copy_step(session: Session, targetTable: str) -> List[Row]:
     sql = sl_build_copy(targetTable)
-    run_sql(session, sql)
+    return run_sql(session, sql)
 
 def sl_copy_two_steps(session: Session):
    pass
@@ -368,8 +374,7 @@ def bindParams(stmt: str) -> str:
 
 def check_if_table_exists(domain: str, schema: str) -> bool:
     sql = f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{domain}.{schema}'"
-    df = run_sql(session, sql)
-    rows = df.collect()
+    rows = run_sql(session, sql)
     return rows.__len__() > 0
 
 def check_if_audit_schema_exists() -> bool:
@@ -423,7 +428,32 @@ def check_if_expectations_schema_exists() -> bool:
     else:
         return False
 
-def log_audit(domain: str, schema: str, success: bool, duration: int, message: str, ts: datetime, step: str) -> bool :
+
+def get_audit_info(rows: List[Row]) -> Tuple[str, str, str, int, int, int]:
+    
+    if rows.__len__() == 0:
+        return '', '', '', -1, -1, -1
+    else:
+        files = []
+        first_error_lines = []
+        first_error_column_names = []
+        rows_parsed = 0
+        rows_loaded = 0
+        errors_seen = 0
+        for row in rows:
+            files.append(row['file'])
+            first_error_line=row['first_error_line']
+            if first_error_line:
+              first_error_lines.append()
+            first_error_column_name=row['first_error_column_name']
+            if first_error_column_name:
+              first_error_column_names.append(row['first_error_column_name'])
+            rows_parsed += row['rows_parsed']
+            rows_loaded += row['rows_loaded']
+            errors_seen += row['errors_seen']
+        return ','.join(files), ','.join(first_error_lines), ','.join(first_error_column_names), rows_parsed, rows_loaded, errors_seen
+    
+def log_audit(domain: str, schema: str,  paths: str, rows_parsed: int, rows_loaded: int, errors_seen: int, success: bool, duration: int, message: str, ts: datetime, step: str) -> bool :
     if audit:
         audit_domain = audit.get('domain', ['audit'])[0]
         audit_sqls = audit.get('mainSqlIfExists', None)
@@ -432,13 +462,13 @@ def log_audit(domain: str, schema: str, success: bool, duration: int, message: s
                 audit_sql = audit_sqls[0]
                 formatted_sql = audit_sql.format(
                     jobid = jobid,
-                    paths = schema,
+                    paths = paths,
                     domain = domain,
-                    schema = schema,
+                    schema = table,
                     success = str(success),
-                    count = "-1",
-                    countAccepted = "-1",
-                    countRejected = "-1",
+                    count = str(rows_parsed),
+                    countAccepted = str(rows_loaded),
+                    countRejected = str(errors_seen),
                     timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
                     duration = str(duration),
                     message = message,
@@ -493,8 +523,7 @@ def run_expectation(name: str, params: str, query: str, failOnError: bool = Fals
     try:
         if query:
             stmt: str = bindParams(query)
-            df = run_sql(session, stmt)
-            rows = df.collect()
+            rows = run_sql(session, stmt)
             if rows.__len__() != 1:
                 raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
             count = rows[0][0]
@@ -525,7 +554,7 @@ try:
       if task["writeStrategy"] == "WRITE_TRUNCATE":
         sql = f"TRUNCATE TABLE {task['targetTableName']}"
         run_sql(session, sql)
-      sl_copy_step(session, task['targetTableName'])
+      copy_results = sl_copy_step(session, task['targetTableName'])
     elif task["steps"] == "2":
       for sql in task["firstStep"]:
         stmt: str = bindParams(sql)
@@ -533,7 +562,7 @@ try:
       if task["writeStrategy"] == "WRITE_TRUNCATE":
         sql = f"TRUNCATE TABLE {task['targetTableName']}"
         run_sql(session, sql)
-      sl_copy_step(session, task['tempTableName'])
+      copy_results = sl_copy_step(session, task['tempTableName'])
       second_step = task.get("secondStep", None)
       # execute preSqls
       preSqls: List[str] = schema.get('presql', [])
@@ -565,7 +594,7 @@ try:
         run_sql(session, stmt)
 
     # run expectations
-    if expectation_items and check_if_expectations_schema_exists():
+    if expectation_items is not None and check_if_expectations_schema_exists():
         for expectation in expectation_items:
             run_expectation(expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')))
 
@@ -577,7 +606,10 @@ try:
     if audit and check_if_audit_schema_exists():
         print("Audit schema exists")
         # insert audit record
-        if log_audit(domain, schema, True, duration, 'Success', end, "LOAD"):
+        files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
+        message = first_error_line + '\n' + first_error_column_name
+        
+        if log_audit(domain, schema, files, rows_parsed, rows_loaded, errors_seen, errors_seen == 0, duration, message, end, "LOAD"):
             print("Audit record inserted")
         else:
             print("Error inserting audit record")
@@ -595,7 +627,7 @@ except Exception as e:
     if audit and check_if_audit_schema_exists():
         print("Audit schema exists")
         # insert audit record
-        if log_audit(domain, schema, False, duration, error_message, end, "LOAD"):
+        if log_audit(domain, schema, '', -1, -1, -1, False, duration, error_message, end, "LOAD"):
             print("Audit record inserted")
         else:
             print("Error inserting audit record")
