@@ -147,7 +147,7 @@ expectations = {
 
 
 
-sl_debug = False
+sl_debug = True
 def run_sql(session: Session, sql: str) -> List[Row]:
   my_schema = StructType([StructField("a", IntegerType())])
   if sl_debug:
@@ -182,16 +182,16 @@ def sl_get_option(metadata: dict, key: str, metadata_key: str) -> str:
     return metadata[metadata_key].replace('\\', '\\\\')
   return None
 
-context = json.loads(json_context)
+domain = "hr"
+table = "flat_locations"
+jobid = domain + "." + table
+context = json.loads(json_context).get(jobid, None)
+task = statements[jobid]
 schema = context["schema"]
 metadata = schema["metadata"]
-audit = context["audit"]
-expectations = context["expectations"]
-task = context["task"]
-domain = task["domain"]
-table = task["table"]
-expectation_items = context.get("expectationItems", None)
-jobid = task["domain"] + "." + task["table"]
+#audit = context["audit"]
+#expectations = context["expectations"]
+#expectation_items = context.get("expectationItems", None)
 
 if "options" in metadata:
   options = metadata["options"]
@@ -228,7 +228,7 @@ def sl_put_to_stage(session: Session):
     files=context["schema"]["metadata"]["directory"] + '/' + context["schema"]["pattern"].replace(".*", "*")
     if not files.startswith("file://"):
         files = "file://" + files
-    sql = f"PUT {files} @{context['tempStage']}/{context['task']['domain']}/ AUTO_COMPRESS = {auto_compress}"
+    sql = f"PUT {files} @{context['tempStage']}/{domain}/ AUTO_COMPRESS = {auto_compress}"
     run_sql(session, sql)
 
 
@@ -274,7 +274,7 @@ def sl_build_copy_csv(targetTable: str) -> str:
     extension = ""
   sql = f'''
     COPY INTO {targetTable} 
-    FROM @{context['tempStage']}/{context['task']['domain']}/
+    FROM @{context['tempStage']}/{domain}/
     PATTERN = '{schema['pattern']}{extension}'
     PURGE = {purge}
     FILE_FORMAT = (
@@ -302,7 +302,7 @@ def sl_build_copy_json(targetTable: str) -> str:
   copy_extra_options = sl_extra_copy_options(metadata, common_options)
   sql = f'''
     COPY INTO {targetTable} 
-    FROM @{context['tempStage']}/{context['task']['domain']} 
+    FROM @{context['tempStage']}/{domain}
     PATTERN = '{schema['pattern']}'
     PURGE = {purge}
     FILE_FORMAT = (
@@ -323,7 +323,7 @@ def sl_build_copy_other(targetTable: str, format: str) -> str:
   copy_extra_options = sl_extra_copy_options(metadata, common_options)
   sql = f'''
     COPY INTO {targetTable} 
-    FROM @{context['tempStage']}/{context['task']['domain']} 
+    FROM @{context['tempStage']}/{domain} 
     PATTERN = '{schema['pattern']}'
     PURGE = {purge}
     FILE_FORMAT = (
@@ -550,7 +550,7 @@ try:
     run_sql(session, "BEGIN")
     start = datetime.now()
     sl_put_to_stage(session)
-    if task["steps"] == "1":
+    if statements[jobid]["steps"] == "1":
       for sql in task["createTable"]:
         stmt: str = bindParams(sql)
         run_sql(session, stmt)
@@ -598,7 +598,7 @@ try:
 
     # run expectations
     if expectation_items is not None and check_if_expectations_schema_exists():
-        for expectation in expectation_items:
+        for expectation in expectation_items[jobid]:
             run_expectation(expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')))
 
     # COMMIT transaction
