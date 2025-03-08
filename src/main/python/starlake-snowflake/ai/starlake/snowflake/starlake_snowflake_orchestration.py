@@ -42,6 +42,9 @@ class SnowflakeDag(DAG):
         least_frequent_datasets: Optional[List[StarlakeDataset]] = None,
         most_frequent_datasets: Optional[List[StarlakeDataset]] = None,
     ) -> None:
+        import logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
         condition = None
 
         definition=f"select '{name}'"
@@ -50,25 +53,25 @@ class SnowflakeDag(DAG):
             changes = dict() # tracks the datasets whose changes have to be checked
 
             if least_frequent_datasets:
-                print(f"least frequent datasets: {','.join(list(map(lambda x: x.sink, least_frequent_datasets)))}")
+                self.logger.info(f"least frequent datasets: {','.join(list(map(lambda x: x.sink, least_frequent_datasets)))}")
                 for dataset in least_frequent_datasets:
                     changes.update({dataset.sink: dataset.cron})
 
             not_scheduled_streams = set() # set of streams which underlying datasets are not scheduled
             not_scheduled_datasets_without_streams = []
             if not_scheduled_datasets:
-                print(f"not scheduled datasets: {','.join(list(map(lambda x: x.sink, not_scheduled_datasets)))}")
+                self.logger.info(f"not scheduled datasets: {','.join(list(map(lambda x: x.sink, not_scheduled_datasets)))}")
                 for dataset in not_scheduled_datasets:
                     if dataset.stream:
                         not_scheduled_streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
                     else:
                         not_scheduled_datasets_without_streams.append(dataset)
             if not_scheduled_datasets_without_streams:
-                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.sink, not_scheduled_datasets_without_streams)))}")
+                self.logger.warning(f"Warning: No streams found for {','.join(list(map(lambda x: x.sink, not_scheduled_datasets_without_streams)))}")
                 ... # nothing to do here
 
             if most_frequent_datasets:
-                print(f"most frequent datasets: {','.join(list(map(lambda x: x.sink, most_frequent_datasets)))}")
+                self.logger.info(f"most frequent datasets: {','.join(list(map(lambda x: x.sink, most_frequent_datasets)))}")
             streams = set()
             most_frequent_datasets_without_streams = []
             if most_frequent_datasets:
@@ -79,7 +82,7 @@ class SnowflakeDag(DAG):
                         most_frequent_datasets_without_streams.append(dataset)
                         changes.update({dataset.sink: dataset.cron})
             if most_frequent_datasets_without_streams:
-                print(f"Warning: No streams found for {','.join(list(map(lambda x: x.sink, most_frequent_datasets_without_streams)))}")
+                self.logger.warning(f"Warning: No streams found for {','.join(list(map(lambda x: x.sink, most_frequent_datasets_without_streams)))}")
                 ...
 
             if streams:
@@ -94,13 +97,21 @@ class SnowflakeDag(DAG):
             if changes:
                 format = '%Y-%m-%d %H:%M:%S%z'
 
-                def fun(session: Session, changes: dict, format: str) -> None:
+                def fun(session: Session) -> None:
                     from croniter import croniter
                     from croniter.croniter import CroniterBadCronError
                     from datetime import datetime
                     # get the original scheduled timestamp of the initial graph run in the current group
                     # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
-                    original_schedule = session.sql(f"select to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))").collect()[0][0]
+                    config = session.call("system$get_task_graph_config")
+                    if config:
+                        import json
+                        config = json.loads(config)
+                    else:
+                        config = {}
+                    original_schedule = config.get("SL_START_DATE", None)
+                    if not original_schedule:
+                        original_schedule = session.sql(f"select to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))").collect()[0][0]
                     if original_schedule:
                         if isinstance(original_schedule, str):
                             from dateutil import parser
@@ -111,7 +122,9 @@ class SnowflakeDag(DAG):
                         start_time = datetime.fromtimestamp(datetime.now().timestamp())
 
                     def check_if_dataset_exists(dataset: str) -> bool:
-                        df = session.sql(query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'")
+                        query = f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'"
+                        print(f"#Checking if dataset {dataset} exists:\n{query};")
+                        df = session.sql(query=query)
                         rows = df.collect()
                         return rows.__len__() > 0
 
@@ -120,8 +133,9 @@ class SnowflakeDag(DAG):
                             raise ValueError(f"Dataset {dataset} does not exist")
                         try:
                             # enabling change tracking for the dataset
-                            print(f"Enabling change tracking for dataset {dataset}")
-                            session.sql(query=f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE").collect() # should be done once and when we create our datasets
+                            query = f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE"
+                            print(f"#Enabling change tracking for dataset {dataset}:\n{query};")
+                            session.sql(query=query).collect() # should be done once and when we create our datasets
                             croniter(cron_expr)
                             iter = croniter(cron_expr, start_time)
                             # get the start and end date of the current cron iteration
@@ -134,11 +148,13 @@ class SnowflakeDag(DAG):
                                 sl_end_date = previous
                             sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
                             change = f"SELECT count(*) FROM {dataset} CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')"
-                            print(f"Checking changes for dataset {dataset} from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)} -> {change}")
+                            print(f"#Checking changes for dataset {dataset} from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}:\n{change};")
                             df = session.sql(query=change)
                             count = df.collect()[0][0]
                             if count == 0:
-                                raise ValueError(f"Dataset {dataset} has no changes from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
+                                error=f"Dataset {dataset} has no changes from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}"
+                                print(error)
+                                raise ValueError(error)
                             print(f"Dataset {dataset} has data from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
                         except CroniterBadCronError:
                             raise ValueError(f"Invalid cron expression: {cron_expr}")
@@ -147,7 +163,7 @@ class SnowflakeDag(DAG):
 
                 definition = StoredProcedureCall(
                     func = fun, 
-                    args=[changes, format],
+                    args=[],
                     stage_location=stage_location,
                     packages=packages
                 )
