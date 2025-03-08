@@ -21,62 +21,79 @@ connection_parameters = {
 #   "schema": "<your snowflake schema>",  # optional
    "database": os.environ['SNOWFLAKE_DB'],  # optional
 }
-
-
 json_context = '''{
-  "hr.flat_locations" : {
+  "sales.customers" : {
     "schema" : {
-      "finalName" : "flat_locations",
-      "name" : "flat_locations",
+      "finalName" : "customers",
+      "name" : "customers",
       "attributes" : [ {
         "name" : "id",
         "rename" : "id",
+        "ignore" : "false",
         "array" : "false",
         "privacy" : "NONE",
         "type" : "string",
-        "required" : "true"
+        "required" : "false"
       }, {
-        "name" : "city",
-        "rename" : "city",
+        "name" : "signup",
+        "rename" : "signup",
+        "ignore" : "false",
+        "array" : "false",
+        "privacy" : "NONE",
+        "type" : "timestamp",
+        "required" : "false"
+      }, {
+        "name" : "contact",
+        "rename" : "contact",
+        "ignore" : "false",
         "array" : "false",
         "privacy" : "NONE",
         "type" : "string",
-        "required" : "true"
+        "required" : "false"
       }, {
-        "name" : "country",
-        "rename" : "country",
+        "name" : "birthdate",
+        "rename" : "birthdate",
+        "ignore" : "false",
+        "array" : "false",
+        "privacy" : "NONE",
+        "type" : "date",
+        "required" : "false"
+      }, {
+        "name" : "name1",
+        "rename" : "name1",
+        "ignore" : "false",
         "array" : "false",
         "privacy" : "NONE",
         "type" : "string",
-        "required" : "true"
-      } ],
-      "expectations" : [ {
-        "query" : "is_col_value_not_unique('id')",
-        "failOnError" : "false"
-      } ],
-      "pattern" : "flat_locations-.*.json",
-      "primaryKey" : [ "id" ],
-      "acl" : [ {
-        "aceRole" : "viewer",
-        "aceGrants" : "user:me@me.com,user:you@me.com"
+        "required" : "false"
       }, {
-        "aceRole" : "owner",
-        "aceGrants" : "user:me@you.com,user:you@you.com"
+        "name" : "name2",
+        "rename" : "name2",
+        "ignore" : "false",
+        "array" : "false",
+        "privacy" : "NONE",
+        "type" : "string",
+        "required" : "false"
+      }, {
+        "name" : "id1",
+        "rename" : "id1",
+        "array" : "false",
+        "privacy" : "NONE",
+        "script" : "substring(id, 1, 1)",
+        "type" : "string",
+        "required" : "false"
       } ],
+      "pattern" : "customers.*.psv",
       "metadata" : {
-        "format" : "JSON",
+        "format" : "DSV",
         "multiline" : "false",
-        "separator" : ";",
+        "separator" : "|",
         "encoding" : "UTF-8",
         "quote" : "\\"",
         "escape" : "\\\\",
         "emptyIsNull" : "true",
         "withHeader" : "true",
-        "directory" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/hr",
-        "options" : {
-          "opt1" : "value1",
-          "opt2" : "value2"
-        },
+        "directory" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/sales",
         "array" : "false"
       }
     },
@@ -85,7 +102,7 @@ json_context = '''{
       "sinkFormat" : "parquet",
       "sinkConnectionRef" : "snowflake"
     },
-    "tempStage" : "starlake_load_stage_1QGDWc3jZ4"
+    "tempStage" : "starlake_load_stage_e7QLl5UBYs"
   },
   "sl_project_id" : "-1",
   "sl_project_name" : "[noname]",
@@ -104,30 +121,36 @@ json_context = '''{
 }'''
 
 statements = {
-  "hr.flat_locations" : {
-    "format" : "JSON",
-    "pattern" : "flat_locations-.*.json",
-    "domain" : "hr",
-    "writeStrategy" : "WRITE_TRUNCATE",
-    "createTable" : [ "CREATE SCHEMA IF NOT EXISTS hr", "CREATE TABLE IF NOT EXISTS hr.flat_locations (id STRING, city STRING, country STRING) " ],
-    "incomingDir" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/hr",
-    "steps" : "1",
-    "targetTableName" : "hr.flat_locations",
-    "table" : "flat_locations"
+  "sales.customers" : {
+    "format" : "DSV",
+    "secondStep" : {
+      "name" : "sales.customers",
+      "preActions" : [ "USE SCHEMA sales" ],
+      "domain" : [ "sales" ],
+      "mainSqlIfNotExists" : [ "CREATE TABLE sales.customers  AS\nSELECT  id,signup,contact,birthdate,name1,name2,id1\nFROM (SELECT id, signup, contact, birthdate, name1, name2, id1\n  FROM (\n    SELECT id, signup, contact, birthdate, name1, name2, substring(id, 1, 1) AS id1\n    FROM sales.zztmp_customers_6a68ab9ac35d4e1592df5bc1cc7a9f35\n  ) AS SL_INTERNAL_FROM_SELECT)\nQUALIFY ROW_NUMBER() OVER (PARTITION BY  id ORDER BY signup DESC) = 1;" ],
+      "mainSqlIfExists" : [ "MERGE INTO  sales.customers SL_EXISTING \nUSING (\n    SELECT  id,signup,contact,birthdate,name1,name2,id1\n    FROM (SELECT id, signup, contact, birthdate, name1, name2, id1\n  FROM (\n    SELECT id, signup, contact, birthdate, name1, name2, substring(id, 1, 1) AS id1\n    FROM sales.zztmp_customers_6a68ab9ac35d4e1592df5bc1cc7a9f35\n  ) AS SL_INTERNAL_FROM_SELECT) SL_TMP1\n    QUALIFY ROW_NUMBER() OVER (PARTITION BY id  ORDER BY signup DESC) = 1\n) SL_INCOMING \nON ( SL_INCOMING.id = SL_EXISTING.id)\nWHEN MATCHED AND SL_INCOMING.signup > SL_EXISTING.signup THEN  UPDATE SET id = SL_INCOMING.id,signup = SL_INCOMING.signup,contact = SL_INCOMING.contact,birthdate = SL_INCOMING.birthdate,name1 = SL_INCOMING.name1,name2 = SL_INCOMING.name2,id1 = SL_INCOMING.id1\nWHEN NOT MATCHED THEN INSERT (id,signup,contact,birthdate,name1,name2,id1) VALUES (SL_INCOMING.id,SL_INCOMING.signup,SL_INCOMING.contact,SL_INCOMING.birthdate,SL_INCOMING.name1,SL_INCOMING.name2,SL_INCOMING.id1)" ],
+      "table" : [ "customers" ],
+      "connectionType" : [ "JDBC" ]
+    },
+    "pattern" : "customers.*.psv",
+    "schemaString" : "\"id\" STRING, \"signup\" TIMESTAMP, \"contact\" STRING, \"birthdate\" DATE, \"name1\" STRING, \"name2\" STRING, \"id1\" STRING",
+    "domain" : "sales",
+    "firstStep" : [ "CREATE SCHEMA IF NOT EXISTS sales", "CREATE TABLE IF NOT EXISTS sales.zztmp_customers_6a68ab9ac35d4e1592df5bc1cc7a9f35 (id STRING, signup TIMESTAMP, contact STRING, birthdate DATE, name1 STRING, name2 STRING, id1 STRING) " ],
+    "writeStrategy" : "WRITE_APPEND",
+    "dropFirstStep" : "DROP TABLE IF EXISTS sales.zztmp_customers_6a68ab9ac35d4e1592df5bc1cc7a9f35;",
+    "tempTableName" : "sales.zztmp_customers_6a68ab9ac35d4e1592df5bc1cc7a9f35",
+    "incomingDir" : "/Users/hayssams/git/public/starlake/samples/spark/incoming/sales",
+    "steps" : "2",
+    "table" : "customers",
+    "extraFileNameColumn" : [ "ALTER TABLE sales.zztmp_customers_6a68ab9ac35d4e1592df5bc1cc7a9f35 ADD COLUMN sl_input_file_name STRING DEFAULT '{{sl_input_file_name}}';" ],
+    "targetTableName" : "sales.customers"
   }
 }
 
-expectation_items = {
-  "hr.flat_locations" : [ {
-    "name" : "is_col_value_not_unique",
-    "params" : "'id'",
-    "query" : "WITH SL_THIS AS (SELECT * FROM hr.flat_locations)\nSELECT COALESCE(max(cnt), 0)\n    FROM (SELECT id, count(*) as cnt FROM sl_this GROUP BY id) AS COL_COUNT",
-    "failOnError" : "no"
-  } ]
-}
+expectation_items = { }
 
 audit = {
-  "name" : "audit-hr-flat_locations--1741367745973",
+  "name" : "audit-sales-customers--1741462403548",
   "preActions" : [ "USE SCHEMA audit" ],
   "domain" : [ "audit" ],
   "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID VARCHAR NOT NULL,\n                              PATHS TEXT NOT NULL,\n                              DOMAIN VARCHAR NOT NULL,\n                              SCHEMA VARCHAR NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION BIGINT NOT NULL,\n                              MESSAGE VARCHAR NOT NULL,\n                              STEP VARCHAR NOT NULL,\n                              DATABASE VARCHAR,\n                              TENANT VARCHAR\n                             )\n    " ],
@@ -144,9 +167,6 @@ expectations = {
   "table" : [ "expectations" ],
   "connectionType" : [ "JDBC" ]
 }
-
-
-
 sl_debug = True
 def run_sql(session: Session, sql: str) -> List[Row]:
   my_schema = StructType([StructField("a", IntegerType())])
@@ -181,8 +201,8 @@ def sl_get_option(metadata: dict, key: str, metadata_key: str) -> str:
     return metadata[metadata_key].replace('\\', '\\\\')
   return None
 
-domain = "hr"
-table = "flat_locations"
+domain = "sales"
+table = "customers"
 sink = domain + "." + table
 jobid = sink
 context = json.loads(json_context).get(jobid, None)
@@ -271,6 +291,7 @@ def sl_build_copy_csv(targetTable: str) -> str:
     PURGE = {purge}
     FILE_FORMAT = (
       TYPE = CSV
+      ERROR_ON_COLUMN_COUNT_MISMATCH = false
       SKIP_HEADER = {skipCount} 
       FIELD_OPTIONALLY_ENCLOSED_BY = '{sl_get_option(metadata, 'FIELD_OPTIONALLY_ENCLOSED_BY', 'quote')}' 
       FIELD_DELIMITER = '{sl_get_option(metadata, 'FIELD_DELIMITER', 'separator')}' 
@@ -590,7 +611,7 @@ try:
 
     # run expectations
     if expectation_items is not None and check_if_expectations_schema_exists():
-        for expectation in expectation_items[jobid]:
+        for expectation in expectation_items.get(jobid, []):
             run_expectation(expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')))
 
     # COMMIT transaction
