@@ -174,17 +174,17 @@ def sl_is_true(value: str, default: bool) -> bool:
    return value.lower() == "true"
 
 def sl_get_option(metadata: dict, key: str, metadata_key: str) -> str:
-  if "options" in metadata:
-    options = metadata["options"]
-    if key in options:
-        return options[key.lower()]
-  if metadata_key is not None and metadata[metadata_key] is not None:
+  options = metadata.get("options", None)
+  if options is not None and key.lower() in options:
+    return options[key.lower()]
+  elif metadata_key is not None and metadata[metadata_key] is not None:
     return metadata[metadata_key].replace('\\', '\\\\')
   return None
 
 domain = "hr"
 table = "flat_locations"
-jobid = domain + "." + table
+sink = domain + "." + table
+jobid = sink
 context = json.loads(json_context).get(jobid, None)
 task = statements[jobid]
 schema = context["schema"]
@@ -193,10 +193,7 @@ metadata = schema["metadata"]
 #expectations = context["expectations"]
 #expectation_items = context.get("expectationItems", None)
 
-if "options" in metadata:
-  options = metadata["options"]
-else:
-  options = {}
+options = metadata.get("options", dict())
 
 compression = sl_is_true(sl_get_option(metadata, "compression", None), True)
 if compression:
@@ -221,7 +218,7 @@ def sl_put_to_stage(session: Session):
     run_sql(session, sql)
     sql = f"CREATE TEMPORARY STAGE IF NOT EXISTS {context['tempStage']}"
     run_sql(session, sql)
-    if (sl_is_true(sl_get_option(metadata, "compression", None), True)):
+    if (compression):
         auto_compress = "TRUE"
     else:
         auto_compress = "FALSE"
@@ -238,13 +235,8 @@ def sl_extra_copy_options(metadata: dict, common_options: list[str]) -> str:
   copy_extra_options = ""
   if options is not None:
     for k, v in options.items():
-      if v in common_options:
-        options.remove(k)
-
-  copy_extra_options = ""
-  if options is not None:
-    for k, v in options.items():
-      copy_extra_options += f"{k} = {v}\n"
+      if not k in common_options:
+        copy_extra_options += f"{k} = {v}\n"
   return copy_extra_options
 
 def sl_purge_option(metadata: dict) -> str:
