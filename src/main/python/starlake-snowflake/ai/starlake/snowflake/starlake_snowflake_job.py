@@ -511,6 +511,50 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     for expectation in expectation_items:
                         run_expectation(session, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')), jobid)
 
+            def begin_transaction(session: Session) -> None:
+                """Begin the transaction.
+                Args:
+                    session (Session): The Snowflake session.
+                """
+                print("#BEGIN transaction:\nBEGIN;")
+                session.sql("BEGIN").collect()
+
+            def create_domain_if_not_exists(session: Session, domain: str) -> None:
+                """Create the schema if it does not exist.
+                Args:
+                    session (Session): The Snowflake session.
+                    domain (str): The domain.
+                """
+                query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
+                print(f"#Create schema if not exists:\n{query};")
+                session.sql(query=query).collect()
+
+            def enable_change_tracking(session: Session, sink: str) -> None:
+                """Enable change tracking.
+                Args:
+                    session (Session): The Snowflake session.
+                    sink (str): The sink.
+                """
+                query = f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE"
+                print(f"#Enable change tracking:\n{query};")
+                session.sql(query=query).collect()
+
+            def commit_transaction(session: Session) -> None:
+                """Commit the transaction.
+                Args:
+                    session (Session): The Snowflake session.
+                """
+                print("#COMMIT transaction:\nCOMMIT;")
+                session.sql("COMMIT").collect()
+
+            def rollback_transaction(session: Session) -> None:
+                """Rollback the transaction.
+                Args:
+                    session (Session): The Snowflake session.
+                """
+                print("#ROLLBACK transaction:\nROLLBACK;")
+                session.sql("ROLLBACK").collect()
+
             if kwargs.get('transform', False):
                 kwargs.pop('transform', None)
                 if statements:
@@ -569,13 +613,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                         try:
                             # BEGIN transaction
-                            print("#BEGIN transaction:\nBEGIN;")
-                            session.sql("BEGIN").collect()
+                            begin_transaction(session)
 
                             # create SQL domain
-                            query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
-                            print(f"#Create schema if not exists:\n{query};")
-                            session.sql(query=query).collect()
+                            create_domain_if_not_exists(session, domain)
 
                             # execute preActions
                             preActions: List[str] = statements.get('preActions', [])
@@ -619,16 +660,14 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 print(f"#Execute post sql:\n{stmt};")
                                 session.sql(stmt).collect()
 
-                            query = f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE"
-                            print(f"#Enable change tracking:\n{query};")
-                            session.sql(query=query).collect()
+                            # enable change tracking
+                            enable_change_tracking(session, sink)
 
                             # run expectations
                             run_expectations(session, jobid)
 
                             # COMMIT transaction
-                            print("#COMMIT transaction:\nCOMMIT;")
-                            session.sql("COMMIT").collect()
+                            commit_transaction(session)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             print(f"#Duration in seconds: {duration}")
@@ -638,8 +677,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             # ROLLBACK transaction
                             error_message = str(e)
                             print(f"Error executing transform for {sink}: {error_message}")
-                            print("#ROLLBACK transaction:\nROLLBACK;")
-                            session.sql("ROLLBACK").collect()
+                            rollback_transaction(session)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             print(f"Duration in seconds: {duration}")
