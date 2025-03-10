@@ -290,22 +290,25 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             from snowflake.snowpark.dataframe import DataFrame
             from snowflake.snowpark.row import Row
 
-            def execute_sql(session: Session, sql: str, message: Optional[str] = None) -> List[Row]:
+            def execute_sql(session: Session, sql: Optional[str], message: Optional[str] = None) -> List[Row]:
                 """Execute the SQL.
                 Args:
                     session (Session): The Snowflake session.
-                    sql (str): The SQL.
+                    sql (str): The SQL query to execute.
                     message (Optional[str], optional): The optional message. Defaults to None.
                 Returns:
                     List[Row]: The rows.
                 """
-                if message:
-                    print(f"# {message}")
-                stmt: str = bindParams(sql)
-                print(f"{stmt};")
-                df: DataFrame = session.sql(stmt)
-                rows = df.collect()
-                return rows
+                if sql:
+                    if message:
+                        print(f"# {message}")
+                    stmt: str = bindParams(sql)
+                    print(f"{stmt};")
+                    df: DataFrame = session.sql(stmt)
+                    rows = df.collect()
+                    return rows
+                else:
+                    return []
 
             def execute_sqls(session: Session, sqls: List[str], message: Optional[str] = None) -> None:
                 """Execute the SQLs.
@@ -907,7 +910,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         # execute mainSqlIfNotExists
                                         execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists")
                                     # execute dropFirstStep
-                                    execute_sqls(session, statements.get('dropFirstStep', []), "Drop first step")
+                                    execute_sql(session, statements.get('dropFirstStep', None), "Drop first step")
                                 else:
                                     raise ValueError(f"Invalid number of steps: {nbSteps}")
 
