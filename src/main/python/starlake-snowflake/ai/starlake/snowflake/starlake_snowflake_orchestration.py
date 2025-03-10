@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from ai.starlake.job import StarlakeOrchestrator
+from ai.starlake.job import StarlakeOrchestrator, StarlakeExecutionMode
 
 from ai.starlake.dataset import StarlakeDataset
 from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, StarlakeDependencies, AbstractPipeline, AbstractTaskGroup, AbstractTask, AbstractDependency
 
 from ai.starlake.snowflake.starlake_snowflake_job import StarlakeSnowflakeJob
 
+from snowflake.core import Root
+from snowflake.core._common import CreateMode
 from snowflake.core.task import Cron, StoredProcedureCall, Task
-from snowflake.core.task.dagv1 import DAG, DAGTask, _dag_context_stack
+from snowflake.core.task.dagv1 import DAG, DAGTask, DAGOperation, _dag_context_stack
 from snowflake.snowpark import Session
 
-from typing import Any, List, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 from types import ModuleType
 
@@ -94,16 +96,46 @@ class SnowflakeDag(DAG):
                 else:
                     condition = ' AND '.join(not_scheduled_streams)
 
+            from snowflake.snowpark.dataframe import DataFrame
+            from snowflake.snowpark.row import Row
+
+            def execute_sql(session: Session, query: Optional[str], message: Optional[str] = None, dry_run: bool = False) -> List[Row]:
+                """Execute the SQL.
+                Args:
+                    session (Session): The Snowflake session.
+                    query (str): The SQL query to execute.
+                    message (Optional[str], optional): The optional message. Defaults to None.
+                    mode (Optional[StarlakeExecutionMode], optional): The optional execution mode. Defaults to None.
+                Returns:
+                    List[Row]: The rows.
+                """
+                if query:
+                    if dry_run and message:
+                        print(f"# {message}")
+                    if dry_run:
+                        print(f"{query};")
+                        return []
+                    else:
+                        df: DataFrame = session.sql(query)
+                        rows = df.collect()
+                        return rows
+                else:
+                    return []
+
             if changes:
                 format = '%Y-%m-%d %H:%M:%S%z'
 
-                def fun(session: Session) -> None:
+                def fun(session: Session, dry_run: bool) -> None:
                     from croniter import croniter
                     from croniter.croniter import CroniterBadCronError
                     from datetime import datetime
+
                     # get the original scheduled timestamp of the initial graph run in the current group
                     # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
-                    config = session.call("system$get_task_graph_config")
+                    if not dry_run:
+                        config = session.call("system$get_task_graph_config")
+                    else:
+                        config = None
                     if config:
                         import json
                         config = json.loads(config)
@@ -111,7 +143,12 @@ class SnowflakeDag(DAG):
                         config = {}
                     original_schedule = config.get("SL_START_DATE", None)
                     if not original_schedule:
-                        original_schedule = session.sql(f"select to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))").collect()[0][0]
+                        query = f"select to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))"
+                        rows = execute_sql(session, query, "Getting the original scheduled timestamp of the initial graph run in the current group", dry_run)
+                        if rows:
+                            original_schedule = rows[0][0]
+                        else:
+                            original_schedule = None
                     if original_schedule:
                         if isinstance(original_schedule, str):
                             from dateutil import parser
@@ -123,19 +160,19 @@ class SnowflakeDag(DAG):
 
                     def check_if_dataset_exists(dataset: str) -> bool:
                         query = f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'"
-                        print(f"#Checking if dataset {dataset} exists:\n{query};")
-                        df = session.sql(query=query)
-                        rows = df.collect()
-                        return rows.__len__() > 0
+                        rows = execute_sql(session, query, f"Checking if dataset {dataset} exists", dry_run)
+                        if dry_run:
+                            return True
+                        else:
+                            return rows.__len__() > 0
 
                     for dataset, cron_expr in changes.items():
                         if not check_if_dataset_exists(dataset):
                             raise ValueError(f"Dataset {dataset} does not exist")
                         try:
-                            # enabling change tracking for the dataset
+                            # enabling change tracking for the dataset - should be done once and when we create our datasets
                             query = f"ALTER TABLE {dataset} SET CHANGE_TRACKING = TRUE"
-                            print(f"#Enabling change tracking for dataset {dataset}:\n{query};")
-                            session.sql(query=query).collect() # should be done once and when we create our datasets
+                            execute_sql(session, query, f"Enabling change tracking for dataset {dataset}", dry_run)
                             croniter(cron_expr)
                             iter = croniter(cron_expr, start_time)
                             # get the start and end date of the current cron iteration
@@ -148,13 +185,16 @@ class SnowflakeDag(DAG):
                                 sl_end_date = previous
                             sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
                             change = f"SELECT count(*) FROM {dataset} CHANGES(INFORMATION => DEFAULT) AT(TIMESTAMP => '{sl_start_date.strftime(format)}') END (TIMESTAMP => '{sl_end_date.strftime(format)}')"
-                            print(f"#Checking changes for dataset {dataset} from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}:\n{change};")
-                            df = session.sql(query=change)
-                            count = df.collect()[0][0]
+                            rows = execute_sql(session, change, f"Checking changes for dataset {dataset} from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}", dry_run)
+                            if rows:
+                                count = rows[0][0]
+                            else:
+                                count = 0
                             if count == 0:
                                 error=f"Dataset {dataset} has no changes from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}"
                                 print(error)
-                                raise ValueError(error)
+                                if not dry_run:
+                                    raise ValueError(error)
                             print(f"Dataset {dataset} has data from {sl_start_date.strftime(format)} to {sl_end_date.strftime(format)}")
                         except CroniterBadCronError:
                             raise ValueError(f"Invalid cron expression: {cron_expr}")
@@ -163,7 +203,7 @@ class SnowflakeDag(DAG):
 
                 definition = StoredProcedureCall(
                     func = fun, 
-                    args=[],
+                    args=[False],
                     stage_location=stage_location,
                     packages=packages
                 )
@@ -196,8 +236,8 @@ class SnowflakeDag(DAG):
             config=self.config,
         )
 
-class SnowflakePipeline(AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset], StarlakeDataset):
-    def __init__(self, job: StarlakeSnowflakeJob, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[DAG, DAGTask, List[DAGTask], StarlakeDataset]] = None, **kwargs) -> None:
+class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset], StarlakeDataset):
+    def __init__(self, job: StarlakeSnowflakeJob, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset]] = None, **kwargs) -> None:
         super().__init__(job, orchestration_cls=SnowflakeOrchestration, dag=None, schedule=schedule, dependencies=dependencies, orchestration=orchestration, **kwargs)
 
         snowflake_schedule: Union[Cron, None] = None
@@ -210,12 +250,15 @@ class SnowflakePipeline(AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDa
             else:
                 snowflake_schedule = timedelta(minutes=60) # FIXME should we keep a default value here?
 
+        self._stage_location = job.stage_location
+        self._warehouse = job.warehouse
+
         self.dag = SnowflakeDag(
             name=self.pipeline_id,
             schedule=snowflake_schedule,
-            warehouse=job.warehouse,
+            warehouse=self.warehouse,
             comment=job.caller_globals.get('description', f"Pipeline {self.pipeline_id}"),
-            stage_location=job.stage_location,
+            stage_location=self.stage_location,
             packages=job.packages,
             computed_cron=computed_cron,
             not_scheduled_datasets=self.not_scheduled_datasets,
@@ -283,8 +326,70 @@ class SnowflakePipeline(AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDa
 
         return super().__exit__(exc_type, exc_value, traceback)
 
+    @property
+    def stage_location(self) -> Optional[str]:
+        return self._stage_location
+
+    @property
+    def warehouse(self) -> Optional[str]:
+        return self._warehouse
+
+    def deploy(self, options: dict[str, Any] = dict()) -> None:
+        """Deploy the pipeline to Snowflake.
+        Args:
+            options (dict[str, Any]): the options to deploy the pipeline.
+        """
+        session = Session.builder.configs(options).create()
+        database = options.get("database", None)
+        schema = options.get("schema", None)
+        if database is None or schema is None:
+            raise ValueError("Database and schema must be provided to deploy the pipeline")
+        stage_name = f"{database}.{schema}.{self.stage_location}".upper()
+        result = session.sql(f"SHOW STAGES LIKE '{stage_name.split('.')[-1]}'").collect()
+        if not result:
+            session.sql(f"CREATE STAGE {stage_name}").collect()
+        session.custom_package_usage_config = {"enabled": True, "force_push": True}
+        op = self.get_dag_operation(session, database, schema)
+        # op.delete(pipeline_id)
+        op.deploy(self.dag, mode = CreateMode.or_replace)
+        print(f"Pipeline {self.pipeline_id} deployed")
+
+    def run(self, options: dict[str, Any] = dict(), mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN) -> None:
+        """Run the pipeline.
+        Args:
+            options (dict[str, Any]): the options required to run the pipeline.
+            mode (StarlakeExecutionMode): the execution mode.
+        """
+        session = Session.builder.configs(options).create()
+        if mode == StarlakeExecutionMode.DRY_RUN:
+            def dry_run(definition) -> None:
+                if isinstance(definition, StoredProcedureCall):
+                    func = definition.func
+                    if isinstance(func, Callable):
+                        func.__call__(session = session, dry_run = True)
+            dag = self.dag
+            dry_run(dag.definition)
+            tasks = dag.tasks
+            for task in tasks:
+                definition = task.definition
+                dry_run(definition)
+        elif mode == StarlakeExecutionMode.RUN:
+            database = options.get("database", None)
+            schema = options.get("schema", None)
+            op = self.get_dag_operation(session, database, schema)
+            op.run(self.dag)
+            print(f"Pipeline {self.pipeline_id} run")
+
+    def get_dag_operation(self, session: Session, database: str, schema: str) -> DAGOperation:
+        session.sql(f"USE DATABASE {database}").collect()
+        session.sql(f"USE SCHEMA {schema}").collect()
+        session.sql(f"USE WAREHOUSE {self.warehouse.upper()}").collect()
+        root = Root(session)
+        schema = root.databases[database].schemas[schema]
+        return DAGOperation(schema)
+
 class SnowflakeTaskGroup(AbstractTaskGroup[List[DAGTask]]):
-    def __init__(self, group_id: str, group: List[DAGTask], dag: Optional[DAG] = None, **kwargs) -> None:
+    def __init__(self, group_id: str, group: List[DAGTask], dag: Optional[SnowflakeDag] = None, **kwargs) -> None:
         super().__init__(group_id=group_id, orchestration_cls=SnowflakeOrchestration, group=group, **kwargs)
         self.dag = dag
         self._group_as_map = dict()
@@ -321,7 +426,7 @@ class SnowflakeTaskGroup(AbstractTaskGroup[List[DAGTask]]):
                     roots.append(dep)
         return roots
 
-class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], StarlakeDataset]):
+class SnowflakeOrchestration(AbstractOrchestration[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset]):
     def __init__(self, job: StarlakeSnowflakeJob, **kwargs) -> None:
         """Overrides AbstractOrchestration.__init__()
         Args:
@@ -333,7 +438,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
     def sl_orchestrator(cls) -> str:
         return StarlakeOrchestrator.SNOWFLAKE
 
-    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset]:
+    def sl_create_pipeline(self, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, **kwargs) -> AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset]:
         """Create the Starlake pipeline to orchestrate.
 
         Args:
@@ -341,7 +446,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
             dependencies (Optional[StarlakeDependencies]): The optional dependencies
         
         Returns:
-            AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset]: The pipeline to orchestrate.
+            AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset]: The pipeline to orchestrate.
         """
         return SnowflakePipeline(
             self.job, 
@@ -350,7 +455,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
             self
         )
 
-    def sl_create_task(self, task_id: str, task: Optional[Union[DAGTask, List[DAGTask]]], pipeline: AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset]) -> Optional[Union[AbstractTask[DAGTask], AbstractTaskGroup[List[DAGTask]]]]:
+    def sl_create_task(self, task_id: str, task: Optional[Union[DAGTask, List[DAGTask]]], pipeline: AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset]) -> Optional[Union[AbstractTask[DAGTask], AbstractTaskGroup[List[DAGTask]]]]:
         if task is None:
             return None
 
@@ -395,7 +500,7 @@ class SnowflakeOrchestration(AbstractOrchestration[DAG, DAGTask, List[DAGTask], 
             task._dag = pipeline.dag
             return AbstractTask(task_id, task)
 
-    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, DAGTask, List[DAGTask], StarlakeDataset], **kwargs) -> AbstractTaskGroup[List[DAGTask]]:
+    def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset], **kwargs) -> AbstractTaskGroup[List[DAGTask]]:
         return SnowflakeTaskGroup(
             group_id, 
             group=[],

@@ -290,38 +290,43 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             from snowflake.snowpark.dataframe import DataFrame
             from snowflake.snowpark.row import Row
 
-            def execute_sql(session: Session, sql: Optional[str], message: Optional[str] = None) -> List[Row]:
+            def execute_sql(session: Session, sql: Optional[str], message: Optional[str] = None, dry_run: bool = False) -> List[Row]:
                 """Execute the SQL.
                 Args:
                     session (Session): The Snowflake session.
                     sql (str): The SQL query to execute.
                     message (Optional[str], optional): The optional message. Defaults to None.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 Returns:
                     List[Row]: The rows.
                 """
                 if sql:
-                    if message:
+                    if dry_run and message:
                         print(f"# {message}")
                     stmt: str = bindParams(sql)
-                    print(f"{stmt};")
-                    df: DataFrame = session.sql(stmt)
-                    rows = df.collect()
-                    return rows
+                    if dry_run:
+                        print(f"{stmt};")
+                        return []
+                    else:
+                        df: DataFrame = session.sql(stmt)
+                        rows = df.collect()
+                        return rows
                 else:
                     return []
 
-            def execute_sqls(session: Session, sqls: List[str], message: Optional[str] = None) -> None:
+            def execute_sqls(session: Session, sqls: List[str], message: Optional[str] = None, dry_run: bool = False) -> None:
                 """Execute the SQLs.
                 Args:
                     session (Session): The Snowflake session.
                     sqls (List[str]): The SQLs.
                     message (Optional[str], optional): The optional message. Defaults to None.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
                 if sqls:
-                    if message:
+                    if dry_run and message:
                         print(f"# {message}")
                     for sql in sqls:
-                        execute_sql(session, sql)
+                        execute_sql(session, sql, None, dry_run)
 
             def check_if_table_exists(session: Session, domain: str, table: str) -> bool:
                 """Check if the table exists.
@@ -333,29 +338,29 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     bool: True if the table exists, False otherwise.
                 """
                 query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{domain}.{table}'"
-                print(f"#Check if table {domain}.{table} exists:")
-                return execute_sql(session, query).__len__() > 0
+                return execute_sql(session, query, f"Check if table {domain}.{table} exists:", False).__len__() > 0
 
-            def check_if_audit_table_exists(session: Session) -> bool:
+            def check_if_audit_table_exists(session: Session, dry_run: bool = False) -> bool:
                 """Check if the audit table exists.
                 Args:
                     session (Session): The Snowflake session.
                     Returns:
                     bool: True if the audit table exists, False otherwise.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
                 if audit:
                     try:
                         # create SQL domain
                         domain = audit.get('domain', ['audit'])[0]
-                        create_domain_if_not_exists(session, domain)
+                        create_domain_if_not_exists(session, domain, dry_run)
                         # execute SQL preActions
-                        execute_sqls(session, audit.get('preActions', []), "Execute audit pre action:")
+                        execute_sqls(session, audit.get('preActions', []), "Execute audit pre action:", dry_run)
                         # check if the audit table exists
                         if not check_if_table_exists(session, domain, 'audit'):
                             # execute SQL createSchemaSql
                             sqls: List[str] = audit.get('createSchemaSql', [])
                             if sqls:
-                                execute_sqls(session, sqls, "Create audit table")
+                                execute_sqls(session, sqls, "Create audit table", dry_run)
                             return True
                         else:
                             return True
@@ -365,22 +370,23 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 else:
                     return False
 
-            def check_if_expectations_table_exists(session: Session) -> bool:
+            def check_if_expectations_table_exists(session: Session, dry_run: bool = False) -> bool:
                 """Check if the expectations table exists.
                 Args:
                     session (Session): The Snowflake session.
                     Returns:
                     bool: True if the expectations table exists, False otherwise.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
                 if expectations:
                     try:
                         # create SQL domain
                         domain = expectations.get('domain', ['audit'])[0]
-                        create_domain_if_not_exists(session, domain)
+                        create_domain_if_not_exists(session, domain, dry_run)
                         # check if the expectations table exists
                         if not check_if_table_exists(session, domain, 'expectations'):
                             # execute SQL createSchemaSql
-                            execute_sqls(session, expectations.get('createSchemaSql', []), "Create expectations table")
+                            execute_sqls(session, expectations.get('createSchemaSql', []), "Create expectations table", dry_run)
                             return True
                         else:
                             return True
@@ -392,7 +398,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
             from datetime import datetime
 
-            def log_audit(session: Session, paths: Optional[str], count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None) -> bool :
+            def log_audit(session: Session, paths: Optional[str], count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None, dry_run: bool = False) -> bool :
                 """Log the audit record.
                 Args:
                     session (Session): The Snowflake session.
@@ -405,10 +411,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     ts (datetime): The timestamp.
                     jobid (Optional[str], optional): The optional job id. Defaults to None.
                     step (Optional[str], optional): The optional step. Defaults to None.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 Returns:
                     bool: True if the audit record was logged, False otherwise.
                 """
-                if audit and check_if_audit_table_exists(session):
+                if audit and check_if_audit_table_exists(session, dry_run):
                     audit_domain = audit.get('domain', ['audit'])[0]
                     audit_sqls = audit.get('mainSqlIfExists', None)
                     if audit_sqls:
@@ -431,8 +438,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 tenant = ""
                             )
                             insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
-                            print("#Insert audit record:")
-                            execute_sql(session, insert_sql)
+                            execute_sql(session, insert_sql, "Insert audit record:", dry_run)
                             return True
                         except Exception as e:
                             print(f"Error inserting audit record: {str(e)}")
@@ -442,7 +448,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 else:
                     return False
 
-            def log_expectation(session: Session, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime, jobid: Optional[str] = None) -> bool :
+            def log_expectation(session: Session, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime, jobid: Optional[str] = None, dry_run: bool = False) -> bool :
                 """Log the expectation record.
                 Args:
                     session (Session): The Snowflake session.
@@ -454,10 +460,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     exception (str): The exception.
                     ts (datetime): The timestamp.
                     jobid (Optional[str], optional): The optional job id. Defaults to None.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 Returns:
                     bool: True if the expectation record was logged, False otherwise.
                 """
-                if expectations and check_if_expectations_table_exists(session):
+                if expectations and check_if_expectations_table_exists(session, dry_run):
                     expectation_domain = expectations.get('domain', ['audit'])[0]
                     expectation_sqls = expectations.get('mainSqlIfExists', None)
                     if expectation_sqls:
@@ -477,8 +484,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 sql = sql
                             )
                             insert_sql = f"INSERT INTO {expectation_domain}.expectations {formatted_sql}"
-                            print("#Insert expectations record:")
-                            execute_sql(session, insert_sql)
+                            execute_sql(session, insert_sql, "Insert expectations record:", dry_run)
                             return True
                         except Exception as e:
                             print(f"Error inserting expectations record: {str(e)}")
@@ -488,7 +494,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 else:
                     return False
 
-            def run_expectation(session: Session, name: str, params: str, query: str, failOnError: bool = False, jobid: Optional[str] = None) -> None:
+            def run_expectation(session: Session, name: str, params: str, query: str, failOnError: bool = False, jobid: Optional[str] = None, dry_run: bool = False) -> None:
                 """Run the expectation.
                 Args:
                     session (Session): The Snowflake session.
@@ -497,83 +503,81 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     query (str): The query.
                     failOnError (bool, optional): Whether to fail on error. Defaults to False.
                     jobid (Optional[str], optional): The optional job id. Defaults to None.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
                 count = 0
                 try:
                     if query:
-                        print(f"#Run expectation {name}:")
-                        rows = execute_sql(session, query)
+                        rows = execute_sql(session, query, f"Run expectation {name}:", dry_run)
                         if rows.__len__() != 1:
-                            raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
-                        count = rows[0][0]
+                            if not dry_run:
+                                raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
+                        else:
+                            count = rows[0][0]
                         #  log expectations as audit in expectation table here
                         if count != 0:
                             raise Exception(f'Expectation failed for {sink}: {query}. Expected count to be equal to 0 but got {count}')
-                        log_expectation(session, True, name, params, query, count, "", datetime.now(), jobid)
+                        log_expectation(session, True, name, params, query, count, "", datetime.now(), jobid, dry_run)
                     else:
                         raise Exception(f'Expectation failed for {sink}: {name}. Query not found')
                 except Exception as e:
                     print(f"Error running expectation {name}: {str(e)}")
-                    log_expectation(session, False, name, params, query, count, str(e), datetime.now(), jobid)
-                    if failOnError:
+                    log_expectation(session, False, name, params, query, count, str(e), datetime.now(), jobid, dry_run)
+                    if failOnError and not dry_run:
                         raise e
 
-            def run_expectations(session: Session, jobid: Optional[str] = None) -> None:
+            def run_expectations(session: Session, jobid: Optional[str] = None, dry_run: bool = False) -> None:
                 """Run the expectations.
                 Args:
                     session (Session): The Snowflake session.
                     jobid (Optional[str], optional): The optional job id. Defaults to None.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
-                if expectation_items and check_if_expectations_table_exists(session):
+                if expectation_items and check_if_expectations_table_exists(session, dry_run):
                     for expectation in expectation_items:
-                        run_expectation(session, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')), jobid)
+                        run_expectation(session, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')), jobid, dry_run)
 
-            def begin_transaction(session: Session) -> None:
+            def begin_transaction(session: Session, dry_run: bool = False) -> None:
                 """Begin the transaction.
                 Args:
                     session (Session): The Snowflake session.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
-                query = "BEGIN"
-                print("#BEGIN transaction:")
-                execute_sql(session, query)
+                execute_sql(session, "BEGIN", "BEGIN transaction:", dry_run)
 
-            def create_domain_if_not_exists(session: Session, domain: str) -> None:
+            def create_domain_if_not_exists(session: Session, domain: str, dry_run: bool = False) -> None:
                 """Create the schema if it does not exist.
                 Args:
                     session (Session): The Snowflake session.
                     domain (str): The domain.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
-                query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
-                print(f"#Create schema {domain} if not exists:")
-                execute_sql(session, query)
+                execute_sql(session, f"CREATE SCHEMA IF NOT EXISTS {domain}", f"Create schema {domain} if not exists:", dry_run)
 
-            def enable_change_tracking(session: Session, sink: str) -> None:
+            def enable_change_tracking(session: Session, sink: str, dry_run: bool = False) -> None:
                 """Enable change tracking.
                 Args:
                     session (Session): The Snowflake session.
                     sink (str): The sink.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
-                query = f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE"
-                print(f"#Enable change tracking:")
-                execute_sql(session, query)
+                execute_sql(session, f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE", "Enable change tracking:", dry_run)
 
-            def commit_transaction(session: Session) -> None:
+            def commit_transaction(session: Session, dry_run: bool = False) -> None:
                 """Commit the transaction.
                 Args:
                     session (Session): The Snowflake session.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
-                query = "COMMIT"
-                print("#COMMIT transaction:")
-                execute_sql(session, query)
+                execute_sql(session, "COMMIT", "COMMIT transaction:", dry_run)
 
-            def rollback_transaction(session: Session) -> None:
+            def rollback_transaction(session: Session, dry_run: bool = False) -> None:
                 """Rollback the transaction.
                 Args:
                     session (Session): The Snowflake session.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 """
-                query = "ROLLBACK"
-                print("#ROLLBACK transaction:")
-                execute_sql(session, query)
+                execute_sql(session, "ROLLBACK", "ROLLBACK transaction:", dry_run)
 
             if command == 'transform':
                 if statements:
@@ -584,15 +588,21 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     format = '%Y-%m-%d %H:%M:%S%z'
 
                     # create the function that will execute the transform
-                    def fun(session: Session) -> None:
+                    def fun(session: Session, dry_run: bool) -> None:
                         from datetime import datetime
+
+                        if dry_run:
+                            print(f"#Executing transform for {sink} in dry run mode")
 
                         if cron_expr:
                             from croniter import croniter
                             from croniter.croniter import CroniterBadCronError
                             # get the original scheduled timestamp of the initial graph run in the current group
                             # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
-                            config = session.call("system$get_task_graph_config")
+                            if dry_run:
+                                config = None
+                            else:
+                                config = session.call("system$get_task_graph_config")
                             if config:
                                 import json
                                 config = json.loads(config)
@@ -602,7 +612,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             if not original_schedule:
                                 query = "SELECT to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))"
                                 print(f"#Get the original scheduled timestamp of the initial graph run:\n{query};")
-                                original_schedule = session.sql(query=query).collect()[0][0]
+                                rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
+                                if rows.__len__() == 1:
+                                    original_schedule = rows[0][0]
+                                else:
+                                    original_schedule = None
                             if original_schedule:
                                 if isinstance(original_schedule, str):
                                     from dateutil import parser
@@ -626,57 +640,61 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             except CroniterBadCronError:
                                 raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-                        jobid = str(session.call("system$current_user_task_name"))
+                        if dry_run:
+                            jobid = sink
+                        else:
+                            jobid = str(session.call("system$current_user_task_name"))
 
                         start = datetime.now()
 
                         try:
                             # BEGIN transaction
-                            begin_transaction(session)
+                            begin_transaction(session, dry_run)
 
                             # create SQL domain
-                            create_domain_if_not_exists(session, domain)
+                            create_domain_if_not_exists(session, domain, dry_run)
 
                             # execute preActions
-                            execute_sqls(session, statements.get('preActions', []), "Pre actions")
+                            execute_sqls(session, statements.get('preActions', []), "Pre actions", dry_run)
 
                             # execute preSqls
-                            execute_sqls(session, statements.get('preSqls', []), "Pre sqls")
+                            execute_sqls(session, statements.get('preSqls', []), "Pre sqls", dry_run)
 
                             if check_if_table_exists(session, domain, table):
+                                # enable change tracking
+                                enable_change_tracking(session, sink, dry_run)
                                 # execute addSCD2ColumnsSqls
-                                execute_sqls(session, statements.get('addSCD2ColumnsSqls', []), "Add SCD2 columns")
+                                execute_sqls(session, statements.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                 # execute mainSqlIfExists
-                                execute_sqls(session, statements.get('mainSqlIfExists', []), "Main sql if exists")
+                                execute_sqls(session, statements.get('mainSqlIfExists', []), "Main sql if exists", dry_run)
                             else:
                                 # execute mainSqlIfNotExists
-                                execute_sqls(session, statements.get('mainSqlIfNotExists', []), "Main sql if not exists")
+                                execute_sqls(session, statements.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
+                                # enable change tracking
+                                enable_change_tracking(session, sink, dry_run)
 
                             # execute postSqls
-                            execute_sqls(session, statements.get('postSqls', []) , "Post sqls")
-
-                            # enable change tracking
-                            enable_change_tracking(session, sink)
+                            execute_sqls(session, statements.get('postSqls', []) , "Post sqls", dry_run)
 
                             # run expectations
-                            run_expectations(session, jobid)
+                            run_expectations(session, jobid, dry_run)
 
                             # COMMIT transaction
-                            commit_transaction(session)
+                            commit_transaction(session, dry_run)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             print(f"#Duration in seconds: {duration}")
-                            log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM")
+                            log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run)
                             
                         except Exception as e:
                             # ROLLBACK transaction
                             error_message = str(e)
                             print(f"Error executing transform for {sink}: {error_message}")
-                            rollback_transaction(session)
+                            rollback_transaction(session, dry_run)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             print(f"Duration in seconds: {duration}")
-                            log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM")
+                            log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run)
                             raise e
 
                     kwargs.pop('params', None)
@@ -686,7 +704,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         name=task_id, 
                         definition=StoredProcedureCall(
                             func = fun,
-                            args=[], 
+                            args=[False], 
                             stage_location=self.stage_location,
                             packages=self.packages,
                         ), 
@@ -873,75 +891,78 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 raise ValueError(f"Unsupported format {format}")
   
                         # create the function that will execute the load
-                        def fun(session: Session) -> None:
+                        def fun(session: Session, dry_run: bool) -> None:
                             from datetime import datetime
 
-                            jobid = str(session.call("system$current_user_task_name"))
+                            if dry_run:
+                                jobid = sink
+                            else:
+                                jobid = str(session.call("system$current_user_task_name"))
 
                             start = datetime.now()
 
                             try:
                                 # BEGIN transaction
-                                begin_transaction(session)
+                                begin_transaction(session, dry_run)
 
                                 nbSteps = int(statements.get('steps', '1'))
                                 write_strategy = statements.get('writeStrategy', None)
                                 if nbSteps == 1:
-                                    execute_sqls(session, statements.get('createTable', []), "Create table")
+                                    execute_sqls(session, statements.get('createTable', []), "Create table", dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
-                                        execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table")
-                                    copy_results = execute_sql(session, build_copy(), "Copy data")
+                                        execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                                    copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                 elif nbSteps == 2:
-                                    execute_sqls(session, statements.get('firstStep', []), "Execute first step")
+                                    execute_sqls(session, statements.get('firstStep', []), "Execute first step", dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
-                                        execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table")
-                                    copy_results = execute_sql(session, build_copy(), "Copy data")
+                                        execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                                    copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     second_step = statements.get('secondStep', dict())
                                     # execute preActions
-                                    execute_sqls(session, second_step.get('preActions', []), "Pre actions")
+                                    execute_sqls(session, second_step.get('preActions', []), "Pre actions", dry_run)
                                     # execute schema presql
-                                    execute_sqls(session, context_schema.get('presql', []), "Pre sqls")
+                                    execute_sqls(session, context_schema.get('presql', []), "Pre sqls", dry_run)
                                     if check_if_table_exists(session, domain, table):
                                         # execute addSCD2ColumnsSqls
-                                        execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns")
+                                        execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                         # execute mainSqlIfExists
-                                        execute_sqls(session, second_step.get('mainSqlIfExists', []), "Main sql if exists")
+                                        execute_sqls(session, second_step.get('mainSqlIfExists', []), "Main sql if exists", dry_run)
                                     else:
                                         # execute mainSqlIfNotExists
-                                        execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists")
+                                        execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
                                     # execute dropFirstStep
-                                    execute_sql(session, statements.get('dropFirstStep', None), "Drop first step")
+                                    execute_sql(session, statements.get('dropFirstStep', None), "Drop first step", dry_run)
                                 else:
                                     raise ValueError(f"Invalid number of steps: {nbSteps}")
 
                                 # execute schema postsql
-                                execute_sqls(session, context_schema.get('postsql', []), "Post sqls")
+                                execute_sqls(session, context_schema.get('postsql', []), "Post sqls", dry_run)
 
                                 # enable change tracking
-                                enable_change_tracking(session, sink)
+                                enable_change_tracking(session, sink, dry_run)
 
                                 # run expectations
-                                run_expectations(session, jobid)
+                                run_expectations(session, jobid, dry_run)
 
                                 # COMMIT transaction
-                                commit_transaction(session)
+                                commit_transaction(session, dry_run)
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
                                 print(f"#Duration in seconds: {duration}")
                                 files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
                                 message = first_error_line + '\n' + first_error_column_name
                                 success = errors_seen == 0
-                                log_audit(session, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD")
+                                log_audit(session, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run)
                                 
                             except Exception as e:
                                 # ROLLBACK transaction
                                 error_message = str(e)
                                 print(f"Error executing load for {sink}: {error_message}")
-                                rollback_transaction(session)
+                                rollback_transaction(session, dry_run)
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
                                 print(f"Duration in seconds: {duration}")
-                                log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD")
+                                log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run)
                                 raise e
 
                         kwargs.pop('params', None)
@@ -951,7 +972,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             name=task_id, 
                             definition=StoredProcedureCall(
                                 func = fun,
-                                args=[], 
+                                args=[False], 
                                 stage_location=self.stage_location,
                                 packages=self.packages,
                             ), 
