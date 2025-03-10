@@ -47,6 +47,15 @@ class StarlakeExecutionEnvironment(str, Enum):
     def __str__(self):
         return self.value
 
+class StarlakeExecutionMode(str, Enum):
+    
+    DRY_RUN = "dry_run"
+    RUN = "run"
+    BACKFILL = "backfill"
+
+    def __str__(self):
+        return self.value
+
 class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
     def __init__(self, filename: str, module_name: str, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None], options: dict, **kwargs) -> None:
         """Init the class.

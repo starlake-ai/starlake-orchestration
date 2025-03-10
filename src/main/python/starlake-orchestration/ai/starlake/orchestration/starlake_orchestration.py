@@ -9,7 +9,7 @@ import inspect
 
 from ai.starlake.common import StarlakeCronPeriod, sl_cron_start_end_dates, sort_crons_by_frequency, is_valid_cron, sanitize_id
 
-from ai.starlake.job import StarlakeSparkConfig, IStarlakeJob, StarlakePreLoadStrategy
+from ai.starlake.job import StarlakeSparkConfig, IStarlakeJob, StarlakePreLoadStrategy, StarlakeExecutionMode
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
@@ -725,6 +725,31 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     @final
     def __repr__(self):
         return self.print_pipeline()
+
+    @abstractmethod
+    def deploy(self, options: dict[str, Any]) -> None:
+        """Deploy the pipeline.
+        Args:
+            options (dict[str, Any]): the options required to deploy the pipeline.
+        """
+        ...
+
+    @abstractmethod
+    def run(self, options: dict[str, Any] = dict(), mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN) -> None:
+        """Run the pipeline.
+        Args:
+            options (dict[str, Any]): the options required to run the pipeline.
+            mode (StarlakeExecutionMode): the execution mode.
+        """
+        ...
+
+    def dry_run(self, options: dict[str, Any] = dict()) -> None:
+        """Dry run the pipeline.
+        Args:
+            options (dict[str, Any]): the options to run the pipeline.
+        """
+        self.run(options, StarlakeExecutionMode.DRY_RUN)
+
 
 class AbstractOrchestration(Generic[U, T, GT, E]):
     def __init__(self, job: IStarlakeJob[T, E], **kwargs) -> None:
