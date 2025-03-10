@@ -159,7 +159,9 @@ def add_columns_from_dict(domain:str, table: str, dictionary):
     return [f"ALTER TABLE IF EXISTS {domain}.{table} ADD COLUMN IF NOT EXISTS {k} {v};" for k, v in dictionary.items()]
     
 def drop_columns_from_dict(domain:str, table: str, dictionary):
-    return [f"ALTER TABLE IF EXISTS {domain}.{table} DROP COLUMN IF EXISTS {k};" for k, v in dictionary.items()]
+    # In the current version, we do not drop any existing columns for backward compatibility
+    # return [f"ALTER TABLE IF EXISTS {domain}.{table} DROP COLUMN IF EXISTS {k};" for k, v in dictionary.items()]
+    return []
     
 
 def update_table_schema(domain: str, table: str, new_columns):
@@ -188,11 +190,6 @@ def update_table_schema(domain: str, table: str, new_columns):
         stmt: str = bindParams(sql)
         run_sql(session, stmt)
     return True
-
-    for column in new_columns:
-        schema[column] = new_columns[column]
-    return schema
-
 
 
 audit = {
@@ -614,11 +611,11 @@ try:
       for sql in preSqls:
           stmt: str = bindParams(sql)
           run_sql(session, stmt)
-      if check_if_table_exists(domain, table):
-        update_table_schema(domain, table, schema)
       for sql in task["createTable"]:
         stmt: str = bindParams(sql)
         run_sql(session, stmt)
+      if check_if_table_exists(domain, table):
+        update_table_schema(domain, table, schema)
       if task["writeStrategy"] == "WRITE_TRUNCATE":
         sql = f"TRUNCATE TABLE {task['targetTableName']}"
         run_sql(session, sql)
@@ -638,12 +635,12 @@ try:
           stmt: str = bindParams(sql)
           run_sql(session, stmt)
       if check_if_table_exists(domain, table):
-        update_table_schema(domain, table, schema)
         # execute addSCD2ColumnsSqls only if table exists
         scd2_sqls: List[str] = schema.get('addSCD2ColumnsSqls', [])
         for sql in scd2_sqls:
             stmt: str = bindParams(sql)
             run_sql(session, stmt)
+        update_table_schema(domain, table, schema)
         sqls = second_step["mainSqlIfExists"]
       else:
         # addSCD2ColumnsSqls is in the mainSqlIfNotExists sql list if required
