@@ -893,13 +893,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     if write_strategy == 'WRITE_TRUNCATE':
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table")
                                     copy_results = execute_sql(session, build_copy(), "Copy data")
-                                    # execute schema presql
-                                    execute_sqls(session, context_schema.get('presql', []), "Pre sqls")
                                     second_step = statements.get('secondStep', dict())
                                     # execute preActions
                                     execute_sqls(session, second_step.get('preActions', []), "Pre actions")
-                                    # execute preSqls
-                                    execute_sqls(session, second_step.get('preSqls', []), "Pre sqls")
+                                    # execute schema presql
+                                    execute_sqls(session, context_schema.get('presql', []), "Pre sqls")
                                     if check_if_table_exists(session, domain, table):
                                         # execute addSCD2ColumnsSqls
                                         execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns")
