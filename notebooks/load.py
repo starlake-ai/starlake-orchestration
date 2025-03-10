@@ -149,6 +149,52 @@ statements = {
 
 expectation_items = { }
 
+def schema_as_dict(schema_string: str) -> dict:
+  tableNativeSchema = map(lambda x: (x.split()[0].strip(), x.split()[1].strip()), schema_string.replace("\"", "").split(","))
+  tableSchemaDict = dict(map(lambda x: (x[0].lower(), x[1].lower()), tableNativeSchema))
+  return tableSchemaDict
+
+
+def add_columns_from_dict(domain:str, table: str, dictionary):
+    return [f"ALTER TABLE IF EXISTS {domain}.{table} ADD COLUMN IF NOT EXISTS {k} {v};" for k, v in dictionary.items()]
+    
+def drop_columns_from_dict(domain:str, table: str, dictionary):
+    return [f"ALTER TABLE IF EXISTS {domain}.{table} DROP COLUMN IF EXISTS {k};" for k, v in dictionary.items()]
+    
+
+def update_table_schema(domain: str, table: str, new_columns):
+    existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{domain}' and table_name ilike '{table}';"
+    existing_columns = run_sql(session, existing_schema_sql).map(lambda x: (x['column_name'], x['data_type']))
+    existing_schema = dict(existing_columns)
+    domain_and_table = f"{domain}.{table}"
+    schema_string = statements.get(domain_and_table, {}).get("schemaString", "") 
+    if schema_string.strip() == "":
+        return False
+    new_schema = schema_as_dict(schema_string)
+    new_columns = set(new_schema.keys()) - set(existing_schema.keys())
+    old_columns = set(existing_schema.keys()) - set(new_schema.keys())
+    if new_columns.__len__() + old_columns.__len__ == 0:
+        return False
+    new_columns_dict = {key: new_schema[key] for key in new_columns}
+    old_columns_dict = {key: existing_schema[key] for key in old_columns}
+    alter_columns = add_columns_from_dict(domain, table, new_columns_dict)
+    for sql in alter_columns:
+        stmt: str = bindParams(sql)
+        run_sql(session, stmt)
+
+    old_columns_dict = {key: existing_schema[key] for key in old_columns}
+    drop_columns = drop_columns_from_dict(domain, table, old_columns_dict)
+    for sql in drop_columns:
+        stmt: str = bindParams(sql)
+        run_sql(session, stmt)
+    return True
+
+    for column in new_columns:
+        schema[column] = new_columns[column]
+    return schema
+
+
+
 audit = {
   "name" : "audit-sales-customers--1741462403548",
   "preActions" : [ "USE SCHEMA audit" ],
@@ -564,6 +610,12 @@ try:
     start = datetime.now()
     sl_put_to_stage(session)
     if statements[jobid]["steps"] == "1":
+      preSqls: List[str] = schema.get('presql', [])
+      for sql in preSqls:
+          stmt: str = bindParams(sql)
+          run_sql(session, stmt)
+      if check_if_table_exists(domain, table):
+        update_table_schema(domain, table, schema)
       for sql in task["createTable"]:
         stmt: str = bindParams(sql)
         run_sql(session, stmt)
@@ -586,6 +638,7 @@ try:
           stmt: str = bindParams(sql)
           run_sql(session, stmt)
       if check_if_table_exists(domain, table):
+        update_table_schema(domain, table, schema)
         # execute addSCD2ColumnsSqls only if table exists
         scd2_sqls: List[str] = schema.get('addSCD2ColumnsSqls', [])
         for sql in scd2_sqls:
@@ -650,3 +703,4 @@ except Exception as e:
     else:
         print("Audit schema does not exist")
     raise e
+
