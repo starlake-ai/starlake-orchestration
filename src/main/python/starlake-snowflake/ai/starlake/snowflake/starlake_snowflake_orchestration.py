@@ -10,7 +10,7 @@ from ai.starlake.snowflake.starlake_snowflake_job import StarlakeSnowflakeJob
 from snowflake.core import Root
 from snowflake.core._common import CreateMode
 from snowflake.core.task import Cron, StoredProcedureCall, Task
-from snowflake.core.task.dagv1 import DAG, DAGTask, DAGOperation, _dag_context_stack
+from snowflake.core.task.dagv1 import DAG, DAGTask, DAGOperation, DAGRun, _dag_context_stack
 from snowflake.snowpark import Session
 
 from typing import Any, Callable, List, Optional, Union
@@ -378,7 +378,30 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             schema = options.get("schema", None)
             op = self.get_dag_operation(session, database, schema)
             op.run(self.dag)
-            print(f"Pipeline {self.pipeline_id} run")
+            from datetime import datetime
+            dag_runs = op.get_current_dag_runs(self.dag)
+            timeout = 60
+            start = datetime.now()
+            def check_status(dag_runs: List[DAGRun]) -> int:
+                import time
+                if not dag_runs:
+                    raise ValueError(f"Pipeline {self.pipeline_id} failed to run")
+                else:
+                    while True:
+                        dag_runs_sorted: List[DAGRun] = sorted(dag_runs, key=lambda run: run.scheduled_time, reverse=True)
+                        last_run: DAGRun = dag_runs_sorted[0]
+                        run_id = last_run.run_id
+                        state = last_run.state
+                        print(f"Pipeline {self.pipeline_id} with id {run_id} is {state.lower()}")
+                        if state.upper() == 'EXECUTING':
+                            return run_id
+                        else:
+                            if datetime.now() - start > timedelta(seconds=timeout):
+                                raise TimeoutError(f"Pipeline {self.pipeline_id} failed to run")
+                            time.sleep(5)
+                            return check_status(op.get_current_dag_runs(self.dag))
+            run_id = check_status(dag_runs)
+            print(f"Pipeline {self.pipeline_id} is executing with id {run_id}")
 
     def get_dag_operation(self, session: Session, database: str, schema: str) -> DAGOperation:
         session.sql(f"USE DATABASE {database}").collect()
