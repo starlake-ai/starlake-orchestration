@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from ai.starlake.common import MissingEnvironmentVariable
 
@@ -177,7 +177,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
-        kwargs.update({'load': True})
         if dataset:
             if isinstance(dataset, str):
                 sink = dataset
@@ -206,7 +205,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
-        kwargs.update({'transform': True})
         if dataset:
             if isinstance(dataset, str):
                 sink = dataset
@@ -236,11 +234,12 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             DAGTask: The Snowflake task.
         """
         sink = kwargs.get('sink', None)
+        command = arguments[0].lower()
         if sink:
             kwargs.pop('sink', None)
-            domainAndSchema = sink.split('.')
-            domain = domainAndSchema[0]
-            schema = domainAndSchema[-1]
+            domainAndTable = sink.split('.')
+            domain = domainAndTable[0]
+            table = domainAndTable[-1]
             statements = self.caller_globals.get('statements', dict()).get(sink, None)
             audit = self.caller_globals.get('audit', dict())
             expectations = self.caller_globals.get('expectations', dict())
@@ -288,49 +287,75 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     return False
                 raise ValueError(f"Valeur invalide : {value}")
 
-            def check_if_schema_exists(session: Session, domain: str, schema: str) -> bool:
-                """Check if the schema exists.
+            from snowflake.snowpark.dataframe import DataFrame
+            from snowflake.snowpark.row import Row
+
+            def execute_sql(session: Session, sql: Optional[str], message: Optional[str] = None) -> List[Row]:
+                """Execute the SQL.
+                Args:
+                    session (Session): The Snowflake session.
+                    sql (str): The SQL query to execute.
+                    message (Optional[str], optional): The optional message. Defaults to None.
+                Returns:
+                    List[Row]: The rows.
+                """
+                if sql:
+                    if message:
+                        print(f"# {message}")
+                    stmt: str = bindParams(sql)
+                    print(f"{stmt};")
+                    df: DataFrame = session.sql(stmt)
+                    rows = df.collect()
+                    return rows
+                else:
+                    return []
+
+            def execute_sqls(session: Session, sqls: List[str], message: Optional[str] = None) -> None:
+                """Execute the SQLs.
+                Args:
+                    session (Session): The Snowflake session.
+                    sqls (List[str]): The SQLs.
+                    message (Optional[str], optional): The optional message. Defaults to None.
+                """
+                if sqls:
+                    if message:
+                        print(f"# {message}")
+                    for sql in sqls:
+                        execute_sql(session, sql)
+
+            def check_if_table_exists(session: Session, domain: str, table: str) -> bool:
+                """Check if the table exists.
                 Args:
                     session (Session): The Snowflake session.
                     domain (str): The domain.
-                    schema (str): The schema.
+                    table (str): The table.
                     Returns:
-                    bool: True if the schema exists, False otherwise.
+                    bool: True if the table exists, False otherwise.
                 """
-                query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{domain}.{schema}'"
-                print(f"#Check if table exists:\n{query};")
-                df = session.sql(query=query)
-                rows = df.collect()
-                return rows.__len__() > 0
+                query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{domain}.{table}'"
+                print(f"#Check if table {domain}.{table} exists:")
+                return execute_sql(session, query).__len__() > 0
 
-            def check_if_audit_schema_exists(session: Session) -> bool:
-                """Check if the audit schema exists.
+            def check_if_audit_table_exists(session: Session) -> bool:
+                """Check if the audit table exists.
                 Args:
                     session (Session): The Snowflake session.
                     Returns:
-                    bool: True if the audit schema exists, False otherwise.
+                    bool: True if the audit table exists, False otherwise.
                 """
                 if audit:
                     try:
                         # create SQL domain
                         domain = audit.get('domain', ['audit'])[0]
-                        query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
-                        print(f"#Create audit schema if not exists:\n{query};")
-                        session.sql(query=query).collect()
+                        create_domain_if_not_exists(session, domain)
                         # execute SQL preActions
-                        preActions: List[str] = audit.get('preActions', [])
-                        for sql in preActions:
-                            stmt: str = bindParams(sql)
-                            print(f"#Execute audit pre action:\n{stmt};")
-                            session.sql(stmt).collect()
-                        # check if the audit schema exists
-                        if not check_if_schema_exists(session, domain, 'audit'):
+                        execute_sqls(session, audit.get('preActions', []), "Execute audit pre action:")
+                        # check if the audit table exists
+                        if not check_if_table_exists(session, domain, 'audit'):
                             # execute SQL createSchemaSql
                             sqls: List[str] = audit.get('createSchemaSql', [])
-                            for sql in sqls:
-                                stmt: str = bindParams(sql)
-                                print(f"#Create audit table:\n{stmt};")
-                                session.sql(stmt).collect()
+                            if sqls:
+                                execute_sqls(session, sqls, "Create audit table")
                             return True
                         else:
                             return True
@@ -340,28 +365,22 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 else:
                     return False
 
-            def check_if_expectations_schema_exists(session: Session) -> bool:
-                """Check if the expectations schema exists.
+            def check_if_expectations_table_exists(session: Session) -> bool:
+                """Check if the expectations table exists.
                 Args:
                     session (Session): The Snowflake session.
                     Returns:
-                    bool: True if the expectations schema exists, False otherwise.
+                    bool: True if the expectations table exists, False otherwise.
                 """
                 if expectations:
                     try:
                         # create SQL domain
                         domain = expectations.get('domain', ['audit'])[0]
-                        query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
-                        print(f"#Create expectations schema if not exists:\n{query};")
-                        session.sql(query=query).collect()
-                        # check if the expectations schema exists
-                        if not check_if_schema_exists(session, domain, 'expectations'):
+                        create_domain_if_not_exists(session, domain)
+                        # check if the expectations table exists
+                        if not check_if_table_exists(session, domain, 'expectations'):
                             # execute SQL createSchemaSql
-                            sqls: List[str] = expectations.get('createSchemaSql', [])
-                            for sql in sqls:
-                                stmt: str = bindParams(sql)
-                                print(f"#Create expectations table:\n{stmt};")
-                                session.sql(stmt).collect()
+                            execute_sqls(session, expectations.get('createSchemaSql', []), "Create expectations table")
                             return True
                         else:
                             return True
@@ -373,7 +392,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
             from datetime import datetime
 
-            def log_audit(session: Session, count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None) -> bool :
+            def log_audit(session: Session, paths: Optional[str], count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None) -> bool :
                 """Log the audit record.
                 Args:
                     session (Session): The Snowflake session.
@@ -389,17 +408,17 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 Returns:
                     bool: True if the audit record was logged, False otherwise.
                 """
-                if audit and check_if_audit_schema_exists(session):
+                if audit and check_if_audit_table_exists(session):
                     audit_domain = audit.get('domain', ['audit'])[0]
                     audit_sqls = audit.get('mainSqlIfExists', None)
                     if audit_sqls:
                         try:
                             audit_sql = audit_sqls[0]
                             formatted_sql = audit_sql.format(
-                                jobid = jobid or f'{domain}.{schema}',
-                                paths = schema,
+                                jobid = jobid or f'{domain}.{table}',
+                                paths = paths or table,
                                 domain = domain,
-                                schema = schema,
+                                schema = table,
                                 success = str(success),
                                 count = str(count),
                                 countAccepted = str(countAccepted),
@@ -412,8 +431,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 tenant = ""
                             )
                             insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
-                            print(f"#Insert audit record:\n{insert_sql};")
-                            session.sql(insert_sql).collect()
+                            print("#Insert audit record:")
+                            execute_sql(session, insert_sql)
                             return True
                         except Exception as e:
                             print(f"Error inserting audit record: {str(e)}")
@@ -438,17 +457,17 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 Returns:
                     bool: True if the expectation record was logged, False otherwise.
                 """
-                if expectations and check_if_expectations_schema_exists(session):
+                if expectations and check_if_expectations_table_exists(session):
                     expectation_domain = expectations.get('domain', ['audit'])[0]
                     expectation_sqls = expectations.get('mainSqlIfExists', None)
                     if expectation_sqls:
                         try:
                             expectation_sql = expectation_sqls[0]
                             formatted_sql = expectation_sql.format(
-                                jobid = jobid or f'{domain}.{schema}',
+                                jobid = jobid or f'{domain}.{table}',
                                 database = "",
                                 domain = domain,
-                                schema = schema,
+                                schema = table,
                                 count = count,
                                 exception = exception,
                                 timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
@@ -458,8 +477,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 sql = sql
                             )
                             insert_sql = f"INSERT INTO {expectation_domain}.expectations {formatted_sql}"
-                            print(f"#Insert expectations record:\n{insert_sql};")
-                            session.sql(insert_sql).collect()
+                            print("#Insert expectations record:")
+                            execute_sql(session, insert_sql)
                             return True
                         except Exception as e:
                             print(f"Error inserting expectations record: {str(e)}")
@@ -482,10 +501,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 count = 0
                 try:
                     if query:
-                        stmt: str = bindParams(query)
-                        print(f"#Run expectation {name}:\n{stmt};")
-                        df = session.sql(stmt)
-                        rows = df.collect()
+                        print(f"#Run expectation {name}:")
+                        rows = execute_sql(session, query)
                         if rows.__len__() != 1:
                             raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
                         count = rows[0][0]
@@ -507,7 +524,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     session (Session): The Snowflake session.
                     jobid (Optional[str], optional): The optional job id. Defaults to None.
                 """
-                if expectation_items and check_if_expectations_schema_exists(session):
+                if expectation_items and check_if_expectations_table_exists(session):
                     for expectation in expectation_items:
                         run_expectation(session, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')), jobid)
 
@@ -516,8 +533,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 Args:
                     session (Session): The Snowflake session.
                 """
-                print("#BEGIN transaction:\nBEGIN;")
-                session.sql("BEGIN").collect()
+                query = "BEGIN"
+                print("#BEGIN transaction:")
+                execute_sql(session, query)
 
             def create_domain_if_not_exists(session: Session, domain: str) -> None:
                 """Create the schema if it does not exist.
@@ -526,8 +544,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     domain (str): The domain.
                 """
                 query=f"CREATE SCHEMA IF NOT EXISTS {domain}"
-                print(f"#Create schema if not exists:\n{query};")
-                session.sql(query=query).collect()
+                print(f"#Create schema {domain} if not exists:")
+                execute_sql(session, query)
 
             def enable_change_tracking(session: Session, sink: str) -> None:
                 """Enable change tracking.
@@ -536,27 +554,28 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     sink (str): The sink.
                 """
                 query = f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE"
-                print(f"#Enable change tracking:\n{query};")
-                session.sql(query=query).collect()
+                print(f"#Enable change tracking:")
+                execute_sql(session, query)
 
             def commit_transaction(session: Session) -> None:
                 """Commit the transaction.
                 Args:
                     session (Session): The Snowflake session.
                 """
-                print("#COMMIT transaction:\nCOMMIT;")
-                session.sql("COMMIT").collect()
+                query = "COMMIT"
+                print("#COMMIT transaction:")
+                execute_sql(session, query)
 
             def rollback_transaction(session: Session) -> None:
                 """Rollback the transaction.
                 Args:
                     session (Session): The Snowflake session.
                 """
-                print("#ROLLBACK transaction:\nROLLBACK;")
-                session.sql("ROLLBACK").collect()
+                query = "ROLLBACK"
+                print("#ROLLBACK transaction:")
+                execute_sql(session, query)
 
-            if kwargs.get('transform', False):
-                kwargs.pop('transform', None)
+            if command == 'transform':
                 if statements:
 
                     cron_expr = kwargs.get('cron_expr', None)
@@ -619,46 +638,22 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             create_domain_if_not_exists(session, domain)
 
                             # execute preActions
-                            preActions: List[str] = statements.get('preActions', [])
-                            for sql in preActions:
-                                stmt: str = bindParams(sql)
-                                print(f"#Execute pre action:\n{stmt};")
-                                session.sql(stmt).collect()
+                            execute_sqls(session, statements.get('preActions', []), "Pre actions")
 
                             # execute preSqls
-                            preSqls: List[str] = statements.get('preSqls', [])
-                            for sql in preSqls:
-                                stmt: str = bindParams(sql)
-                                print(f"#Execute pre sql:\n{stmt};")
-                                session.sql(stmt).collect()
+                            execute_sqls(session, statements.get('preSqls', []), "Pre sqls")
 
-                            if check_if_schema_exists(session, domain, schema):
+                            if check_if_table_exists(session, domain, table):
                                 # execute addSCD2ColumnsSqls
-                                scd2_sqls: List[str] = statements.get('addSCD2ColumnsSqls', [])
-                                for sql in scd2_sqls:
-                                    stmt: str = bindParams(sql)
-                                    print(f"#Execute add SCD2 columns:\n{stmt};")
-                                    session.sql(stmt).collect()
+                                execute_sqls(session, statements.get('addSCD2ColumnsSqls', []), "Add SCD2 columns")
                                 # execute mainSqlIfExists
-                                sqls: List[str] = statements.get('mainSqlIfExists', [])
-                                for sql in sqls:
-                                    stmt: str = bindParams(sql)
-                                    print(f"#Execute main sql if exists:\n{stmt};")
-                                    session.sql(stmt).collect()
+                                execute_sqls(session, statements.get('mainSqlIfExists', []), "Main sql if exists")
                             else:
                                 # execute mainSqlIfNotExists
-                                sqls: List[str] = statements.get('mainSqlIfNotExists', [])
-                                for sql in sqls:
-                                    stmt: str = bindParams(sql)
-                                    print(f"#Execute main sql if not exists:\n{stmt};")
-                                    session.sql(stmt).collect()
+                                execute_sqls(session, statements.get('mainSqlIfNotExists', []), "Main sql if not exists")
 
                             # execute postSqls
-                            postSqls: List[str] = statements.get('postSqls', [])
-                            for sql in postSqls:
-                                stmt: str = bindParams(sql)
-                                print(f"#Execute post sql:\n{stmt};")
-                                session.sql(stmt).collect()
+                            execute_sqls(session, statements.get('postSqls', []) , "Post sqls")
 
                             # enable change tracking
                             enable_change_tracking(session, sink)
@@ -671,7 +666,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             print(f"#Duration in seconds: {duration}")
-                            log_audit(session, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM")
+                            log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM")
                             
                         except Exception as e:
                             # ROLLBACK transaction
@@ -681,7 +676,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             print(f"Duration in seconds: {duration}")
-                            log_audit(session, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM")
+                            log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM")
                             raise e
 
                     kwargs.pop('params', None)
@@ -701,9 +696,275 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 else:
                     # sink statements are required
                     raise ValueError(f"Transform '{sink}' statements not found")
+            elif command == 'load':
+                json_context = self.caller_globals.get('json_context', None)
+                if json_context:
+                    import json
+                    context = json.loads(json_context).get(sink, None)
+                    if context:
+                        temp_stage = context.get('tempStage', None)
+                        if not temp_stage:
+                            raise ValueError(f"Temp stage for {sink} not found")
+                        context_schema: dict = context.get('schema', dict())
+                        pattern: str = context_schema.get('pattern', None)
+                        if not pattern:
+                            raise ValueError(f"Pattern for {sink} not found")
+                        metadata: dict = context_schema.get('metadata', dict())
+                        format: str = metadata.get('format', None)
+                        if not format:
+                            raise ValueError(f"Format for {sink} not found")
+                        else:
+                            format = format.upper()
+                        options: dict = metadata.get("options", dict())
+
+                        def get_option(key: str, metadata_key: Optional[str]) -> Optional[str]:
+                            if options and key.lower() in options:
+                                return options.get(key.lower(), None)
+                            elif metadata_key and metadata.get(metadata_key, None):
+                                return metadata[metadata_key].replace('\\', '\\\\')
+                            return None
+
+                        def is_true(value: str, default: bool) -> bool:
+                            if value is None:
+                                return default
+                            return value.lower() == "true"
+
+                        def get_audit_info(rows: List[Row]) -> Tuple[str, str, str, int, int, int]:
+                            if rows.__len__() == 0:
+                                return '', '', '', -1, -1, -1
+                            else:
+                                files = []
+                                first_error_lines = []
+                                first_error_column_names = []
+                                rows_parsed = 0
+                                rows_loaded = 0
+                                errors_seen = 0
+                                for row in rows:
+                                    files.append(row['file'])
+                                    first_error_line=row['first_error_line']
+                                    if first_error_line:
+                                        first_error_lines.append()
+                                    first_error_column_name=row['first_error_column_name']
+                                    if first_error_column_name:
+                                        first_error_column_names.append(row['first_error_column_name'])
+                                    rows_parsed += row['rows_parsed']
+                                    rows_loaded += row['rows_loaded']
+                                    errors_seen += row['errors_seen']
+                                return ','.join(files), ','.join(first_error_lines), ','.join(first_error_column_names), rows_parsed, rows_loaded, errors_seen
+
+                        def copy_extra_options(common_options: list[str]):
+                            extra_options = ""
+                            if options:
+                                for k, v in options.items():
+                                    if not k in common_options:
+                                        extra_options += f"{k} = {v}\n"
+                            return extra_options
+
+                        compression = is_true(get_option("compression", None), True)
+                        if compression:
+                            compression_format = "COMPRESSION = GZIP" 
+                        else:
+                            compression_format = "COMPRESSION = NONE"
+
+                        null_if = get_option('NULL_IF', None)
+                        if not null_if and is_true(metadata.get('emptyIsNull', "false"), False):
+                            null_if = f"('')"
+                        elif null_if:
+                            null_if = f"NULL_IF = {null_if}"
+                        else:
+                            null_if = ""
+
+                        purge = get_option("PURGE", None)
+                        if not purge:
+                            purge = "FALSE"
+                        else:
+                            purge = purge.upper()
+
+                        def build_copy_csv() -> str:
+                            skipCount = get_option("SKIP_HEADER", None)
+
+                            if not skipCount and is_true(metadata.get('withHeader', 'false'), False):
+                                skipCount = '1'
+
+                            common_options = [
+                                'SKIP_HEADER', 
+                                'NULL_IF', 
+                                'FIELD_OPTIONALLY_ENCLOSED_BY', 
+                                'FIELD_DELIMITER',
+                                'ESCAPE_UNENCLOSED_FIELD', 
+                                'ENCODING'
+                            ]
+                            extra_options = copy_extra_options(common_options)
+                            if compression:
+                                extension = ".gz"
+                            else:
+                                extension = ""
+                            sql = f'''
+                                COPY INTO {sink} 
+                                FROM @{temp_stage}/{domain}/
+                                PATTERN = '{pattern}{extension}'
+                                PURGE = {purge}
+                                FILE_FORMAT = (
+                                    TYPE = CSV
+                                    ERROR_ON_COLUMN_COUNT_MISMATCH = false
+                                    SKIP_HEADER = {skipCount} 
+                                    FIELD_OPTIONALLY_ENCLOSED_BY = '{get_option('FIELD_OPTIONALLY_ENCLOSED_BY', 'quote')}' 
+                                    FIELD_DELIMITER = '{get_option('FIELD_DELIMITER', 'separator')}' 
+                                    ESCAPE_UNENCLOSED_FIELD = '{get_option('ESCAPE_UNENCLOSED_FIELD', 'escape')}' 
+                                    ENCODING = '{get_option('ENCODING', 'encoding')}'
+                                    {null_if}
+                                    {extra_options}
+                                    {compression_format}
+                                )
+                            '''
+                            return sql
+
+                        def build_copy_json() -> str:
+                            strip_outer_array = get_option("STRIP_OUTER_ARRAY", 'array')
+                            common_options = [
+                                'STRIP_OUTER_ARRAY', 
+                                'NULL_IF'
+                            ]
+                            extra_options = copy_extra_options(common_options)
+                            sql = f'''
+                                COPY INTO {sink} 
+                                FROM @{temp_stage}/{domain}
+                                PATTERN = '{pattern}'
+                                PURGE = {purge}
+                                FILE_FORMAT = (
+                                    TYPE = JSON
+                                    STRIP_OUTER_ARRAY = {strip_outer_array}
+                                    {null_if}
+                                    {extra_options}
+                                    {compression_format}
+                                )
+                            '''
+                            return sql
+                            
+                        def build_copy_other(format: str) -> str:
+                            common_options = [
+                                'NULL_IF'
+                            ]
+                            extra_options = copy_extra_options(common_options)
+                            sql = f'''
+                                COPY INTO {sink} 
+                                FROM @{temp_stage}/{domain} 
+                                PATTERN = '{pattern}'
+                                PURGE = {purge}
+                                FILE_FORMAT = (
+                                    TYPE = {format}
+                                    {null_if}
+                                    {extra_options}
+                                    {compression_format}
+                                )
+                            '''
+                            return sql
+
+                        def build_copy() -> str:
+                            if format == 'DSV':
+                                return build_copy_csv()
+                            elif format == 'JSON':
+                                return build_copy_json()
+                            elif format == 'PARQUET':
+                                return build_copy_other()
+                            elif format == 'XML':
+                                return build_copy_other()
+                            else:
+                                raise ValueError(f"Unsupported format {format}")
+  
+                        # create the function that will execute the load
+                        def fun(session: Session) -> None:
+                            from datetime import datetime
+
+                            jobid = str(session.call("system$current_user_task_name"))
+
+                            start = datetime.now()
+
+                            try:
+                                # BEGIN transaction
+                                begin_transaction(session)
+
+                                nbSteps = int(statements.get('steps', '1'))
+                                write_strategy = statements.get('writeStrategy', None)
+                                if nbSteps == 1:
+                                    execute_sqls(session, statements.get('createTable', []), "Create table")
+                                    if write_strategy == 'WRITE_TRUNCATE':
+                                        execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table")
+                                    copy_results = execute_sql(session, build_copy(), "Copy data")
+                                elif nbSteps == 2:
+                                    execute_sqls(session, statements.get('firstStep', []), "Execute first step")
+                                    if write_strategy == 'WRITE_TRUNCATE':
+                                        execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table")
+                                    copy_results = execute_sql(session, build_copy(), "Copy data")
+                                    second_step = statements.get('secondStep', dict())
+                                    # execute preActions
+                                    execute_sqls(session, second_step.get('preActions', []), "Pre actions")
+                                    # execute schema presql
+                                    execute_sqls(session, context_schema.get('presql', []), "Pre sqls")
+                                    if check_if_table_exists(session, domain, table):
+                                        # execute addSCD2ColumnsSqls
+                                        execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns")
+                                        # execute mainSqlIfExists
+                                        execute_sqls(session, second_step.get('mainSqlIfExists', []), "Main sql if exists")
+                                    else:
+                                        # execute mainSqlIfNotExists
+                                        execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists")
+                                    # execute dropFirstStep
+                                    execute_sql(session, statements.get('dropFirstStep', None), "Drop first step")
+                                else:
+                                    raise ValueError(f"Invalid number of steps: {nbSteps}")
+
+                                # execute schema postsql
+                                execute_sqls(session, context_schema.get('postsql', []), "Post sqls")
+
+                                # enable change tracking
+                                enable_change_tracking(session, sink)
+
+                                # run expectations
+                                run_expectations(session, jobid)
+
+                                # COMMIT transaction
+                                commit_transaction(session)
+                                end = datetime.now()
+                                duration = (end - start).total_seconds()
+                                print(f"#Duration in seconds: {duration}")
+                                files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
+                                message = first_error_line + '\n' + first_error_column_name
+                                success = errors_seen == 0
+                                log_audit(session, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD")
+                                
+                            except Exception as e:
+                                # ROLLBACK transaction
+                                error_message = str(e)
+                                print(f"Error executing load for {sink}: {error_message}")
+                                rollback_transaction(session)
+                                end = datetime.now()
+                                duration = (end - start).total_seconds()
+                                print(f"Duration in seconds: {duration}")
+                                log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD")
+                                raise e
+
+                        kwargs.pop('params', None)
+                        kwargs.pop('events', None)
+
+                        return DAGTask(
+                            name=task_id, 
+                            definition=StoredProcedureCall(
+                                func = fun,
+                                args=[], 
+                                stage_location=self.stage_location,
+                                packages=self.packages,
+                            ), 
+                            comment=comment, 
+                            **kwargs
+                        )
+                    else:
+                        raise ValueError(f"Context for {sink} not found")
+                else:
+                    raise ValueError("context is required")
             else:
-                # only sl_transform is implemented
-                raise NotImplementedError("Not implemented")
+                # only load and transform commands are implemented
+                raise NotImplementedError(f"{command} is not implemented")
         else:
             # sink is required
             raise ValueError("sink is required")
