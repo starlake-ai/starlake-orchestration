@@ -308,9 +308,12 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         print(f"{stmt};")
                         return []
                     else:
-                        df: DataFrame = session.sql(stmt)
-                        rows = df.collect()
-                        return rows
+                        try:
+                            df: DataFrame = session.sql(stmt)
+                            rows = df.collect()
+                            return rows
+                        except Exception as e:
+                            raise Exception(f"Error executing SQL {stmt}: {str(e)}")
                 else:
                     return []
 
@@ -733,11 +736,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             raise ValueError(f"Format for {sink} not found")
                         else:
                             format = format.upper()
-                        options: dict = metadata.get("options", dict())
+                        metadata_options: dict = metadata.get("options", dict())
 
                         def get_option(key: str, metadata_key: Optional[str]) -> Optional[str]:
-                            if options and key.lower() in options:
-                                return options.get(key.lower(), None)
+                            if metadata_options and key.lower() in metadata_options:
+                                return metadata_options.get(key.lower(), None)
                             elif metadata_key and metadata.get(metadata_key, None):
                                 return metadata[metadata_key].replace('\\', '\\\\')
                             return None
@@ -758,22 +761,25 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 rows_loaded = 0
                                 errors_seen = 0
                                 for row in rows:
-                                    files.append(row['file'])
-                                    first_error_line=row['first_error_line']
+                                    row_dict = row.as_dict()
+                                    file = row_dict.get('file', None)
+                                    if file:
+                                        files.append(file)
+                                    first_error_line=row_dict.get('first_error_line', None)
                                     if first_error_line:
-                                        first_error_lines.append()
-                                    first_error_column_name=row['first_error_column_name']
+                                        first_error_lines.append(first_error_line)
+                                    first_error_column_name=row_dict.get('first_error_column_name', None)
                                     if first_error_column_name:
-                                        first_error_column_names.append(row['first_error_column_name'])
-                                    rows_parsed += row['rows_parsed']
-                                    rows_loaded += row['rows_loaded']
-                                    errors_seen += row['errors_seen']
+                                        first_error_column_names.append(first_error_column_name)
+                                    rows_parsed += row_dict.get('rows_parsed', 0)
+                                    rows_loaded += row_dict.get('rows_loaded', 0)
+                                    errors_seen += row_dict.get('errors_seen', 0)
                                 return ','.join(files), ','.join(first_error_lines), ','.join(first_error_column_names), rows_parsed, rows_loaded, errors_seen
 
                         def copy_extra_options(common_options: list[str]):
                             extra_options = ""
-                            if options:
-                                for k, v in options.items():
+                            if metadata_options:
+                                for k, v in metadata_options.items():
                                     if not k in common_options:
                                         extra_options += f"{k} = {v}\n"
                             return extra_options
@@ -832,7 +838,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                         null_if = get_option('NULL_IF', None)
                         if not null_if and is_true(metadata.get('emptyIsNull', "false"), False):
-                            null_if = f"('')"
+                            null_if = "NULL_IF = ('')"
                         elif null_if:
                             null_if = f"NULL_IF = {null_if}"
                         else:
@@ -958,20 +964,30 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     execute_sqls(session, context_schema.get('presql', []), "Pre sqls", dry_run)
                                     # create table
                                     execute_sqls(session, statements.get('createTable', []), "Create table", dry_run)
-                                    if check_if_table_exists(session, domain, table):
+                                    exists = check_if_table_exists(session, domain, table)
+                                    if exists:
+                                        # enable change tracking
+                                        enable_change_tracking(session, sink, dry_run)
                                         # update table schema
                                         update_table_schema(session, dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                                    # create stage if not exists
+                                    execute_sql(session, f"CREATE STAGE IF NOT EXISTS {temp_stage}", "Create stage", dry_run)
                                     # copy data
                                     copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
+                                    if not exists:
+                                        # enable change tracking
+                                        enable_change_tracking(session, sink, dry_run)
                                 elif nbSteps == 2:
                                     # execute first step
                                     execute_sqls(session, statements.get('firstStep', []), "Execute first step", dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                                    # create stage if not exists
+                                    execute_sql(session, f"CREATE STAGE IF NOT EXISTS {temp_stage}", "Create stage", dry_run)
                                     # copy data
                                     copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     second_step = statements.get('secondStep', dict())
@@ -980,6 +996,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     # execute schema presql
                                     execute_sqls(session, context_schema.get('presql', []), "Pre sqls", dry_run)
                                     if check_if_table_exists(session, domain, table):
+                                        # enable change tracking
+                                        enable_change_tracking(session, sink, dry_run)
                                         # execute addSCD2ColumnsSqls
                                         execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                         # update schema
@@ -989,6 +1007,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     else:
                                         # execute mainSqlIfNotExists
                                         execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
+                                        # enable change tracking
+                                        enable_change_tracking(session, sink, dry_run)
                                     # execute dropFirstStep
                                     execute_sql(session, statements.get('dropFirstStep', None), "Drop first step", dry_run)
                                 else:
@@ -996,9 +1016,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                                 # execute schema postsql
                                 execute_sqls(session, context_schema.get('postsql', []), "Post sqls", dry_run)
-
-                                # enable change tracking
-                                enable_change_tracking(session, sink, dry_run)
 
                                 # run expectations
                                 run_expectations(session, jobid, dry_run)
