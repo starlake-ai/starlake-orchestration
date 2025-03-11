@@ -273,22 +273,31 @@ if null_if is not None:
 else:
   null_if = ""
 
+###################################################################
+# IF SL_INCOMING_FILE_STAGE IN parameters then tempStage = SL_INCOMING_FILE_STAGE
+# ELSE tempStage = context["tempStage"]
+###################################################################
 
 def sl_put_to_stage(session: Session):
   if context["fileSystem"] == 'file://':
     auditDomain = audit.get('domain', ['audit'])[0]
     sql = f"USE SCHEMA {auditDomain}"
     run_sql(session, sql)
-    sql = f"CREATE TEMPORARY STAGE IF NOT EXISTS {context['tempStage']}"
     run_sql(session, sql)
     if (compression):
         auto_compress = "TRUE"
     else:
         auto_compress = "FALSE"
     files=context["schema"]["metadata"]["directory"] + '/' + context["schema"]["pattern"].replace(".*", "*")
+
+    # START LOCAL FILESYSTEM
     if not files.startswith("file://"):
         files = "file://" + files
+    sql = f"CREATE TEMPORARY STAGE IF NOT EXISTS {context['tempStage']}"
     sql = f"PUT {files} @{context['tempStage']}/{domain}/ AUTO_COMPRESS = {auto_compress}"
+    # END LOCAL FILESYSTEM
+
+    sql = "LIST @" + context['tempStage'] + "/" + domain + "/"
     run_sql(session, sql)
 
 
