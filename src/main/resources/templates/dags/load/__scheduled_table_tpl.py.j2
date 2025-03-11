@@ -13,8 +13,6 @@ sl_job = StarlakeJobFactory.create_job(
     options=options
 )
 
-from ai.starlake.dataset import StarlakeDataset
-
 from ai.starlake.orchestration import StarlakeSchedule, StarlakeDomain, StarlakeTable, OrchestrationFactory
 
 schedules= [{% for schedule in context.schedules %}
@@ -43,7 +41,6 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
             schedule=schedule,
         ) as pipeline:
 
-            pipeline_id    = pipeline.pipeline_id
             schedule       = pipeline.schedule
             schedule_name  = pipeline.schedule_name
 
@@ -140,4 +137,4 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
         return pipeline
 
-    [generate_pipeline(schedule) for schedule in schedules]
+    pipelines = [generate_pipeline(schedule) for schedule in schedules]
