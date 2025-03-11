@@ -793,23 +793,33 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                         def update_table_schema(session: Session, dry_run: bool) -> bool:
                             existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{domain}' and table_name ilike '{table}';"
-                            existing_columns = execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {domain}.{table}", dry_run).map(lambda x: (x['column_name'], x['data_type']))
+                            rows = execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {domain}.{table}", False)
+                            existing_columns = []
+                            for row in rows:
+                                existing_columns.append((str(row[0]).lower(), str(row[1]).lower()))
                             existing_schema = dict(existing_columns)
+                            if dry_run:
+                                print(f"# Existing schema for {domain}.{table}: {existing_schema}")
                             schema_string = statements.get("schemaString", "") 
                             if schema_string.strip() == "":
                                 return False
                             new_schema = schema_as_dict(schema_string)
                             new_columns = set(new_schema.keys()) - set(existing_schema.keys())
                             old_columns = set(existing_schema.keys()) - set(new_schema.keys())
-                            if new_columns.__len__() + old_columns.__len__ == 0:
+                            nb_new_columns = new_columns.__len__()
+                            nb_old_columns = old_columns.__len__()
+                            update_required = nb_new_columns + nb_old_columns > 0
+                            if not update_required:
+                                if dry_run:
+                                    print(f"# No schema update required for {domain}.{table}")
                                 return False
                             new_columns_dict = {key: new_schema[key] for key in new_columns}
                             old_columns_dict = {key: existing_schema[key] for key in old_columns}
-                            alter_columns = add_columns_from_dict(domain, table, new_columns_dict)
+                            alter_columns = add_columns_from_dict(new_columns_dict)
                             execute_sqls(session, alter_columns, "Add columns", dry_run)
 
                             old_columns_dict = {key: existing_schema[key] for key in old_columns}
-                            drop_columns = drop_columns_from_dict(domain, table, old_columns_dict)
+                            drop_columns = drop_columns_from_dict(old_columns_dict)
                             execute_sqls(session, drop_columns, "Drop columns", dry_run)
 
                             return True
@@ -970,8 +980,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     # execute schema presql
                                     execute_sqls(session, context_schema.get('presql', []), "Pre sqls", dry_run)
                                     if check_if_table_exists(session, domain, table):
-                                        # execute addSCD2ColumnsSqls - TODO check if those queries are really definded under schema
-                                        execute_sqls(session, context_schema.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
+                                        # execute addSCD2ColumnsSqls
+                                        execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                         # update schema
                                         update_table_schema(session, dry_run)
                                         # execute mainSqlIfExists
