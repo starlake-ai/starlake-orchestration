@@ -339,6 +339,16 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         Args:
             options (dict[str, Any]): the options to deploy the pipeline.
         """
+        if not options:
+            import os
+            options = {
+                "account": os.environ['SNOWFLAKE_ACCOUNT'],
+                "user": os.environ['SNOWFLAKE_USER'],
+                "password": os.environ['SNOWFLAKE_PASSWORD'],
+                "database": os.environ['SNOWFLAKE_DB'],
+                "schema": os.environ['SNOWFLAKE_SCHEMA'],
+                "warehouse": os.environ['SNOWFLAKE_WAREHOUSE'],
+            }
         session = Session.builder.configs(options).create()
         database = options.get("database", None)
         schema = options.get("schema", None)
@@ -360,6 +370,16 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             options (dict[str, Any]): the options required to run the pipeline.
             mode (StarlakeExecutionMode): the execution mode.
         """
+        if not options:
+            import os
+            options = {
+                "account": os.environ['SNOWFLAKE_ACCOUNT'],
+                "user": os.environ['SNOWFLAKE_USER'],
+                "password": os.environ['SNOWFLAKE_PASSWORD'],
+                "database": os.environ['SNOWFLAKE_DB'],
+                "schema": os.environ['SNOWFLAKE_SCHEMA'],
+                "warehouse": os.environ['SNOWFLAKE_WAREHOUSE'],
+            }
         session = Session.builder.configs(options).create()
         if mode == StarlakeExecutionMode.DRY_RUN:
             def dry_run(definition) -> None:
