@@ -778,6 +778,42 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         extra_options += f"{k} = {v}\n"
                             return extra_options
 
+                        def schema_as_dict(schema_string: str) -> dict:
+                            tableNativeSchema = map(lambda x: (x.split()[0].strip(), x.split()[1].strip()), schema_string.replace("\"", "").split(","))
+                            tableSchemaDict = dict(map(lambda x: (x[0].lower(), x[1].lower()), tableNativeSchema))
+                            return tableSchemaDict
+
+                        def add_columns_from_dict(dictionary: dict):
+                            return [f"ALTER TABLE IF EXISTS {domain}.{table} ADD COLUMN IF NOT EXISTS {k} {v};" for k, v in dictionary.items()]
+    
+                        def drop_columns_from_dict(dictionary: dict):
+                            # In the current version, we do not drop any existing columns for backward compatibility
+                            # return [f"ALTER TABLE IF EXISTS {domain}.{table} DROP COLUMN IF EXISTS {k};" for k, v in dictionary.items()]
+                            return []    
+
+                        def update_table_schema(session: Session, dry_run: bool) -> bool:
+                            existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{domain}' and table_name ilike '{table}';"
+                            existing_columns = execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {domain}.{table}", dry_run).map(lambda x: (x['column_name'], x['data_type']))
+                            existing_schema = dict(existing_columns)
+                            schema_string = statements.get("schemaString", "") 
+                            if schema_string.strip() == "":
+                                return False
+                            new_schema = schema_as_dict(schema_string)
+                            new_columns = set(new_schema.keys()) - set(existing_schema.keys())
+                            old_columns = set(existing_schema.keys()) - set(new_schema.keys())
+                            if new_columns.__len__() + old_columns.__len__ == 0:
+                                return False
+                            new_columns_dict = {key: new_schema[key] for key in new_columns}
+                            old_columns_dict = {key: existing_schema[key] for key in old_columns}
+                            alter_columns = add_columns_from_dict(domain, table, new_columns_dict)
+                            execute_sqls(session, alter_columns, "Add columns", dry_run)
+
+                            old_columns_dict = {key: existing_schema[key] for key in old_columns}
+                            drop_columns = drop_columns_from_dict(domain, table, old_columns_dict)
+                            execute_sqls(session, drop_columns, "Drop columns", dry_run)
+
+                            return True
+
                         compression = is_true(get_option("compression", None), True)
                         if compression:
                             compression_format = "COMPRESSION = GZIP" 
@@ -908,14 +944,25 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 nbSteps = int(statements.get('steps', '1'))
                                 write_strategy = statements.get('writeStrategy', None)
                                 if nbSteps == 1:
+                                    # execute schema presql
+                                    execute_sqls(session, context_schema.get('presql', []), "Pre sqls", dry_run)
+                                    # create table
                                     execute_sqls(session, statements.get('createTable', []), "Create table", dry_run)
+                                    if check_if_table_exists(session, domain, table):
+                                        # update table schema
+                                        update_table_schema(session, dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
+                                        # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                                    # copy data
                                     copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                 elif nbSteps == 2:
+                                    # execute first step
                                     execute_sqls(session, statements.get('firstStep', []), "Execute first step", dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
+                                        # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                                    # copy data
                                     copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     second_step = statements.get('secondStep', dict())
                                     # execute preActions
@@ -923,8 +970,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     # execute schema presql
                                     execute_sqls(session, context_schema.get('presql', []), "Pre sqls", dry_run)
                                     if check_if_table_exists(session, domain, table):
-                                        # execute addSCD2ColumnsSqls
-                                        execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
+                                        # execute addSCD2ColumnsSqls - TODO check if those queries are really definded under schema
+                                        execute_sqls(session, context_schema.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
+                                        # update schema
+                                        update_table_schema(session, dry_run)
                                         # execute mainSqlIfExists
                                         execute_sqls(session, second_step.get('mainSqlIfExists', []), "Main sql if exists", dry_run)
                                     else:
