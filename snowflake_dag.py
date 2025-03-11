@@ -446,23 +446,23 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
     print(f"Pipeline {pipeline.pipeline_id} created") 
 
-options = {
-    "account": os.environ['SNOWFLAKE_ACCOUNT'],
-    "user": os.environ['SNOWFLAKE_USER'],
-    "password": os.environ['SNOWFLAKE_PASSWORD'],
-    "database": os.environ['SNOWFLAKE_DB'],
-    "schema": os.environ['SNOWFLAKE_SCHEMA'],
-    "warehouse": os.environ['SNOWFLAKE_WAREHOUSE'],
-}
+# options = {
+#     "account": os.environ['SNOWFLAKE_ACCOUNT'],
+#     "user": os.environ['SNOWFLAKE_USER'],
+#     "password": os.environ['SNOWFLAKE_PASSWORD'],
+#     "database": os.environ['SNOWFLAKE_DB'],
+#     "schema": os.environ['SNOWFLAKE_SCHEMA'],
+#     "warehouse": os.environ['SNOWFLAKE_WAREHOUSE'],
+# }
 
-pipeline.dry_run(options)
+#pipeline.dry_run(options)
 #pipeline.deploy(options)
 #pipeline.run(options)
 
-from snowflake.core.task.dagv1 import DAG
-dag: DAG = pipeline.dag
-for task in dag.tasks:
-    for pre in task.predecessors:
-        print(f"Task {task.name} depends on {pre.name}")
-for dep in dependencies.dependencies:
-    print(f"Dependency {dep.name} with sink {dep.sink} has {len(dep.dependencies)} children")
+# from snowflake.core.task.dagv1 import DAG
+# dag: DAG = pipeline.dag
+# for task in dag.tasks:
+#     for pre in task.predecessors:
+#         print(f"Task {task.name} depends on {pre.name}")
+# for dep in dependencies.dependencies:
+#     print(f"Dependency {dep.name} with sink {dep.sink} has {len(dep.dependencies)} children")
