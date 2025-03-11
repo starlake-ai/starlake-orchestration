@@ -3,13 +3,13 @@ import importlib.util
 import sys
 from pathlib import Path
 
-def load_pipeline(module_path):
+def load_pipelines(module_path):
     module_name = Path(module_path).stem  
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    return getattr(module, "pipeline", None)
+    return getattr(module, "pipelines", None)
 
 def main():
     parser = argparse.ArgumentParser(description="Execute a Starlake pipeline.")
@@ -24,14 +24,23 @@ def main():
         print(f"Error : the file '{pipeline_file}' does not exist.")
         sys.exit(1)
 
-    pipeline = load_pipeline(pipeline_file)
+    pipelines = load_pipelines(pipeline_file)
 
-    # Mapper l'action vers la méthode correspondante
-    action_method = args.action.replace("-", "_")
-    if hasattr(pipeline, action_method):
-        getattr(pipeline, action_method)()
+    if not pipelines:
+        print(f"Error : No pipeline found in '{pipeline_file}'.")
+        sys.exit(1)
+
+    if isinstance(pipelines, list):
+        for pipeline in pipelines:
+            # Map the action to the corresponding method
+            action_method = args.action.replace("-", "_")
+            if hasattr(pipeline, action_method):
+                getattr(pipeline, action_method)()
+            else:
+                print(f"Error : Method '{action_method}' not defined on pipeline object.")
+                sys.exit(1)
     else:
-        print(f"Error : Method '{action_method}' not defined on pipeline object.")
+        print(f"Error : The 'pipelines' object is not a list.")
         sys.exit(1)
 
 if __name__ == "__main__":
