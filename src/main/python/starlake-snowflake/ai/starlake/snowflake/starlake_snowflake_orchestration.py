@@ -130,7 +130,10 @@ class SnowflakeDag(DAG):
 
             # get the original scheduled timestamp of the initial graph run in the current group
             # For graphs that are retried, the returned value is the original scheduled timestamp of the initial graph run in the current group.
-            config = session.call("system$get_task_graph_config")
+            if not dry_run:
+                config = session.call("system$get_task_graph_config")
+            else:
+                config = None
             if config:
                 import json
                 config = json.loads(config)
@@ -329,6 +332,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
     def warehouse(self) -> Optional[str]:
         return self._warehouse
 
+    @classmethod
     def session(cls, **kwargs) -> Session:
         import os
         env = os.environ.copy() # Copy the current environment variables
@@ -344,9 +348,11 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
 
     def deploy(self, **kwargs) -> None:
         """Deploy the pipeline."""
-        session = SnowflakePipeline.session(**kwargs)
-        database = kwargs.get("database", None)
-        schema = kwargs.get("schema", None)
+        import os
+        env = os.environ.copy() # Copy the current environment variables
+        session = self.__class__.session(**kwargs)
+        database = kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None))
+        schema = kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None))
         if database is None or schema is None:
             raise ValueError("Database and schema must be provided to deploy the pipeline")
         stage_name = f"{database}.{schema}.{self.stage_location}".upper()
@@ -360,9 +366,11 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         print(f"Pipeline {self.pipeline_id} deployed")
 
     def delete(self, **kwargs) -> None:
-        session = SnowflakePipeline.session(**kwargs)
-        database = kwargs.get("database", None)
-        schema = kwargs.get("schema", None)
+        import os
+        env = os.environ.copy() # Copy the current environment variables
+        session = self.__class__.session(**kwargs)
+        database = kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None))
+        schema = kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None))
         if database is None or schema is None:
             raise ValueError("Database and schema must be provided to delete the pipeline")
         op = self.get_dag_operation(session, database, schema)
@@ -375,7 +383,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             logical_date (Optional[str]): the logical date.
             mode (StarlakeExecutionMode): the execution mode.
         """
-        session = SnowflakePipeline.session(**kwargs)
+        session = self.__class__.session(**kwargs)
         if mode == StarlakeExecutionMode.DRY_RUN:
             def dry_run(definition) -> None:
                 if isinstance(definition, StoredProcedureCall):
@@ -390,19 +398,20 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                 dry_run(definition)
 
         elif mode == StarlakeExecutionMode.RUN:
+            import os
+            env = os.environ.copy() # Copy the current environment variables
+            database = kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None))
+            schema = kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None))
+            op = self.get_dag_operation(session, database, schema)
+            task = op.schema.tasks[self.pipeline_id]
             if logical_date:
                 import json
-                config = session.call("system$get_task_graph_config")
-                if config:
-                    config = json.loads(config)
-                else:
-                    config = {}
+                config = dict()
                 config.update({"logical_date": logical_date})
+                task.suspend()
                 session.sql(f"ALTER TASK IF EXISTS {self.pipeline_id} SET CONFIG = '{json.dumps(config)}'").collect()
-            database = kwargs.get("database", None)
-            schema = kwargs.get("schema", None)
-            op = self.get_dag_operation(session, database, schema)
-            op.run(self.dag)
+                task.resume()
+            task.execute()
             from datetime import datetime
             dag_runs = op.get_current_dag_runs(self.dag)
             timeout = 60
