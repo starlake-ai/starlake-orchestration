@@ -27,7 +27,7 @@ def parse_options(options_str):
 
 def main():
     parser = argparse.ArgumentParser(description="Execute a Starlake pipeline.")
-    parser.add_argument("action", choices=["run", "dry-run", "deploy", "delete"], help="Action to be performed on the pipeline.")
+    parser.add_argument("action", choices=["run", "dry-run", "deploy", "delete", "backfill"], help="Action to be performed on the pipeline.")
     parser.add_argument("--file", required=True, help="Path to the generated DAG file.")
     parser.add_argument("--options", help="Additional options as JSON or key=value pairs (e.g., '{\"key\": \"value\"}' or 'key1=value1,key2=value2').")
 
