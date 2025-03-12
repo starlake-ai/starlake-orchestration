@@ -149,6 +149,13 @@ statements = {
 
 expectation_items = { }
 
+
+sl_datasets = '''/Users/hayssams/git/public/starlake/samples/spark/datasets'''
+sl_env = '''SNOWFLAKE'''
+sl_root = '''/Users/hayssams/git/public/starlake/samples/spark'''
+
+
+
 def schema_as_dict(schema_string: str) -> dict:
   tableNativeSchema = map(lambda x: (x.split()[0].strip(), x.split()[1].strip()), schema_string.replace("\"", "").split(","))
   tableSchemaDict = dict(map(lambda x: (x[0].lower(), x[1].lower()), tableNativeSchema))
@@ -274,12 +281,30 @@ else:
   null_if = ""
 
 ###################################################################
-# IF SL_INCOMING_FILE_STAGE IN parameters then tempStage = SL_INCOMING_FILE_STAGE
+# IF sl_incoming_file_stage IN parameters then tempStage = sl_incoming_file_stage
 # ELSE tempStage = context["tempStage"]
 ###################################################################
 
+
+parameters = {}
+
+def incoming_file_stage():
+  if 'sl_incoming_file_stage' in parameters:
+    return parameters['sl_incoming_file_stage']
+  else:
+     return context["tempStage"]
+
 def sl_put_to_stage(session: Session):
-  if context["fileSystem"] == 'file://':
+  is_local = False
+  if files.startswith("file://"):
+    is_local = True
+  elif files.startswith("/"):
+      is_local = True
+      files = "file://" + files
+  else:
+    is_local = False
+
+  if is_local:
     auditDomain = audit.get('domain', ['audit'])[0]
     sql = f"USE SCHEMA {auditDomain}"
     run_sql(session, sql)
@@ -289,20 +314,11 @@ def sl_put_to_stage(session: Session):
     else:
         auto_compress = "FALSE"
     files=context["schema"]["metadata"]["directory"] + '/' + context["schema"]["pattern"].replace(".*", "*")
-
-    # START LOCAL FILESYSTEM
-    if not files.startswith("file://"):
-        files = "file://" + files
-    sql = f"CREATE TEMPORARY STAGE IF NOT EXISTS {context['tempStage']}"
-    sql = f"PUT {files} @{context['tempStage']}/{domain}/ AUTO_COMPRESS = {auto_compress}"
-    # END LOCAL FILESYSTEM
-
-    sql = "LIST @" + context['tempStage'] + "/" + domain + "/"
+    sql = f"CREATE TEMPORARY STAGE IF NOT EXISTS {incoming_file_stage()}"
+    sql = f"PUT {files} @{incoming_file_stage()}/{domain}/ AUTO_COMPRESS = {auto_compress}"
     run_sql(session, sql)
 
 
-
-   
 def sl_extra_copy_options(metadata: dict, common_options: list[str]) -> str:
   copy_extra_options = ""
   if options is not None:
@@ -615,82 +631,85 @@ try:
     run_sql(session, "BEGIN")
     start = datetime.now()
     sl_put_to_stage(session)
-    if statements[jobid]["steps"] == "1":
-      preSqls: List[str] = schema.get('presql', [])
-      for sql in preSqls:
-          stmt: str = bindParams(sql)
-          run_sql(session, stmt)
-      for sql in task["createTable"]:
-        stmt: str = bindParams(sql)
-        run_sql(session, stmt)
-      if check_if_table_exists(domain, table):
-        update_table_schema(domain, table, schema)
-      if task["writeStrategy"] == "WRITE_TRUNCATE":
-        sql = f"TRUNCATE TABLE {task['targetTableName']}"
-        run_sql(session, sql)
-      copy_results = sl_copy_step(session, task['targetTableName'])
-    elif task["steps"] == "2":
-      for sql in task["firstStep"]:
-        stmt: str = bindParams(sql)
-        run_sql(session, stmt)
-      if task["writeStrategy"] == "WRITE_TRUNCATE":
-        sql = f"TRUNCATE TABLE {task['targetTableName']}"
-        run_sql(session, sql)
-      copy_results = sl_copy_step(session, task['tempTableName'])
-      second_step = task.get("secondStep", None)
-      # execute preSqls
-      preSqls: List[str] = schema.get('presql', [])
-      for sql in preSqls:
-          stmt: str = bindParams(sql)
-          run_sql(session, stmt)
-      if check_if_table_exists(domain, table):
-        # execute addSCD2ColumnsSqls only if table exists
-        scd2_sqls: List[str] = schema.get('addSCD2ColumnsSqls', [])
-        for sql in scd2_sqls:
+    nb_incoming_files = run_sql(session, f"LIST @{incoming_file_stage()}")
+    print(f"Number of incoming files: {nb_incoming_files}")
+    if nb_incoming_files.__len__() > 0:
+      if statements[jobid]["steps"] == "1":
+        preSqls: List[str] = schema.get('presql', [])
+        for sql in preSqls:
             stmt: str = bindParams(sql)
             run_sql(session, stmt)
-        update_table_schema(domain, table, schema)
-        sqls = second_step["mainSqlIfExists"]
-      else:
-        # addSCD2ColumnsSqls is in the mainSqlIfNotExists sql list if required
-        sqls = second_step["mainSqlIfNotExists"]
-      for sql in sqls:
+        for sql in task["createTable"]:
           stmt: str = bindParams(sql)
           run_sql(session, stmt)
-      drop_first_step = task["dropFirstStep"]
-      stmt: str = bindParams(drop_first_step)
-      run_sql(session, stmt)
-    else:
-        raise ValueError(f"Unsupported steps value: {task['steps']}")
-    # execute postSqls
-    postSqls: List[str] = schema.get('postsql', [])
-    for sql in postSqls:
-        stmt: str = bindParams(sql)
-        run_sql(session, stmt)
-
-    # run expectations
-    if expectation_items is not None and check_if_expectations_schema_exists():
-        for expectation in expectation_items.get(jobid, []):
-            run_expectation(expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')))
-
-    # COMMIT transaction
-    run_sql(session, "COMMIT")
-    end = datetime.now()
-    duration = (end - start).total_seconds()
-    print(f"Duration in seconds: {duration}")
-    if audit and check_if_audit_schema_exists():
-        print("Audit schema exists")
-        # insert audit record
-        files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
-        message = first_error_line + '\n' + first_error_column_name
-        
-        if log_audit(domain, schema, files, rows_parsed, rows_loaded, errors_seen, errors_seen == 0, duration, message, end, "LOAD"):
-            print("Audit record inserted")
+        if check_if_table_exists(domain, table):
+          update_table_schema(domain, table, schema)
+        if task["writeStrategy"] == "WRITE_TRUNCATE":
+          sql = f"TRUNCATE TABLE {task['targetTableName']}"
+          run_sql(session, sql)
+        copy_results = sl_copy_step(session, task['targetTableName'])
+      elif task["steps"] == "2":
+        for sql in task["firstStep"]:
+          stmt: str = bindParams(sql)
+          run_sql(session, stmt)
+        if task["writeStrategy"] == "WRITE_TRUNCATE":
+          sql = f"TRUNCATE TABLE {task['targetTableName']}"
+          run_sql(session, sql)
+        copy_results = sl_copy_step(session, task['tempTableName'])
+        second_step = task.get("secondStep", None)
+        # execute preSqls
+        preSqls: List[str] = schema.get('presql', [])
+        for sql in preSqls:
+            stmt: str = bindParams(sql)
+            run_sql(session, stmt)
+        if check_if_table_exists(domain, table):
+          # execute addSCD2ColumnsSqls only if table exists
+          scd2_sqls: List[str] = schema.get('addSCD2ColumnsSqls', [])
+          for sql in scd2_sqls:
+              stmt: str = bindParams(sql)
+              run_sql(session, stmt)
+          update_table_schema(domain, table, schema)
+          sqls = second_step["mainSqlIfExists"]
         else:
-            print("Error inserting audit record")
-    else:
-        print("Audit schema does not exist")
-    
+          # addSCD2ColumnsSqls is in the mainSqlIfNotExists sql list if required
+          sqls = second_step["mainSqlIfNotExists"]
+        for sql in sqls:
+            stmt: str = bindParams(sql)
+            run_sql(session, stmt)
+        drop_first_step = task["dropFirstStep"]
+        stmt: str = bindParams(drop_first_step)
+        run_sql(session, stmt)
+      else:
+          raise ValueError(f"Unsupported steps value: {task['steps']}")
+      # execute postSqls
+      postSqls: List[str] = schema.get('postsql', [])
+      for sql in postSqls:
+          stmt: str = bindParams(sql)
+          run_sql(session, stmt)
+
+      # run expectations
+      if expectation_items is not None and check_if_expectations_schema_exists():
+          for expectation in expectation_items.get(jobid, []):
+              run_expectation(expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), str_to_bool(expectation.get('failOnError', 'no')))
+
+      # COMMIT transaction
+      run_sql(session, "COMMIT")
+      end = datetime.now()
+      duration = (end - start).total_seconds()
+      print(f"Duration in seconds: {duration}")
+      if audit and check_if_audit_schema_exists():
+          print("Audit schema exists")
+          # insert audit record
+          files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
+          message = first_error_line + '\n' + first_error_column_name
+          
+          if log_audit(domain, schema, files, rows_parsed, rows_loaded, errors_seen, errors_seen == 0, duration, message, end, "LOAD"):
+              print("Audit record inserted")
+          else:
+              print("Error inserting audit record")
+      else:
+          print("Audit schema does not exist")
+      
 except Exception as e:
     # ROLLBACK transaction
     run_sql(session, "ROLLBACK")
