@@ -377,10 +377,11 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         op.delete(self.pipeline_id)
         print(f"Pipeline {self.pipeline_id} deleted")
 
-    def run(self, logical_date: Optional[str] = None, mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN, **kwargs) -> None:
+    def run(self, logical_date: Optional[str] = None, timeout: str = '120', mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN, **kwargs) -> None:
         """Run the pipeline.
         Args:
             logical_date (Optional[str]): the logical date.
+            timeout (str): the timeout in seconds.
             mode (StarlakeExecutionMode): the execution mode.
         """
         session = self.__class__.session(**kwargs)
@@ -414,7 +415,6 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             task.execute()
             from datetime import datetime
             dag_runs = op.get_current_dag_runs(self.dag)
-            timeout = 120
             start = datetime.now()
             def check_started(dag_runs: List[DAGRun]) -> bool:
                 import time
@@ -429,7 +429,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                         if state.upper() == 'EXECUTING':
                             return True
                         else:
-                            if datetime.now() - start > timedelta(seconds=timeout):
+                            if datetime.now() - start > timedelta(seconds=int(timeout)):
                                 raise TimeoutError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} timed out")
                             time.sleep(5)
                             return check_started(op.get_current_dag_runs(self.dag))
@@ -458,7 +458,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                             return result
                         elif result.is_succeeded:
                             return result
-                        elif datetime.now() - start > timedelta(seconds=timeout):
+                        elif datetime.now() - start > timedelta(seconds=int(timeout)):
                             raise TimeoutError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} timed out")
                         elif result.is_executing:
                             print(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} is still executing")
@@ -467,7 +467,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                         else:
                             # if the pipeline is not executing and has not failed, we consider it as failed
                             raise ValueError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} failed")
-                    elif datetime.now() - start > timedelta(seconds=timeout):
+                    elif datetime.now() - start > timedelta(seconds=int(timeout)):
                         raise TimeoutError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} timed out")
                     else:
                         print(f"No task history found for {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} yet")
@@ -484,7 +484,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         elif mode == StarlakeExecutionMode.BACKFILL:
             if not logical_date:
                 raise ValueError("Logical date must be provided to backfill the pipeline")
-            self.run(logical_date=logical_date, mode=StarlakeExecutionMode.RUN, **kwargs)
+            self.run(logical_date=logical_date, timeout=timeout, mode=StarlakeExecutionMode.RUN, **kwargs)
 
         else:
             raise ValueError(f"Execution mode {mode} is not supported")
