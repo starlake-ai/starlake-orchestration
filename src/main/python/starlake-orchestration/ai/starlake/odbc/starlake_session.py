@@ -121,6 +121,7 @@ class MySQLSession(Session):
     def provider(self) -> SessionProvider:
         return SessionProvider.MYSQL
 
+    @property
     def conn(self) -> Connection:
         import mysql.connector
         if not self._database:
