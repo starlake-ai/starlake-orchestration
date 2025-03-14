@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import List, Optional, Tuple
+
+class Cursor(ABC):
+
+    @abstractmethod
+    def execute(self, stmt: str) -> None: ...
+
+    @abstractmethod
+    def fetchall(self) -> List[Tuple]: ...
+
+    @abstractmethod
+    def close(self) -> None: ...
+
+class Connection(ABC):
+    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        super().__init__()
+        self._database = database
+        self._user = user
+        self._password = password
+        self._host = host
+        self._port = port
+
+    @property
+    def conn(self) -> Connection:
+        return self
+
+    @abstractmethod
+    def cursor(self) -> Cursor: ...
+
+    @abstractmethod
+    def commit(self) -> None: ...
+
+    @abstractmethod
+    def rollback(self) -> None: ...
+
+    @abstractmethod
+    def close(self) -> None: ...
+
+from enum import Enum
+
+class SessionProvider(str, Enum):
+    POSTGRES = "postgres"
+    MYSQL = "mysql"
+    SNOWFLAKE = "snowflake"
+
+    def __str__(self):
+        return self.value
+
+class Session(Connection):
+    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        super().__init__(database=database, user=user, password=password, host=host, port=port, **kwargs)
+
+    @abstractmethod
+    def provider(self) -> SessionProvider: ...
+
+    def sql(self, stmt: str) -> List[Tuple]:
+        cur = self.conn.cursor()
+        cur.execute(stmt)
+        if (stmt.lower().startswith("select")) or (stmt.lower().startswith("with")):
+            result = cur.fetchall()
+        else:
+            result = []
+        cur.close()
+        return result
+
+    def cursor(self):
+        return self.conn.cursor()
+
+    def commit(self) -> None:
+        self.conn.commit()
+
+    def rollback(self) -> None:
+        self.conn.rollback()
+
+    def close(self) -> None:
+        self.conn.close()
+
+import os
+
+class PostgresSession(Session):
+    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        env = os.environ.copy() # Copy the current environment variables
+        options = {
+            "database": database or kwargs.get('POSTGRES_DB', env.get('POSTGRES_DB', None)),
+            "user": user or kwargs.get('POSTGRES_USER', env.get('POSTGRES_USER', None)),
+            "password": password or kwargs.get('POSTGRES_PASSWORD', env.get('POSTGRES_PASSWORD', None)),
+            "host": host or kwargs.get('POSTGRES_HOST', env.get('POSTGRES_HOST', None)),
+            "port": port or kwargs.get('POSTGRES_PORT', env.get('POSTGRES_PORT', None)),
+        }
+        super().__init__(database=options.get('database', None), user=options.get('user', None), password=options.get('password', None), host=options.get('host', '127.0.0.1'), port=options.get('port', 5432), **kwargs)
+
+    def provider(self) -> SessionProvider:
+        return SessionProvider.POSTGRES
+
+    @property
+    def conn(self) -> Connection:
+        import psycopg2
+        if not self._database:
+            raise ValueError("Database name is required")
+        if not self._user:
+            raise ValueError("User name is required")
+        if not self._password:
+            raise ValueError("Password is required")
+        return psycopg2.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 5432)
+
+class MySQLSession(Session):
+    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        env = os.environ.copy() # Copy the current environment variables
+        options = {
+            "database": database or kwargs.get('MYSQL_DB', env.get('MYSQL_DB', None)),
+            "user": user or kwargs.get('MYSQL_USER', env.get('MYSQL_USER', None)),
+            "password": password or kwargs.get('MYSQL_PASSWORD', env.get('MYSQL_PASSWORD', None)),
+            "host": host or kwargs.get('MYSQL_HOST', env.get('MYSQL_HOST', None)),
+            "port": port or kwargs.get('MYSQL_PORT', env.get('MYSQL_PORT', None)),
+        }
+        super().__init__(database=options.get('database', None), user=options.get('user', None), password=options.get('password', None), host=options.get('host', '127.0.0.1'), port=options.get('port', 3306), **kwargs)
+
+    def provider(self) -> SessionProvider:
+        return SessionProvider.MYSQL
+
+    def conn(self) -> Connection:
+        import mysql.connector
+        if not self._database:
+            raise ValueError("Database name is required")
+        if not self._user:
+            raise ValueError("User name is required")
+        if not self._password:
+            raise ValueError("Password is required")
+        return mysql.connector.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 3306)
+
+class SnowflakeSession(Session):
+    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        env = os.environ.copy() # Copy the current environment variables
+        options = {
+            "database": database or kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None)),
+            "user": user or kwargs.get('SNOWFLAKE_USER', env.get('SNOWFLAKE_USER', None)),
+            "password": password or kwargs.get('SNOWFLAKE_PASSWORD', env.get('SNOWFLAKE_PASSWORD', None)),
+            "host": host or kwargs.get('SNOWFLAKE_HOST', env.get('SNOWFLAKE_HOST', None)),
+            "port": port or kwargs.get('SNOWFLAKE_PORT', env.get('SNOWFLAKE_PORT', None)),
+            "account": kwargs.get('SNOWFLAKE_ACCOUNT', env.get('SNOWFLAKE_ACCOUNT', None)),
+            "warehouse": kwargs.get('SNOWFLAKE_WAREHOUSE', env.get('SNOWFLAKE_WAREHOUSE', None)),
+            "role": kwargs.get('SNOWFLAKE_ROLE', env.get('SNOWFLAKE_ROLE', None)),
+        }
+        super().__init__(database=options.get('database', None), user=options.get('user', None), password=options.get('password', None), host=options.get('host', '127.0.0.1'), port=options.get('port', 8080), **kwargs)
+        self._account = options.get('account', None)
+        self._warehouse = options.get('warehouse', None)
+        self._role = options.get('role', None)
+
+    def provider(self) -> SessionProvider:
+        return SessionProvider.SNOWFLAKE
+
+    def conn(self) -> Connection:
+        import snowflake.connector.connection
+        if not self._database:
+            raise ValueError("Database name is required")
+        if not self._user:
+            raise ValueError("User name is required")
+        if not self._password:
+            raise ValueError("Password is required")
+        if not self._account:
+            raise ValueError("Account is required")
+        if not self._warehouse:
+            raise ValueError("Warehouse is required")
+        return snowflake.connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port, account=self._account, warehouse=self._warehouse, role=self._role)
+
+class SessionFactory:
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    @classmethod
+    def session(cls, provider: SessionProvider, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs) -> Session: 
+        """
+        Create a new session based on the provider
+        Args:
+            provider (SessionProvider): The provider to use
+            database (Optional[str]): The database name
+            user (Optional[str]): The user name
+            password (Optional[str]): The password
+            host (Optional[str]): The host
+            port (Optional[int]): The port
+            kwargs: Additional keyword arguments
+        Returns:
+            Session: The session
+        Example:
+            session = SessionFactory.session(SessionProvider.POSTGRES, database="starlake", user="starlake")
+        """
+        if provider == SessionProvider.POSTGRES:
+            return PostgresSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+        elif provider == SessionProvider.MYSQL:
+            return MySQLSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+        elif provider == SessionProvider.SNOWFLAKE:
+            return SnowflakeSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
+
+# Example usage
+# session = SessionFactory.session(SessionProvider.POSTGRES, database="starlake", user="starlake")
+# rows = session.sql("select * from public.slk_member")
+# rows2 = session.sql("insert into public.slk_whitelist(email_or_domain) values('gmail.com')")
+# session.commit()
+# for row in rows:
+#     print(row)
+# session.close()
