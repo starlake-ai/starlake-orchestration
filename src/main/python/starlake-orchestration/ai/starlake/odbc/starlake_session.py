@@ -41,6 +41,7 @@ class SessionProvider(str, Enum):
     DUCKDB = "duckdb"
     POSTGRES = "postgres"
     MYSQL = "mysql"
+    REDSHIFT = "redshift"
     SNOWFLAKE = "snowflake"
 
     def __str__(self):
@@ -159,6 +160,34 @@ class MySQLSession(Session):
             self._conn = mysql.connector.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 3306)
         return self._conn
 
+class RedshiftSession(Session):
+    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        env = os.environ.copy() # Copy the current environment variables
+        options = {
+            "database": database or kwargs.get('REDSHIFT_DB', env.get('REDSHIFT_DB', None)),
+            "user": user or kwargs.get('REDSHIFT_USER', env.get('REDSHIFT_USER', None)),
+            "password": password or kwargs.get('REDSHIFT_PASSWORD', env.get('REDSHIFT_PASSWORD', None)),
+            "host": host or kwargs.get('REDSHIFT_HOST', env.get('REDSHIFT_HOST', None)),
+            "port": port or kwargs.get('REDSHIFT_PORT', env.get('REDSHIFT_PORT', None)),
+        }
+        super().__init__(database=options.get('database', None), user=options.get('user', None), password=options.get('password', None), host=options.get('host', '127.0.0.1'), port=options.get('port', 5439), **kwargs)
+
+    def provider(self) -> SessionProvider:
+        return SessionProvider.REDSHIFT
+    
+    @property
+    def conn(self) -> Connection:
+        if not self._conn:
+            import redshift_connector
+            if not self._database:
+                raise ValueError("Database name is required")
+            if not self._user:
+                raise ValueError("User name is required")
+            if not self._password:
+                raise ValueError("Password is required")
+            self._conn = redshift_connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port)
+        return self._conn
+
 class SnowflakeSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
         env = os.environ.copy() # Copy the current environment variables
@@ -223,6 +252,8 @@ class SessionFactory:
             return PostgresSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.MYSQL:
             return MySQLSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+        elif provider == SessionProvider.REDSHIFT:
+            return RedshiftSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.SNOWFLAKE:
             return SnowflakeSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         else:
