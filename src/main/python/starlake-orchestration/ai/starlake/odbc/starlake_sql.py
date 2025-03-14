@@ -341,3 +341,53 @@ class SQLTask(ABC):
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
         self.execute_sql(session, "ROLLBACK", "ROLLBACK transaction:", dry_run)
+
+    @abstractmethod
+    def execute(self, session: Session, sink: str, dry_run: bool = False) -> None:
+        """Execute the task.
+        Args:
+            session (Session): The Starlake session.
+            sink (str): The sink.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        """
+        ...
+
+class SQLLoadTask(SQLTask):
+
+    def __init__(self, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+        """Initialize the SQL load task.
+        Args:
+            caller_globals (dict, optional): The caller globals. Defaults to dict().
+            options (dict, optional): The options. Defaults to dict().
+        """
+        super().__init__(caller_globals, options, **kwargs)
+
+    def execute(self, session: Session, sink: str, dry_run: bool = False) -> None:
+        """Load the data.
+        Args:
+            session (Session): The Starlake session.
+            sink (str): The sink.
+            query (str): The query.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        """
+        ...
+
+class SQLTransformTask(SQLTask):
+    
+    def __init__(self, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+        """Initialize the SQL transform task.
+        Args:
+            caller_globals (dict, optional): The caller globals. Defaults to dict().
+            options (dict, optional): The options. Defaults to dict().
+        """
+        super().__init__(caller_globals, options, **kwargs)
+
+    def execute(self, session: Session, sink: str, dry_run: bool = False) -> None:
+        """Transform the data.
+        Args:
+            session (Session): The Starlake session.
+            sink (str): The sink.
+            query (str): The query.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        """
+        ...
