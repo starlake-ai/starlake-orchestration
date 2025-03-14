@@ -180,7 +180,6 @@ class Session:
                         port = connection_parameters['port'])
 
     def close(self):
-        self.cur.close()
         self.conn.close()
 
     def sql(self, stmt: str) -> List[Tuple]:
