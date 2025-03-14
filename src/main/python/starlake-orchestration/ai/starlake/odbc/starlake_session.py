@@ -23,10 +23,6 @@ class Connection(ABC):
         self._host = host
         self._port = port
 
-    @property
-    def conn(self) -> Connection:
-        return self
-
     @abstractmethod
     def cursor(self) -> Cursor: ...
 
@@ -52,9 +48,14 @@ class SessionProvider(str, Enum):
 class Session(Connection):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
         super().__init__(database=database, user=user, password=password, host=host, port=port, **kwargs)
+        self._conn: Connection = None
 
     @abstractmethod
     def provider(self) -> SessionProvider: ...
+
+    @property
+    @abstractmethod
+    def conn(self) -> Connection: ...
 
     def sql(self, stmt: str) -> List[Tuple]:
         cur = self.conn.cursor()
@@ -77,6 +78,7 @@ class Session(Connection):
 
     def close(self) -> None:
         self.conn.close()
+        self._conn = None
 
 import os
 
@@ -97,14 +99,16 @@ class PostgresSession(Session):
 
     @property
     def conn(self) -> Connection:
-        import psycopg2
-        if not self._database:
-            raise ValueError("Database name is required")
-        if not self._user:
-            raise ValueError("User name is required")
-        if not self._password:
-            raise ValueError("Password is required")
-        return psycopg2.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 5432)
+        if not self._conn:
+            import psycopg2
+            if not self._database:
+                raise ValueError("Database name is required")
+            if not self._user:
+                raise ValueError("User name is required")
+            if not self._password:
+                raise ValueError("Password is required")
+            self._conn = psycopg2.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 5432)
+        return self._conn
 
 class MySQLSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -123,14 +127,16 @@ class MySQLSession(Session):
 
     @property
     def conn(self) -> Connection:
-        import mysql.connector
-        if not self._database:
-            raise ValueError("Database name is required")
-        if not self._user:
-            raise ValueError("User name is required")
-        if not self._password:
-            raise ValueError("Password is required")
-        return mysql.connector.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 3306)
+        if not self._conn:
+            import mysql.connector
+            if not self._database:
+                raise ValueError("Database name is required")
+            if not self._user:
+                raise ValueError("User name is required")
+            if not self._password:
+                raise ValueError("Password is required")
+            self._conn = mysql.connector.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 3306)
+        return self._conn
 
 class SnowflakeSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -154,18 +160,20 @@ class SnowflakeSession(Session):
         return SessionProvider.SNOWFLAKE
 
     def conn(self) -> Connection:
-        import snowflake.connector.connection
-        if not self._database:
-            raise ValueError("Database name is required")
-        if not self._user:
-            raise ValueError("User name is required")
-        if not self._password:
-            raise ValueError("Password is required")
-        if not self._account:
-            raise ValueError("Account is required")
-        if not self._warehouse:
-            raise ValueError("Warehouse is required")
-        return snowflake.connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port, account=self._account, warehouse=self._warehouse, role=self._role)
+        if not self._conn:
+            import snowflake.connector.connection
+            if not self._database:
+                raise ValueError("Database name is required")
+            if not self._user:
+                raise ValueError("User name is required")
+            if not self._password:
+                raise ValueError("Password is required")
+            if not self._account:
+                raise ValueError("Account is required")
+            if not self._warehouse:
+                raise ValueError("Warehouse is required")
+            self._conn = snowflake.connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port, account=self._account, warehouse=self._warehouse, role=self._role)
+        return self._conn
 
 class SessionFactory:
     def __init__(self, **kwargs):
