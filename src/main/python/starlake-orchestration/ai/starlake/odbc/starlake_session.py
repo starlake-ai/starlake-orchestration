@@ -38,6 +38,7 @@ class Connection(ABC):
 from enum import Enum
 
 class SessionProvider(str, Enum):
+    DUCKDB = "duckdb"
     POSTGRES = "postgres"
     MYSQL = "mysql"
     SNOWFLAKE = "snowflake"
@@ -81,6 +82,26 @@ class Session(Connection):
         self._conn = None
 
 import os
+
+class DuckDBSession(Session):
+    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        env = os.environ.copy() # Copy the current environment variables
+        options = {
+            "database": database or kwargs.get('DUCKDB_DB', env.get('DUCKDB_DB', None)),
+        }
+        super().__init__(database=options.get('database', None), **kwargs)
+
+    def provider(self) -> SessionProvider:
+        return SessionProvider.DUCKDB
+    
+    @property
+    def conn(self) -> Connection:
+        if not self._conn:
+            if not self._database:
+                raise ValueError("Database name is required")
+            import duckdb
+            self._conn = duckdb.connect(database=self._database)
+        return self._conn
 
 class PostgresSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -196,7 +217,9 @@ class SessionFactory:
         Example:
             session = SessionFactory.session(SessionProvider.POSTGRES, database="starlake", user="starlake")
         """
-        if provider == SessionProvider.POSTGRES:
+        if provider == SessionProvider.DUCKDB:
+            return DuckDBSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+        elif provider == SessionProvider.POSTGRES:
             return PostgresSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.MYSQL:
             return MySQLSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
