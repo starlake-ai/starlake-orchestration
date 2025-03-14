@@ -15,12 +15,14 @@ setup(name='starlake-snowflake',
       author='Stéphane Manciot',
       author_email='stephane.manciot@gmail.com',
       license='Apache 2.0',
-#      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-airflow',
+#      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-snowflake',
       packages=find_packages(include=['ai', 'ai.*']),
       install_requires=[
           'starlake-orchestration>=0.2.5',
-#          'snowflake>=1.0.4',
-#          'snowflake-snowpark-python>=1.27.0'
+          'croniter',
+          'sqlalchemy',
+          'snowflake>=1.0.4',
+          'snowflake-snowpark-python>=1.27.0'
       ],
       extras_require={
         "snwoflake": [],
