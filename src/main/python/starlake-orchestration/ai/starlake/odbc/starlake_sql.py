@@ -10,6 +10,15 @@ from ai.starlake.job import StarlakeOptions
 
 from ai.starlake.odbc import Session, SessionProvider
 
+from enum import Enum
+
+class TaskType(str, Enum):
+    LOAD = "load"
+    TRANSFORM = "transform"
+
+    def __str__(self):
+        return self.value
+
 class SQLTask(ABC):
 
     def __init__(self, sink: str, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
@@ -30,6 +39,15 @@ class SQLTask(ABC):
         self.expectations: dict = self.caller_globals.get('expectations', dict())
         self.expectation_items: dict = self.caller_globals.get('expectation_items', dict()).get(sink, None)
         self.safe_params = defaultdict(lambda: 'NULL', options)
+
+    @property
+    @abstractmethod
+    def task_type(self) -> TaskType:
+        """Get the task type.
+        Returns:
+            TaskType: The task type.
+        """
+        ...
 
     def bindParams(self, stmt: str) -> str:
         """Bind parameters to the SQL statement.
@@ -426,6 +444,9 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         else:
             self.purge = purge.upper()
 
+    @property
+    def task_type(self) -> TaskType:
+        return TaskType.LOAD
 
     def get_option(self, key: str, metadata_key: Optional[str]) -> Optional[str]:
         if self.metadata_options and key.lower() in self.metadata_options:
@@ -735,6 +756,10 @@ class SQLTransformTask(SQLTask):
         self.cron_expr = kwargs.get('cron_expr', None)
         self.format = '%Y-%m-%d %H:%M:%S%z'
 
+    @property
+    def task_type(self) -> TaskType:
+        return TaskType.TRANSFORM
+
     def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
         """Transform the data.
         Args:
@@ -831,3 +856,37 @@ class SQLTransformTask(SQLTask):
             print(f"Duration in seconds: {duration}")
             self.log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run)
             raise e
+
+class SQLTaskFactory:
+
+    @staticmethod
+    def task(cls, caller_globals: dict = dict(), arguments: list, options: dict, **kwargs) -> SQLTask:
+        """Create a task.
+        Args:
+            cls: The task class.
+            caller_globals (dict, optional): The caller globals. Defaults to dict().
+            arguments (list): The required arguments of the starlake command to run.
+            options (dict): The options.
+        """
+        sink = kwargs.get('sink', None)
+        if not sink:
+            raise ValueError("Sink not found")
+        command = arguments[0].lower()
+        from collections import defaultdict
+        for index, arg in enumerate(arguments):
+            if arg == "--options" and arguments.__len__() > index + 1:
+                opts = arguments[index+1]
+                if opts.strip().__len__() > 0:
+                    options.update({
+                        key: value
+                        for opt in opts.split(",")
+                        if "=" in opt  # Only process valid key=value pairs
+                        for key, value in [opt.split("=")]
+                    })
+                break
+        if command == TaskType.LOAD.value:
+            return SQLLoadTask(sink, caller_globals, options, **kwargs)
+        elif command == TaskType.TRANSFORM.value:
+            return SQLTransformTask(sink, caller_globals, options, **kwargs)
+        else:
+            raise ValueError(f"Unsupported command: {command}")
