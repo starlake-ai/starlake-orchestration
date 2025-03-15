@@ -5,11 +5,14 @@ from collections import defaultdict
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from ai.starlake.odbc import Session
+from ai.starlake.common import MissingEnvironmentVariable
+from ai.starlake.job import StarlakeOptions
+
+from ai.starlake.odbc import Session, SessionProvider
 
 class SQLTask(ABC):
 
-    def __init__(self, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
         """Initialize the SQL task.
         Args:
             sink (str): The sink.
@@ -17,6 +20,10 @@ class SQLTask(ABC):
             options (dict, optional): The options. Defaults to dict().
         """
         super().__init__()
+        self.sink = sink
+        domainAndTable = sink.split('.')
+        self.domain = domainAndTable[0]
+        self.table = domainAndTable[-1]
         self.caller_globals = caller_globals
         self.statements: dict = self.caller_globals.get('statements', dict()).get(sink, None)
         self.audit: dict = self.caller_globals.get('audit', dict())
@@ -343,51 +350,484 @@ class SQLTask(ABC):
         self.execute_sql(session, "ROLLBACK", "ROLLBACK transaction:", dry_run)
 
     @abstractmethod
-    def execute(self, session: Session, sink: str, dry_run: bool = False) -> None:
+    def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
         """Execute the task.
         Args:
             session (Session): The Starlake session.
-            sink (str): The sink.
+            jobid (Optional[str], optional): The optional job id. Defaults to None.
+            config (dict, optional): The config. Defaults to dict().
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
         ...
 
-class SQLLoadTask(SQLTask):
+class SQLLoadTask(SQLTask, StarlakeOptions):
 
-    def __init__(self, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
         """Initialize the SQL load task.
         Args:
+            sink (str): The sink.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
             options (dict, optional): The options. Defaults to dict().
         """
-        super().__init__(caller_globals, options, **kwargs)
+        super().__init__(sink, caller_globals, options, **kwargs)
+        json_context = self.caller_globals.get('json_context', '{}')
+        import json
+        context = json.loads(json_context).get(sink, None)
+        if not context:
+            raise ValueError("load context not found")
 
-    def execute(self, session: Session, sink: str, dry_run: bool = False) -> None:
+        self.options = options
+
+        try:
+            self._sl_incoming_file_stage = kwargs.get('sl_incoming_file_stage', __class__.get_context_var(var_name='sl_incoming_file_stage', options=self.options))
+        except MissingEnvironmentVariable:
+            self._sl_incoming_file_stage = None
+        temp_stage = self.sl_incoming_file_stage or context.get('tempStage', None)
+        if not temp_stage:
+            raise ValueError(f"Temp stage for {sink} not found")
+        else:
+            self.temp_stage = temp_stage
+
+        self.context_schema: dict = context.get('schema', dict())
+
+        pattern: str = self.context_schema.get('pattern', None)
+        if not pattern:
+            raise ValueError(f"Pattern for {sink} not found")
+        else:
+            self.pattern = pattern
+
+        self.metadata: dict = self.context_schema.get('metadata', dict())
+
+        format: str = self.metadata.get('format', None)
+        if not format:
+            raise ValueError(f"Format for {sink} not found")
+        else:
+            self.format = format.upper()
+
+        self.metadata_options: dict = self.metadata.get("options", dict())
+
+        self.compression = self.is_true(get_option("compression", None), True)
+        if compression:
+            self.compression_format = "COMPRESSION = GZIP" 
+        else:
+            self.compression_format = "COMPRESSION = NONE"
+
+        null_if = self.get_option('NULL_IF', None)
+        if not null_if and self.is_true(self.metadata.get('emptyIsNull', 'false'), False):
+            self.null_if = "NULL_IF = ('')"
+        elif null_if:
+            self.null_if = f"NULL_IF = {null_if}"
+        else:
+            self.null_if = ""
+
+        purge = self.get_option("PURGE", None)
+        if not purge:
+            self.purge = "FALSE"
+        else:
+            self.purge = purge.upper()
+
+
+    def get_option(self, key: str, metadata_key: Optional[str]) -> Optional[str]:
+        if self.metadata_options and key.lower() in self.metadata_options:
+            return self.metadata_options.get(key.lower(), None)
+        elif metadata_key and self.metadata.get(metadata_key, None):
+            return self.metadata[metadata_key].replace('\\', '\\\\')
+        return None
+
+    def is_true(self, value: str, default: bool) -> bool:
+        if value is None:
+            return default
+        return value.lower() == "true"
+
+    def get_audit_info(self, rows: List[Tuple]) -> Tuple[str, str, str, int, int, int]:
+        if rows.__len__() == 0:
+            return '', '', '', -1, -1, -1
+        else:
+            files = []
+            first_error_lines = []
+            first_error_column_names = []
+            rows_parsed = 0
+            rows_loaded = 0
+            errors_seen = 0
+            for row in rows:
+                row_dict = {k: v for k, v in row}
+                file = row_dict.get('file', None)
+                if file:
+                    files.append(file)
+                first_error_line=row_dict.get('first_error_line', None)
+                if first_error_line:
+                    first_error_lines.append(first_error_line)
+                first_error_column_name=row_dict.get('first_error_column_name', None)
+                if first_error_column_name:
+                    first_error_column_names.append(first_error_column_name)
+                rows_parsed += row_dict.get('rows_parsed', 0)
+                rows_loaded += row_dict.get('rows_loaded', 0)
+                errors_seen += row_dict.get('errors_seen', 0)
+            return ','.join(files), ','.join(first_error_lines), ','.join(first_error_column_names), rows_parsed, rows_loaded, errors_seen
+
+    def copy_extra_options(self, common_options: list[str]):
+        extra_options = ""
+        if self.metadata_options:
+            for k, v in self.metadata_options.items():
+                if not k in common_options:
+                    extra_options += f"{k} = {v}\n"
+        return extra_options
+
+    def schema_as_dict(self, schema_string: str) -> dict:
+        tableNativeSchema = map(lambda x: (x.split()[0].strip(), x.split()[1].strip()), schema_string.replace("\"", "").split(","))
+        tableSchemaDict = dict(map(lambda x: (x[0].lower(), x[1].lower()), tableNativeSchema))
+        return tableSchemaDict
+
+    def add_columns_from_dict(dictionary: dict):
+        return [f"ALTER TABLE IF EXISTS {self.domain}.{self.table} ADD COLUMN IF NOT EXISTS {k} {v};" for k, v in dictionary.items()]
+
+    def drop_columns_from_dict(dictionary: dict):
+        # In the current version, we do not drop any existing columns for backward compatibility
+        # return [f"ALTER TABLE IF EXISTS {self.domain}.{self.table} DROP COLUMN IF EXISTS {k};" for k, v in dictionary.items()]
+        return []    
+
+    def update_table_schema(self, session: Session, dry_run: bool) -> bool:
+        existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{self.domain}' and table_name ilike '{self.table}';"
+        rows = self.execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {self.domain}.{self.table}", False)
+        existing_columns = []
+        for row in rows:
+            existing_columns.append((str(row[0]).lower(), str(row[1]).lower()))
+        existing_schema = dict(existing_columns)
+        if dry_run:
+            print(f"# Existing schema for {self.domain}.{self.table}: {existing_schema}")
+        schema_string = self.statements.get("schemaString", "") 
+        if schema_string.strip() == "":
+            return False
+        new_schema = schema_as_dict(schema_string)
+        new_columns = set(new_schema.keys()) - set(existing_schema.keys())
+        old_columns = set(existing_schema.keys()) - set(new_schema.keys())
+        nb_new_columns = new_columns.__len__()
+        nb_old_columns = old_columns.__len__()
+        update_required = nb_new_columns + nb_old_columns > 0
+        if not update_required:
+            if dry_run:
+                print(f"# No schema update required for {domain}.{table}")
+            return False
+        new_columns_dict = {key: new_schema[key] for key in new_columns}
+        old_columns_dict = {key: existing_schema[key] for key in old_columns}
+        alter_columns = add_columns_from_dict(new_columns_dict)
+        self.execute_sqls(session, alter_columns, "Add columns", dry_run)
+
+        old_columns_dict = {key: existing_schema[key] for key in old_columns}
+        drop_columns = drop_columns_from_dict(old_columns_dict)
+        self.execute_sqls(session, drop_columns, "Drop columns", dry_run)
+
+        return True
+
+    def build_copy_csv(self) -> str:
+        skipCount = self.get_option('SKIP_HEADER', None)
+
+        if not skipCount and self.is_true(self.metadata.get('withHeader', 'false'), False):
+            skipCount = '1'
+
+        common_options = [
+            'SKIP_HEADER', 
+            'NULL_IF', 
+            'FIELD_OPTIONALLY_ENCLOSED_BY', 
+            'FIELD_DELIMITER',
+            'ESCAPE_UNENCLOSED_FIELD', 
+            'ENCODING'
+        ]
+        extra_options = self.copy_extra_options(common_options)
+        if self.compression:
+            extension = ".gz"
+        else:
+            extension = ""
+        sql = f'''
+            COPY INTO {self.sink} 
+            FROM @{self.temp_stage}/{self.domain}/
+            PATTERN = "{self.pattern}{extension}"
+            PURGE = {self.purge}
+            FILE_FORMAT = (
+                TYPE = CSV
+                ERROR_ON_COLUMN_COUNT_MISMATCH = false
+                SKIP_HEADER = {skipCount} 
+                FIELD_OPTIONALLY_ENCLOSED_BY = '{self.get_option('FIELD_OPTIONALLY_ENCLOSED_BY', 'quote')}' 
+                FIELD_DELIMITER = '{self.get_option('FIELD_DELIMITER', 'separator')}' 
+                ESCAPE_UNENCLOSED_FIELD = '{self.get_option('ESCAPE_UNENCLOSED_FIELD', 'escape')}' 
+                ENCODING = '{self.get_option('ENCODING', 'encoding')}'
+                {self.null_if}
+                {extra_options}
+                {self.compression_format}
+            )
+        '''
+        return sql
+
+    def build_copy_json(self) -> str:
+        strip_outer_array = self.get_option("STRIP_OUTER_ARRAY", 'array')
+        common_options = [
+            'STRIP_OUTER_ARRAY', 
+            'NULL_IF'
+        ]
+        extra_options = self.copy_extra_options(common_options)
+        sql = f'''
+            COPY INTO {self.sink} 
+            FROM @{vtemp_stage}/{self.domain}
+            PATTERN = "{self.pattern}"
+            PURGE = {self.purge}
+            FILE_FORMAT = (
+                TYPE = JSON
+                STRIP_OUTER_ARRAY = {strip_outer_array}
+                {self.null_if}
+                {extra_options}
+                {self.compression_format}
+            )
+        '''
+        return sql
+        
+    def build_copy_other(self, format: str) -> str:
+        common_options = [
+            'NULL_IF'
+        ]
+        extra_options = self.copy_extra_options(common_options)
+        sql = f'''
+            COPY INTO {self.sink} 
+            FROM @{self.temp_stage}/{self.domain} 
+            PATTERN = "{self.pattern}"
+            PURGE = {self.purge}
+            FILE_FORMAT = (
+                TYPE = {self.format}
+                {self.null_if}
+                {extra_options}
+                {self.compression_format}
+            )
+        '''
+        return sql
+
+    def build_copy(self) -> str:
+        if self.format == 'DSV':
+            return self.build_copy_csv()
+        elif self.format == 'JSON':
+            return self.build_copy_json()
+        elif self.format == 'PARQUET':
+            return self.build_copy_other()
+        elif self.format == 'XML':
+            return self.build_copy_other()
+        else:
+            raise ValueError(f"Unsupported format {format}")
+
+    def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
         """Load the data.
         Args:
             session (Session): The Starlake session.
-            sink (str): The sink.
-            query (str): The query.
+            jobid (Optional[str], optional): The optional job id. Defaults to None.
+            config (dict, optional): The config. Defaults to dict().
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
-        ...
+        if dry_run:
+            print(f"#Loading {self.sink} in dry run mode")
+
+        if not jobid:
+            jobid = self.sink
+
+        snowflake: bool = session.provider() == SessionProvider.SNOWFLAKE
+
+        start = datetime.now()
+
+        try:
+            # BEGIN transaction
+            self.begin_transaction(session, dry_run)
+
+            nbSteps = int(self.statements.get('steps', '1'))
+            write_strategy = self.statements.get('writeStrategy', None)
+            if nbSteps == 1:
+                # execute schema presql
+                self.execute_sqls(session, self.context_schema.get('presql', []), "Pre sqls", dry_run)
+                # create table
+                self.execute_sqls(session, self.statements.get('createTable', []), "Create table", dry_run)
+                exists = self.check_if_table_exists(session, self.domain, self.table)
+                if exists:
+                    # enable change tracking
+                    if snowflake:
+                        self.enable_change_tracking(session, self.sink, dry_run)
+                    # update table schema
+                    self.update_table_schema(session, dry_run)
+                if write_strategy == 'WRITE_TRUNCATE':
+                    # truncate table
+                    self.execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                # create stage if not exists
+                if snowflake:
+                    self.execute_sql(session, f"CREATE STAGE IF NOT EXISTS {self.temp_stage}", "Create stage", dry_run)
+                # copy data
+                copy_results = self.execute_sql(session, self.build_copy(), "Copy data", dry_run)
+                if not exists and snowflake:
+                    # enable change tracking
+                    self.enable_change_tracking(session, sink, dry_run)
+            elif nbSteps == 2:
+                # execute first step
+                self.execute_sqls(session, self.statements.get('firstStep', []), "Execute first step", dry_run)
+                if self.write_strategy == 'WRITE_TRUNCATE':
+                    # truncate table
+                    self.execute_sql(session, f"TRUNCATE TABLE {self.sink}", "Truncate table", dry_run)
+                # create stage if not exists
+                self.execute_sql(session, f"CREATE STAGE IF NOT EXISTS {self.temp_stage}", "Create stage", dry_run)
+                # copy data
+                copy_results = self.execute_sql(session, self.build_copy(), "Copy data", dry_run)
+                second_step: dict = self.statements.get('secondStep', dict())
+                # execute preActions
+                self.execute_sqls(session, second_step.get('preActions', []), "Pre actions", dry_run)
+                # execute schema presql
+                self.execute_sqls(session, self.context_schema.get('presql', []), "Pre sqls", dry_run)
+                if check_if_table_exists(session, domain, table):
+                    # enable change tracking
+                    if snowflake:
+                        self.enable_change_tracking(session, sink, dry_run)
+                    # execute addSCD2ColumnsSqls
+                    self.execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
+                    # update schema
+                    self.update_table_schema(session, dry_run)
+                    # execute mainSqlIfExists
+                    self.execute_sqls(session, second_step.get('mainSqlIfExists', []), "Main sql if exists", dry_run)
+                else:
+                    # execute mainSqlIfNotExists
+                    self.execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
+                    # enable change tracking
+                    if snowflake:
+                        self.enable_change_tracking(session, sink, dry_run)
+                # execute dropFirstStep
+                self.execute_sql(session, self.statements.get('dropFirstStep', None), "Drop first step", dry_run)
+            else:
+                raise ValueError(f"Invalid number of steps: {nbSteps}")
+
+            # execute schema postsql
+            self.execute_sqls(session, context_schema.get('postsql', []), "Post sqls", dry_run)
+
+            # run expectations
+            self.run_expectations(session, jobid, dry_run)
+
+            # COMMIT transaction
+            self.commit_transaction(session, dry_run)
+            end = datetime.now()
+            duration = (end - start).total_seconds()
+            print(f"#Duration in seconds: {duration}")
+            files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = self.get_audit_info(copy_results)
+            message = first_error_line + '\n' + first_error_column_name
+            success = errors_seen == 0
+            self.log_audit(session, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run)
+            
+        except Exception as e:
+            # ROLLBACK transaction
+            error_message = str(e)
+            print(f"Error executing load for {sink}: {error_message}")
+            self.rollback_transaction(session, dry_run)
+            end = datetime.now()
+            duration = (end - start).total_seconds()
+            print(f"Duration in seconds: {duration}")
+            self.log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run)
+            raise e
+
 
 class SQLTransformTask(SQLTask):
     
-    def __init__(self, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
         """Initialize the SQL transform task.
         Args:
+            sink (str): The sink.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
             options (dict, optional): The options. Defaults to dict().
         """
-        super().__init__(caller_globals, options, **kwargs)
+        super().__init__(sink, caller_globals, options, **kwargs)
+        self.cron_expr = kwargs.get('cron_expr', None)
+        self.format = '%Y-%m-%d %H:%M:%S%z'
 
-    def execute(self, session: Session, sink: str, dry_run: bool = False) -> None:
+    def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
         """Transform the data.
         Args:
             session (Session): The Starlake session.
-            sink (str): The sink.
-            query (str): The query.
+            jobid (Optional[str], optional): The optional job id. Defaults to None.
+            config (dict, optional): The configuration. Defaults to dict().
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
-        ...
+        if dry_run:
+            print(f"#Executing transform for {self.sink} in dry run mode")
+
+        if not jobid:
+            jobid = self.sink
+
+        if self.cron_expr:
+            from croniter import croniter
+            from croniter.croniter import CroniterBadCronError
+            original_schedule = config.get('logical_date', None)
+            if original_schedule:
+                if isinstance(original_schedule, str):
+                    from dateutil import parser
+                    start_time = parser.parse(original_schedule)
+                else:
+                    start_time = original_schedule
+            else:
+                start_time = datetime.fromtimestamp(datetime.now().timestamp())
+            try:
+                croniter(cron_expr)
+                iter = croniter(cron_expr, start_time)
+                curr = iter.get_current(datetime)
+                previous = iter.get_prev(datetime)
+                next = croniter(cron_expr, previous).get_next(datetime)
+                if curr == next :
+                    sl_end_date = curr
+                else:
+                    sl_end_date = previous
+                sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
+                self.safe_params.update({'sl_start_date': sl_start_date.strftime(self.format), 'sl_end_date': sl_end_date.strftime(self.format)})
+            except CroniterBadCronError:
+                raise ValueError(f"Invalid cron expression: {self.cron_expr}")
+
+        snowflake: bool = session.provider() == SessionProvider.SNOWFLAKE
+
+        start = datetime.now()
+
+        try:
+            # BEGIN transaction
+            self.begin_transaction(session, dry_run)
+
+            # create SQL domain
+            self.create_domain_if_not_exists(session, self.domain, dry_run)
+
+            # execute preActions
+            self.execute_sqls(session, self.statements.get('preActions', []), "Pre actions", dry_run)
+
+            # execute preSqls
+            self.execute_sqls(session, self.statements.get('preSqls', []), "Pre sqls", dry_run)
+
+            if self.check_if_table_exists(session, self.domain, self.table):
+                # enable change tracking
+                if snowflake:
+                    self.enable_change_tracking(session, self.sink, dry_run)
+                # execute addSCD2ColumnsSqls
+                self.execute_sqls(session, self.statements.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
+                # execute mainSqlIfExists
+                self.execute_sqls(session, self.statements.get('mainSqlIfExists', []), "Main sql if exists", dry_run)
+            else:
+                # execute mainSqlIfNotExists
+                self.execute_sqls(session, self.statements.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
+                # enable change tracking
+                if snowflake:
+                    self.enable_change_tracking(session, sink, dry_run)
+
+            # execute postSqls
+            self.execute_sqls(session, self.statements.get('postSqls', []) , "Post sqls", dry_run)
+
+            # run expectations
+            self.run_expectations(session, jobid, dry_run)
+
+            # COMMIT transaction
+            self.commit_transaction(session, dry_run)
+            end = datetime.now()
+            duration = (end - start).total_seconds()
+            print(f"#Duration in seconds: {duration}")
+            self.log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run)
+            
+        except Exception as e:
+            # ROLLBACK transaction
+            error_message = str(e)
+            print(f"Error executing transform for {self.sink}: {error_message}")
+            self.rollback_transaction(session, dry_run)
+            end = datetime.now()
+            duration = (end - start).total_seconds()
+            print(f"Duration in seconds: {duration}")
+            self.log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run)
+            raise e
