@@ -32,6 +32,7 @@ class StarlakeOrchestrator(str, Enum):
     AIRFLOW = "airflow"
     DAGSTER = "dagster"
     SNOWFLAKE = "snowflake"
+    STARLAKE = "starlake"
 
     def __str__(self):
         return self.value
