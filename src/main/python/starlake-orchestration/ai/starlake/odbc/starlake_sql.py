@@ -98,7 +98,7 @@ class SQLTask(ABC, StarlakeOptions):
             return False
         raise ValueError(f"Valeur invalide : {value}")
 
-    def execute_sql(self, session: Session, sql: Optional[str], message: Optional[str] = None, dry_run: bool = False) -> List[Row]:
+    def execute_sql(self, session: Session, sql: Optional[str], message: Optional[str] = None, dry_run: bool = False) -> List[Any]:
         """Execute the SQL.
         Args:
             session (Session): The Starlake session.
@@ -106,7 +106,7 @@ class SQLTask(ABC, StarlakeOptions):
             message (Optional[str], optional): The optional message. Defaults to None.
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         Returns:
-            List[Row]: The rows.
+            List[Any]: The rows.
         """
         if sql:
             if dry_run and message:
@@ -322,15 +322,15 @@ class SQLTask(ABC, StarlakeOptions):
                 rows = self.execute_sql(session, query, f"Run expectation {name}:", dry_run)
                 if rows.__len__() != 1:
                     if not dry_run:
-                        raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
+                        raise Exception(f'Expectation failed for {self.sink}: {query}. Expected 1 row but got {rows.__len__()}')
                 else:
                     count = rows[0][0]
                 #  log expectations as audit in expectation table here
                 if count != 0:
-                    raise Exception(f'Expectation failed for {sink}: {query}. Expected count to be equal to 0 but got {count}')
+                    raise Exception(f'Expectation failed for {self.sink}: {query}. Expected count to be equal to 0 but got {count}')
                 self.log_expectation(session, True, name, params, query, count, "", datetime.now(), jobid, dry_run)
             else:
-                raise Exception(f'Expectation failed for {sink}: {name}. Query not found')
+                raise Exception(f'Expectation failed for {self.sink}: {name}. Query not found')
         except Exception as e:
             print(f"Error running expectation {name}: {str(e)}")
             self.log_expectation(session, False, name, params, query, count, str(e), datetime.now(), jobid, dry_run)
@@ -345,7 +345,7 @@ class SQLTask(ABC, StarlakeOptions):
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
         if self.expectation_items and self.check_if_expectations_table_exists(session, dry_run):
-            for expectation in expectation_items:
+            for expectation in self.expectation_items:
                 self.run_expectation(session, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), self.str_to_bool(expectation.get('failOnError', 'no')), jobid, dry_run)
 
     def begin_transaction(self, session: Session, dry_run: bool = False) -> None:
@@ -372,7 +372,7 @@ class SQLTask(ABC, StarlakeOptions):
             sink (str): The sink.
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
-        self.execute_sql(session, f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE", "Enable change tracking:", dry_run)
+        self.execute_sql(session, f"ALTER TABLE {self.sink} SET CHANGE_TRACKING = TRUE", "Enable change tracking:", dry_run)
 
     def commit_transaction(self, session: Session, dry_run: bool = False) -> None:
         """Commit the transaction.
@@ -424,11 +424,11 @@ class SQLEmptyTask(SQLTask):
             config (dict, optional): The config. Defaults to dict().
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
-        self.execute_sql(session, f"SELECT '{sink}'", "Execute empty task:", dry_run)
+        self.execute_sql(session, f"SELECT '{self.sink}'", "Execute empty task:", dry_run)
 
 class SQLLoadTask(SQLTask, StarlakeOptions):
 
-    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list, options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs):
         """Initialize the SQL load task.
         Args:
             sink (str): The sink.
@@ -449,7 +449,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             self._sl_incoming_file_stage = None
         temp_stage = self.sl_incoming_file_stage or context.get('tempStage', None)
         if not temp_stage:
-            raise ValueError(f"Temp stage for {sink} not found")
+            raise ValueError(f"Temp stage for {self.sink} not found")
         else:
             self.temp_stage = temp_stage
 
@@ -457,7 +457,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
 
         pattern: str = self.context_schema.get('pattern', None)
         if not pattern:
-            raise ValueError(f"Pattern for {sink} not found")
+            raise ValueError(f"Pattern for {self.sink} not found")
         else:
             self.pattern = pattern
 
@@ -465,14 +465,14 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
 
         format: str = self.metadata.get('format', None)
         if not format:
-            raise ValueError(f"Format for {sink} not found")
+            raise ValueError(f"Format for {self.sink} not found")
         else:
             self.format = format.upper()
 
         self.metadata_options: dict = self.metadata.get("options", dict())
 
-        self.compression = self.is_true(get_option("compression", None), True)
-        if compression:
+        self.compression = self.is_true(self.get_option("compression", None), True)
+        if self.compression:
             self.compression_format = "COMPRESSION = GZIP" 
         else:
             self.compression_format = "COMPRESSION = NONE"
@@ -546,7 +546,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         tableSchemaDict = dict(map(lambda x: (x[0].lower(), x[1].lower()), tableNativeSchema))
         return tableSchemaDict
 
-    def add_columns_from_dict(dictionary: dict):
+    def add_columns_from_dict(self, dictionary: dict):
         return [f"ALTER TABLE IF EXISTS {self.domain}.{self.table} ADD COLUMN IF NOT EXISTS {k} {v};" for k, v in dictionary.items()]
 
     def drop_columns_from_dict(dictionary: dict):
@@ -566,7 +566,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         schema_string = self.statements.get("schemaString", "") 
         if schema_string.strip() == "":
             return False
-        new_schema = schema_as_dict(schema_string)
+        new_schema = self.schema_as_dict(schema_string)
         new_columns = set(new_schema.keys()) - set(existing_schema.keys())
         old_columns = set(existing_schema.keys()) - set(new_schema.keys())
         nb_new_columns = new_columns.__len__()
@@ -574,15 +574,15 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         update_required = nb_new_columns + nb_old_columns > 0
         if not update_required:
             if dry_run:
-                print(f"# No schema update required for {domain}.{table}")
+                print(f"# No schema update required for {self.domain}.{self.table}")
             return False
         new_columns_dict = {key: new_schema[key] for key in new_columns}
         old_columns_dict = {key: existing_schema[key] for key in old_columns}
-        alter_columns = add_columns_from_dict(new_columns_dict)
+        alter_columns = self.add_columns_from_dict(new_columns_dict)
         self.execute_sqls(session, alter_columns, "Add columns", dry_run)
 
         old_columns_dict = {key: existing_schema[key] for key in old_columns}
-        drop_columns = drop_columns_from_dict(old_columns_dict)
+        drop_columns = self.drop_columns_from_dict(old_columns_dict)
         self.execute_sqls(session, drop_columns, "Drop columns", dry_run)
 
         return True
@@ -635,7 +635,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         extra_options = self.copy_extra_options(common_options)
         sql = f'''
             COPY INTO {self.sink} 
-            FROM @{vtemp_stage}/{self.domain}
+            FROM @{self.temp_stage}/{self.domain}
             PATTERN = "{self.pattern}"
             PURGE = {self.purge}
             FILE_FORMAT = (
@@ -717,7 +717,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
                     self.update_table_schema(session, dry_run)
                 if write_strategy == 'WRITE_TRUNCATE':
                     # truncate table
-                    self.execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
+                    self.execute_sql(session, f"TRUNCATE TABLE {self.sink}", "Truncate table", dry_run)
                 # create stage if not exists
                 if snowflake:
                     self.execute_sql(session, f"CREATE STAGE IF NOT EXISTS {self.temp_stage}", "Create stage", dry_run)
@@ -725,7 +725,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
                 copy_results = self.execute_sql(session, self.build_copy(), "Copy data", dry_run)
                 if not exists and snowflake:
                     # enable change tracking
-                    self.enable_change_tracking(session, sink, dry_run)
+                    self.enable_change_tracking(session, self.sink, dry_run)
             elif nbSteps == 2:
                 # execute first step
                 self.execute_sqls(session, self.statements.get('firstStep', []), "Execute first step", dry_run)
@@ -741,10 +741,10 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
                 self.execute_sqls(session, second_step.get('preActions', []), "Pre actions", dry_run)
                 # execute schema presql
                 self.execute_sqls(session, self.context_schema.get('presql', []), "Pre sqls", dry_run)
-                if check_if_table_exists(session, domain, table):
+                if self.check_if_table_exists(session, self.domain, self.table):
                     # enable change tracking
                     if snowflake:
-                        self.enable_change_tracking(session, sink, dry_run)
+                        self.enable_change_tracking(session, self.sink, dry_run)
                     # execute addSCD2ColumnsSqls
                     self.execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                     # update schema
@@ -756,14 +756,14 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
                     self.execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
                     # enable change tracking
                     if snowflake:
-                        self.enable_change_tracking(session, sink, dry_run)
+                        self.enable_change_tracking(session, self.sink, dry_run)
                 # execute dropFirstStep
                 self.execute_sql(session, self.statements.get('dropFirstStep', None), "Drop first step", dry_run)
             else:
                 raise ValueError(f"Invalid number of steps: {nbSteps}")
 
             # execute schema postsql
-            self.execute_sqls(session, context_schema.get('postsql', []), "Post sqls", dry_run)
+            self.execute_sqls(session, self.context_schema.get('postsql', []), "Post sqls", dry_run)
 
             # run expectations
             self.run_expectations(session, jobid, dry_run)
@@ -781,7 +781,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         except Exception as e:
             # ROLLBACK transaction
             error_message = str(e)
-            print(f"Error executing load for {sink}: {error_message}")
+            print(f"Error executing load for {self.sink}: {error_message}")
             self.rollback_transaction(session, dry_run)
             end = datetime.now()
             duration = (end - start).total_seconds()
@@ -791,7 +791,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
 
 class SQLTransformTask(SQLTask):
     
-    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list, options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs):
         """Initialize the SQL transform task.
         Args:
             sink (str): The sink.
@@ -879,7 +879,7 @@ class SQLTransformTask(SQLTask):
                 self.execute_sqls(session, self.statements.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
                 # enable change tracking
                 if snowflake:
-                    self.enable_change_tracking(session, sink, dry_run)
+                    self.enable_change_tracking(session, self.sink, dry_run)
 
             # execute postSqls
             self.execute_sqls(session, self.statements.get('postSqls', []) , "Post sqls", dry_run)
@@ -912,7 +912,7 @@ class SQLTaskFactory:
         ...
 
     @classmethod
-    def task(cls, caller_globals: dict = dict(), arguments: list, options: dict, **kwargs) -> SQLTask:
+    def task(cls, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs) -> SQLTask:
         """Create a task.
         Args:
             cls: The task class.
