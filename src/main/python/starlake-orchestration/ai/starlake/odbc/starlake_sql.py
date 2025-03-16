@@ -15,6 +15,7 @@ from enum import Enum
 class TaskType(str, Enum):
     LOAD = "load"
     TRANSFORM = "transform"
+    EMPTY = "empty"
 
     def __str__(self):
         return self.value
@@ -399,6 +400,31 @@ class SQLTask(ABC, StarlakeOptions):
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
         ...
+
+class SQLEmptyTask(SQLTask):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs):
+        """Initialize the SQL empty task.
+        Args:
+            sink (str): The sink.
+            caller_globals (dict, optional): The caller globals. Defaults to dict().
+            arguments (list, optional): The arguments of the task. Defaults to [].
+            options (dict, optional): The options. Defaults to dict().
+        """
+        super().__init__(sink, caller_globals, arguments, options, **kwargs)
+
+    @property
+    def task_type(self) -> TaskType:
+        return TaskType.EMPTY
+
+    def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
+        """Execute the empty task.
+        Args:
+            session (Session): The Starlake session.
+            jobid (Optional[str], optional): The optional job id. Defaults to None.
+            config (dict, optional): The config. Defaults to dict().
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        """
+        self.execute_sql(session, f"SELECT '{sink}'", "Execute empty task:", dry_run)
 
 class SQLLoadTask(SQLTask, StarlakeOptions):
 
@@ -881,7 +907,11 @@ class SQLTransformTask(SQLTask):
 
 class SQLTaskFactory:
 
-    @staticmethod
+    def __init__(self):
+        """Initialize the SQL task factory."""
+        ...
+
+    @classmethod
     def task(cls, caller_globals: dict = dict(), arguments: list, options: dict, **kwargs) -> SQLTask:
         """Create a task.
         Args:
@@ -898,5 +928,7 @@ class SQLTaskFactory:
             return SQLLoadTask(sink, caller_globals, arguments, options, **kwargs)
         elif command == TaskType.TRANSFORM.value:
             return SQLTransformTask(sink, caller_globals, arguments, options, **kwargs)
+        elif command == TaskType.EMPTY.value:
+            return SQLEmptyTask(sink, caller_globals, arguments, options, **kwargs)
         else:
             raise ValueError(f"Unsupported command: {command}")
