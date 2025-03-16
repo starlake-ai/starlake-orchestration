@@ -19,26 +19,48 @@ class TaskType(str, Enum):
     def __str__(self):
         return self.value
 
-class SQLTask(ABC):
+class SQLTask(ABC, StarlakeOptions):
 
-    def __init__(self, sink: str, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs):
         """Initialize the SQL task.
         Args:
             sink (str): The sink.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
-            options (dict, optional): The options. Defaults to dict().
+            arguments (list, optional): The arguments of the task. Defaults to [].
+            options (dict, optional): The options of the task. Defaults to dict().
         """
-        super().__init__()
+        super().__init__(**kwargs)
         self.sink = sink
         domainAndTable = sink.split('.')
         self.domain = domainAndTable[0]
         self.table = domainAndTable[-1]
+
         self.caller_globals = caller_globals
+
         self.statements: dict = self.caller_globals.get('statements', dict()).get(sink, None)
         self.audit: dict = self.caller_globals.get('audit', dict())
         self.expectations: dict = self.caller_globals.get('expectations', dict())
         self.expectation_items: dict = self.caller_globals.get('expectation_items', dict()).get(sink, None)
-        self.safe_params = defaultdict(lambda: 'NULL', options)
+
+        self.options = options
+        self.sl_env_vars = __class__.get_sl_env_vars(self.options)
+        self.sl_root = __class__.get_sl_root(self.options)
+        self.sl_datasets = __class__.get_sl_datasets(self.options)
+
+        self.arguments = arguments
+        task_options = self.sl_env_vars.copy()
+        for index, arg in enumerate(arguments):
+            if arg == "--options" and arguments.__len__() > index + 1:
+                opts = arguments[index+1]
+                if opts.strip().__len__() > 0:
+                    self.task_options.update({
+                        key: value
+                        for opt in opts.split(",")
+                        if "=" in opt  # Only process valid key=value pairs
+                        for key, value in [opt.split("=")]
+                    })
+                break
+        self.safe_params = defaultdict(lambda: 'NULL', task_options)
 
     @property
     @abstractmethod
@@ -380,21 +402,20 @@ class SQLTask(ABC):
 
 class SQLLoadTask(SQLTask, StarlakeOptions):
 
-    def __init__(self, sink: str, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list, options: dict = dict(), **kwargs):
         """Initialize the SQL load task.
         Args:
             sink (str): The sink.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
+            arguments (list, optional): The arguments of the task. Defaults to [].
             options (dict, optional): The options. Defaults to dict().
         """
-        super().__init__(sink, caller_globals, options, **kwargs)
+        super().__init__(sink, caller_globals, arguments, options, **kwargs)
         json_context = self.caller_globals.get('json_context', '{}')
         import json
         context = json.loads(json_context).get(sink, None)
         if not context:
             raise ValueError("load context not found")
-
-        self.options = options
 
         try:
             self._sl_incoming_file_stage = kwargs.get('sl_incoming_file_stage', __class__.get_context_var(var_name='sl_incoming_file_stage', options=self.options))
@@ -742,19 +763,17 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             self.log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run)
             raise e
 
-
 class SQLTransformTask(SQLTask):
     
-    def __init__(self, sink: str, caller_globals: dict = dict(), options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list, options: dict = dict(), **kwargs):
         """Initialize the SQL transform task.
         Args:
             sink (str): The sink.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
+            arguments (list, optional): The arguments of the task. Defaults to [].
             options (dict, optional): The options. Defaults to dict().
         """
-        super().__init__(sink, caller_globals, options, **kwargs)
-        self.cron_expr = kwargs.get('cron_expr', None)
-        self.format = '%Y-%m-%d %H:%M:%S%z'
+        super().__init__(sink, caller_globals, arguments, options, **kwargs)
 
     @property
     def task_type(self) -> TaskType:
@@ -774,7 +793,9 @@ class SQLTransformTask(SQLTask):
         if not jobid:
             jobid = self.sink
 
-        if self.cron_expr:
+        cron_expr = config.get('cron_expr', None)
+
+        if cron_expr:
             from croniter import croniter
             from croniter.croniter import CroniterBadCronError
             original_schedule = config.get('logical_date', None)
@@ -797,7 +818,8 @@ class SQLTransformTask(SQLTask):
                 else:
                     sl_end_date = previous
                 sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
-                self.safe_params.update({'sl_start_date': sl_start_date.strftime(self.format), 'sl_end_date': sl_end_date.strftime(self.format)})
+                format = '%Y-%m-%d %H:%M:%S%z'
+                self.safe_params.update({'sl_start_date': sl_start_date.strftime(format), 'sl_end_date': sl_end_date.strftime(format)})
             except CroniterBadCronError:
                 raise ValueError(f"Invalid cron expression: {self.cron_expr}")
 
@@ -872,21 +894,9 @@ class SQLTaskFactory:
         if not sink:
             raise ValueError("Sink not found")
         command = arguments[0].lower()
-        from collections import defaultdict
-        for index, arg in enumerate(arguments):
-            if arg == "--options" and arguments.__len__() > index + 1:
-                opts = arguments[index+1]
-                if opts.strip().__len__() > 0:
-                    options.update({
-                        key: value
-                        for opt in opts.split(",")
-                        if "=" in opt  # Only process valid key=value pairs
-                        for key, value in [opt.split("=")]
-                    })
-                break
         if command == TaskType.LOAD.value:
-            return SQLLoadTask(sink, caller_globals, options, **kwargs)
+            return SQLLoadTask(sink, caller_globals, arguments, options, **kwargs)
         elif command == TaskType.TRANSFORM.value:
-            return SQLTransformTask(sink, caller_globals, options, **kwargs)
+            return SQLTransformTask(sink, caller_globals, arguments, options, **kwargs)
         else:
             raise ValueError(f"Unsupported command: {command}")
