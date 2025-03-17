@@ -23,6 +23,10 @@ class Connection(ABC):
         self._host = host
         self._port = port
 
+    @property
+    def database(self) -> Optional[str]:
+        return self._database
+
     @abstractmethod
     def cursor(self) -> Cursor: ...
 
@@ -60,6 +64,12 @@ class Session(Connection):
     def conn(self) -> Connection: ...
 
     def sql(self, stmt: str) -> List[Any]:
+        if stmt.strip().upper().startswith("USE SCHEMA ") and self.provider() != SessionProvider.SNOWFLAKE:
+            schema = stmt.strip().split()[-1]
+            if self.provider() in [SessionProvider.REDSHIFT, SessionProvider.POSTGRES]:
+                stmt = f"SET search_path TO {schema}"
+            else:
+                stmt = f"USE `{self.database}.{schema}`"
         cur = self.conn.cursor()
         cur.execute(stmt)
         if (stmt.lower().startswith("select")) or (stmt.lower().startswith("with")):
