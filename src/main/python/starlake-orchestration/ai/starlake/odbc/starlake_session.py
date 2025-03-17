@@ -59,7 +59,7 @@ class Session(Connection):
     @abstractmethod
     def conn(self) -> Connection: ...
 
-    def sql(self, stmt: str) -> List[Tuple]:
+    def sql(self, stmt: str) -> List[Any]:
         cur = self.conn.cursor()
         cur.execute(stmt)
         if (stmt.lower().startswith("select")) or (stmt.lower().startswith("with")):
@@ -201,7 +201,7 @@ class SnowflakeSession(Session):
             "warehouse": kwargs.get('SNOWFLAKE_WAREHOUSE', env.get('SNOWFLAKE_WAREHOUSE', None)),
             "role": kwargs.get('SNOWFLAKE_ROLE', env.get('SNOWFLAKE_ROLE', None)),
         }
-        super().__init__(database=options.get('database', None), user=options.get('user', None), password=options.get('password', None), host=options.get('host', '127.0.0.1'), port=options.get('port', 8080), **kwargs)
+        super().__init__(database=options.get('database', None), user=options.get('user', None), password=options.get('password', None), host=options.get('host', None), port=options.get('port', 443), **kwargs)
         self._account = options.get('account', None)
         self._warehouse = options.get('warehouse', None)
         self._role = options.get('role', None)
@@ -209,6 +209,7 @@ class SnowflakeSession(Session):
     def provider(self) -> SessionProvider:
         return SessionProvider.SNOWFLAKE
 
+    @property
     def conn(self) -> Connection:
         if not self._conn:
             import snowflake.connector.connection
@@ -222,7 +223,7 @@ class SnowflakeSession(Session):
                 raise ValueError("Account is required")
             if not self._warehouse:
                 raise ValueError("Warehouse is required")
-            self._conn = snowflake.connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port, account=self._account, warehouse=self._warehouse, role=self._role)
+            self._conn = snowflake.connector.connect(database=self._database, user=self._user, host=self._host or f'{self._account}.snowflakecomputing.com', password=self._password, port=self._port or 443, account=self._account, warehouse=self._warehouse, role=self._role)
         return self._conn
 
 class SessionFactory:
@@ -230,7 +231,7 @@ class SessionFactory:
         super().__init__(**kwargs)
 
     @classmethod
-    def session(cls, provider: SessionProvider, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs) -> Session: 
+    def session(cls, provider: SessionProvider = SessionProvider.DUCKDB, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs) -> Session: 
         """
         Create a new session based on the provider
         Args:

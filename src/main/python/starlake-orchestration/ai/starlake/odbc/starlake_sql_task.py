@@ -328,12 +328,12 @@ class SQLTask(ABC, StarlakeOptions):
                 #  log expectations as audit in expectation table here
                 if count != 0:
                     raise Exception(f'Expectation failed for {self.sink}: {query}. Expected count to be equal to 0 but got {count}')
-                self.log_expectation(session, True, name, params, query, count, "", datetime.now(), jobid, dry_run)
+                self.log_expectation(session=session, domain=self.domain, table=self.table,success=True, name=name, params=params, sql=query, count=count, exception="", ts=datetime.now(), jobid=jobid, dry_run=dry_run)
             else:
                 raise Exception(f'Expectation failed for {self.sink}: {name}. Query not found')
         except Exception as e:
             print(f"Error running expectation {name}: {str(e)}")
-            self.log_expectation(session, False, name, params, query, count, str(e), datetime.now(), jobid, dry_run)
+            self.log_expectation(session=session, domain=self.domain, table=self.table,success=False, name=name, params=params, sql=query, count=count, exception=str(e), ts=datetime.now(), jobid=jobid, dry_run=dry_run)
             if failOnError and not dry_run:
                 raise e
 
@@ -776,7 +776,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = self.get_audit_info(copy_results)
             message = first_error_line + '\n' + first_error_column_name
             success = errors_seen == 0
-            self.log_audit(session, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run)
+            self.log_audit(session=session, domain=self.domain, table=self.table, paths=files, count=rows_parsed, countAccepted=rows_loaded, countRejected=errors_seen, success=success, duration=duration, message=message, ts=end, jobid=jobid, step="LOAD", dry_run=dry_run)
             
         except Exception as e:
             # ROLLBACK transaction
@@ -786,7 +786,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             end = datetime.now()
             duration = (end - start).total_seconds()
             print(f"Duration in seconds: {duration}")
-            self.log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run)
+            self.log_audit(session=session, domain=self.domain, table=self.table, paths=None, count=-1, countAccepted=-1, countRejected=-1, success=False, duration=duration, message=error_message, ts=end, jobid=jobid, step="LOAD", dry_run=dry_run)
             raise e
 
 class SQLTransformTask(SQLTask):
@@ -892,7 +892,7 @@ class SQLTransformTask(SQLTask):
             end = datetime.now()
             duration = (end - start).total_seconds()
             print(f"#Duration in seconds: {duration}")
-            self.log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run)
+            self.log_audit(session=session, domain=self.domain, table=self.table, paths=None, count=-1, countAccepted=-1, countRejected=-1, success=True, duration=duration, message='Success', ts=end, jobid=jobid, step="TRANSFORM", dry_run=dry_run)
             
         except Exception as e:
             # ROLLBACK transaction
@@ -902,7 +902,7 @@ class SQLTransformTask(SQLTask):
             end = datetime.now()
             duration = (end - start).total_seconds()
             print(f"Duration in seconds: {duration}")
-            self.log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run)
+            self.log_audit(session=session, domain=self.domain, table=self.table, paths=None, count=-1, countAccepted=-1, countRejected=-1, success=False, duration=duration, message=error_message, ts=end, jobid=jobid, step="TRANSFORM", dry_run=dry_run)
             raise e
 
 class SQLTaskFactory:
@@ -923,6 +923,7 @@ class SQLTaskFactory:
         sink = kwargs.get('sink', None)
         if not sink:
             raise ValueError("Sink not found")
+        kwargs.pop('sink', None)
         command = arguments[0].lower()
         if command == TaskType.LOAD.value:
             return SQLLoadTask(sink, caller_globals, arguments, options, **kwargs)
