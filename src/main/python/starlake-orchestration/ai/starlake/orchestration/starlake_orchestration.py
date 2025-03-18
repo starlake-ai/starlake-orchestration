@@ -818,11 +818,11 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         """
         from datetime import datetime
         cron = self.cron
-        if not cron:
+        if not cron or cron.strip().lower() == 'none':
             raise ValueError("The pipeline must have a cron expression to backfill")
-        if not start_date:
+        if not start_date or start_date.strip().lower() == 'none':
             raise ValueError("The pipeline must have a start date to backfill")
-        if not end_date:
+        if not end_date or end_date.strip().lower() == 'none':
             end_date = datetime.fromtimestamp(datetime.now().timestamp()).isoformat()
         from croniter import croniter
         start_time = datetime.fromisoformat(start_date)
