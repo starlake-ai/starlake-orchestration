@@ -147,7 +147,8 @@ class SQLTask(ABC, StarlakeOptions):
             Returns:
             bool: True if the table exists, False otherwise.
         """
-        query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{domain}.{table}'"
+        dataset = (domain + '.') if session.provider() == SessionProvider.BIGQUERY else ''
+        query=f"SELECT * FROM `{dataset}INFORMATION_SCHEMA.TABLES` WHERE LOWER(CONCAT(TABLE_SCHEMA, '.', TABLE_NAME)) LIKE '{domain}.{table}'"
         return self.execute_sql(session, query, f"Check if table {domain}.{table} exists:", False).__len__() > 0
 
     def check_if_audit_table_exists(self, session: Session, dry_run: bool = False) -> bool:
@@ -587,7 +588,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
 
         return True
 
-    def build_copy_csv(self) -> str:
+    def build_copy_csv(self, provider: SessionProvider) -> str:
         skipCount = self.get_option('SKIP_HEADER', None)
 
         if not skipCount and self.is_true(self.metadata.get('withHeader', 'false'), False):
@@ -626,7 +627,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         '''
         return sql
 
-    def build_copy_json(self) -> str:
+    def build_copy_json(self, provider: SessionProvider) -> str:
         strip_outer_array = self.get_option("STRIP_OUTER_ARRAY", 'array')
         common_options = [
             'STRIP_OUTER_ARRAY', 
@@ -648,7 +649,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         '''
         return sql
         
-    def build_copy_other(self, format: str) -> str:
+    def build_copy_other(self, format: str, provider: SessionProvider) -> str:
         common_options = [
             'NULL_IF'
         ]
@@ -667,15 +668,15 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         '''
         return sql
 
-    def build_copy(self) -> str:
+    def build_copy(self, provider: SessionProvider) -> str:
         if self.format == 'DSV':
-            return self.build_copy_csv()
+            return self.build_copy_csv(provider=provider)
         elif self.format == 'JSON':
-            return self.build_copy_json()
+            return self.build_copy_json(provider=provider)
         elif self.format == 'PARQUET':
-            return self.build_copy_other()
+            return self.build_copy_other(provider=provider)
         elif self.format == 'XML':
-            return self.build_copy_other()
+            return self.build_copy_other(provider=provider)
         else:
             raise ValueError(f"Unsupported format {format}")
 
@@ -722,7 +723,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
                 if snowflake:
                     self.execute_sql(session, f"CREATE STAGE IF NOT EXISTS {self.temp_stage}", "Create stage", dry_run)
                 # copy data
-                copy_results = self.execute_sql(session, self.build_copy(), "Copy data", dry_run)
+                copy_results = self.execute_sql(session, self.build_copy(provider=session.provider()), "Copy data", dry_run)
                 if not exists and snowflake:
                     # enable change tracking
                     self.enable_change_tracking(session, self.sink, dry_run)
@@ -735,7 +736,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
                 # create stage if not exists
                 self.execute_sql(session, f"CREATE STAGE IF NOT EXISTS {self.temp_stage}", "Create stage", dry_run)
                 # copy data
-                copy_results = self.execute_sql(session, self.build_copy(), "Copy data", dry_run)
+                copy_results = self.execute_sql(session, self.build_copy(provider=session.provider()), "Copy data", dry_run)
                 second_step: dict = self.statements.get('secondStep', dict())
                 # execute preActions
                 self.execute_sqls(session, second_step.get('preActions', []), "Pre actions", dry_run)
