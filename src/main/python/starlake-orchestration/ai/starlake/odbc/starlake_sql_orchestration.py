@@ -11,7 +11,7 @@ from ai.starlake.odbc import Session, SessionFactory, SessionProvider, SQLTask, 
 
 from ai.starlake.odbc.starlake_sql_job import StarlakeSQLJob
 
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, List, Optional, Set, Union
 
 from types import ModuleType
 
@@ -86,8 +86,6 @@ class SQLDag(ABC):
         self.computed_cron = computed_cron
         self.changes = changes
         self.condition = condition
-        self.tasks = []
-
 
 class SQLPipeline(AbstractPipeline[SQLDag, SQLTask, List[SQLTask], StarlakeDataset], StarlakeDataset):
     def __init__(self, job: StarlakeSQLJob, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[SQLDag, SQLTask, List[SQLTask], StarlakeDataset]] = None, **kwargs) -> None:
@@ -114,62 +112,6 @@ class SQLPipeline(AbstractPipeline[SQLDag, SQLTask, List[SQLTask], StarlakeDatas
             # task_auto_retry_attempts=job.retries,            
         )
 
-    def __exit__(self, exc_type, exc_value, traceback):
-
-        # walk throw the dag to add sql dependencies
-        
-
-        def get_node(dependency: AbstractDependency) -> Union[SQLTask, SQLTaskGroup, None]:
-            if isinstance(dependency, SQLTaskGroup):
-                return dependency
-            elif isinstance(dependency, AbstractTask):
-                return dependency.task
-            return None
-
-        def update_group_dependencies(group: AbstractTaskGroup):
-            def update_dependencies(upstream_dependencies, root_key):
-                root = group.get_dependency(root_key)
-                temp_root_node = get_node(root)
-                if isinstance(temp_root_node, SQLTaskGroup):
-                    leaves = temp_root_node.group_leaves
-                    if leaves.__len__() >= 1:
-                        root_node = leaves[-1] # we may improve this
-                    else:
-                        root_node = None
-                else:
-                    root_node = temp_root_node
-                if isinstance(root, AbstractTaskGroup) and root_key != group.group_id:
-                    update_group_dependencies(root)
-                if root_key in upstream_dependencies:
-                    for key in upstream_dependencies[root_key]:
-                        downstream = group.get_dependency(key)
-                        temp_downstream_node = get_node(downstream)
-                        if isinstance(downstream, AbstractTaskGroup) and key != group.group_id:
-                            update_group_dependencies(downstream)
-                        if root_node is not None:
-                            if isinstance(temp_downstream_node, SQLTaskGroup):
-                                self.dag.tasks.extend(temp_downstream_node.group_roots)
-                                #root_node.add_successors(temp_downstream_node.group_roots)
-                            elif temp_downstream_node is not None:
-                                self.dag.tasks.append(temp_downstream_node)
-                                #root_node.add_successors(temp_downstream_node)
-                        update_dependencies(upstream_dependencies, key)
-
-            upstream_dependencies = group.upstream_dependencies
-            upstream_keys = upstream_dependencies.keys()
-            downstream_keys = group.downstream_dependencies.keys()
-            root_keys = upstream_keys - downstream_keys
-
-            if not root_keys and len(upstream_keys) == 0 and len(downstream_keys) == 0:
-                root_keys = group.dependencies_dict.keys()
-
-            for root_key in root_keys:
-                update_dependencies(upstream_dependencies, root_key)
-
-        update_group_dependencies(self)
-
-        return super().__exit__(exc_type, exc_value, traceback)
-
     def run(self, logical_date: Optional[str] = None, timeout: str = '120', mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN, **kwargs) -> None:
         """Run the pipeline.
         Args:
@@ -194,12 +136,12 @@ class SQLPipeline(AbstractPipeline[SQLDag, SQLTask, List[SQLTask], StarlakeDatas
             config.update({"cron_expr": cron_expr})
 
         if mode == StarlakeExecutionMode.DRY_RUN:
-            for task in self.dag.tasks:
+            for task in self.tasks:
                 if isinstance(task, SQLTask):
                     task.execute(session, self.pipeline_id, config, True)
 
         elif mode == StarlakeExecutionMode.RUN:
-            for task in self.dag.tasks:
+            for task in self.tasks:
                 if isinstance(task, SQLTask):
                     task.execute(session, self.pipeline_id, config, False)
 
@@ -216,21 +158,21 @@ class SQLTaskGroup(AbstractTaskGroup[List[SQLTask]]):
     def __init__(self, group_id: str, group: List[SQLTask], dag: Optional[SQLDag] = None, **kwargs) -> None:
         super().__init__(group_id=group_id, orchestration_cls=SQLOrchestration, group=group, **kwargs)
         self.dag = dag
-        self._group_as_map = dict()
+        self.__group_as_map = dict()
 
     def __exit__(self, exc_type, exc_value, traceback):
         for dep in self.dependencies:
             if isinstance(dep, SQLTaskGroup):
-                self._group_as_map.update({dep.id: dep})
+                self.__group_as_map.update({dep.id: dep})
             elif isinstance(dep, AbstractTask):
-                self._group_as_map.update({dep.id: dep.task})
+                self.__group_as_map.update({dep.id: dep.task})
         return super().__exit__(exc_type, exc_value, traceback)
 
     @property
     def group_leaves(self) -> List[SQLTask]:
         leaves = []
         for leaf in self.leaves_keys:
-            dep = self._group_as_map.get(leaf, None)
+            dep = self.__group_as_map.get(leaf, None)
             if dep:
                 if isinstance(dep, SQLTaskGroup):
                     leaves.extend(dep.group_leaves)
@@ -242,7 +184,7 @@ class SQLTaskGroup(AbstractTaskGroup[List[SQLTask]]):
     def group_roots(self) -> List[SQLTask]:
         roots = []
         for root in self.roots_keys:
-            dep = self._group_as_map.get(root, None)
+            dep = self.__group_as_map.get(root, None)
             if dep:
                 if isinstance(dep, SQLTaskGroup):
                     roots.extend(dep.group_roots)

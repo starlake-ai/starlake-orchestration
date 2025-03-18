@@ -109,9 +109,18 @@ class SQLTask(ABC, StarlakeOptions):
             List[Any]: The rows.
         """
         if sql:
-            if dry_run and message:
-                print(f"# {message}")
             stmt: str = self.bindParams(sql)
+            check_stmt = stmt.strip().upper()
+            if check_stmt.startswith("USE SCHEMA ") and session.provider() != SessionProvider.SNOWFLAKE:
+                schema = stmt.strip().split()[-1]
+                if session.provider() in [SessionProvider.REDSHIFT, SessionProvider.POSTGRES]:
+                    stmt = f"SET search_path TO {schema}"
+                else:
+                    stmt = f"USE `{session.database}.{schema}`"
+            elif session.provider() == SessionProvider.BIGQUERY and (check_stmt.startswith("BEGIN") or check_stmt.startswith("COMMIT") or check_stmt.startswith("ROLLBACK")):
+                stmt = f"# {stmt} not supported with BigQuery provider"
+            elif dry_run and message:
+                print(f"# {message}")
             if dry_run:
                 print(f"{stmt};")
                 return []
