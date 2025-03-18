@@ -53,6 +53,16 @@ class SessionProvider(str, Enum):
 
 class Session(Connection):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        """
+        Create a new session
+        Args:
+            database (Optional[str]): The database name
+            user (Optional[str]): The user name
+            password (Optional[str]): The password
+            host (Optional[str]): The host
+            port (Optional[int]): The port
+            kwargs: Additional keyword arguments
+        """
         super().__init__(database=database, user=user, password=password, host=host, port=port, **kwargs)
         self._conn: Connection = None
 
@@ -61,9 +71,22 @@ class Session(Connection):
 
     @property
     @abstractmethod
-    def conn(self) -> Connection: ...
+    def conn(self) -> Connection: 
+        """
+        Get the connection
+        Returns:
+            Connection: The connection
+        """
+        ...
 
     def sql(self, stmt: str) -> List[Any]:
+        """
+        Execute the SQL statement
+        Args:
+            stmt (str): The SQL statement
+        Returns:
+            List[Any]: The result
+        """
         if stmt.strip().upper().startswith("USE SCHEMA ") and self.provider() != SessionProvider.SNOWFLAKE:
             schema = stmt.strip().split()[-1]
             if self.provider() in [SessionProvider.REDSHIFT, SessionProvider.POSTGRES]:
@@ -79,16 +102,30 @@ class Session(Connection):
         cur.close()
         return result
 
-    def cursor(self):
+    def cursor(self) -> Cursor:
+        """
+        Get a new cursor
+        Returns:
+            Cursor: The cursor
+        """
         return self.conn.cursor()
 
     def commit(self) -> None:
+        """
+        Commit the transaction
+        """
         self.conn.commit()
 
     def rollback(self) -> None:
+        """
+        Rollback the transaction
+        """
         self.conn.rollback()
 
     def close(self) -> None:
+        """
+        Close the connection
+        """
         self.conn.close()
         self._conn = None
 
@@ -96,6 +133,16 @@ import os
 
 class DuckDBSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        """
+        Create a new DuckDB session
+        Args:
+            database (Optional[str]): The database name
+            user (Optional[str]): The user name
+            password (Optional[str]): The password
+            host (Optional[str]): The host
+            port (Optional[int]): The port
+            kwargs: Additional keyword arguments
+        """
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('DUCKDB_DB', env.get('DUCKDB_DB', None)),
@@ -107,6 +154,11 @@ class DuckDBSession(Session):
     
     @property
     def conn(self) -> Connection:
+        """
+        Get the connection
+        Returns:
+            Connection: The connection
+        """
         if not self._conn:
             if not self._database:
                 raise ValueError("Database name is required")
@@ -116,6 +168,16 @@ class DuckDBSession(Session):
 
 class PostgresSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        """
+        Create a new Postgres session
+        Args:
+            database (Optional[str]): The database name
+            user (Optional[str]): The user name
+            password (Optional[str]): The password
+            host (Optional[str]): The host
+            port (Optional[int]): The port
+            kwargs: Additional keyword arguments
+        """
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('POSTGRES_DB', env.get('POSTGRES_DB', None)),
@@ -131,6 +193,11 @@ class PostgresSession(Session):
 
     @property
     def conn(self) -> Connection:
+        """
+        Get the connection
+        Returns:
+            Connection: The connection
+        """
         if not self._conn:
             import psycopg2
             if not self._database:
@@ -144,6 +211,16 @@ class PostgresSession(Session):
 
 class MySQLSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        """
+        Create a new MySQL session
+        Args:
+            database (Optional[str]): The database name
+            user (Optional[str]): The user name
+            password (Optional[str]): The password
+            host (Optional[str]): The host
+            port (Optional[int]): The port
+            kwargs: Additional keyword arguments
+        """
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('MYSQL_DB', env.get('MYSQL_DB', None)),
@@ -159,6 +236,11 @@ class MySQLSession(Session):
 
     @property
     def conn(self) -> Connection:
+        """
+        Get the connection
+        Returns:
+            Connection: The connection
+        """
         if not self._conn:
             import mysql.connector
             if not self._database:
@@ -172,6 +254,16 @@ class MySQLSession(Session):
 
 class RedshiftSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        """
+        Create a new Redshift session
+        Args:
+            database (Optional[str]): The database name
+            user (Optional[str]): The user name
+            password (Optional[str]): The password
+            host (Optional[str]): The host
+            port (Optional[int]): The port
+            kwargs: Additional keyword arguments
+        """
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('REDSHIFT_DB', env.get('REDSHIFT_DB', None)),
@@ -187,6 +279,11 @@ class RedshiftSession(Session):
     
     @property
     def conn(self) -> Connection:
+        """
+        Get the connection
+        Returns:
+            Connection: The connection
+        """
         if not self._conn:
             import redshift_connector
             if not self._database:
@@ -200,6 +297,16 @@ class RedshiftSession(Session):
 
 class SnowflakeSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+        """
+        Create a new Snowflake session
+        Args:
+            database (Optional[str]): The database name
+            user (Optional[str]): The user name
+            password (Optional[str]): The password
+            host (Optional[str]): The host
+            port (Optional[int]): The port
+            kwargs: Additional keyword arguments
+        """
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None)),
@@ -221,6 +328,11 @@ class SnowflakeSession(Session):
 
     @property
     def conn(self) -> Connection:
+        """
+        Get the connection
+        Returns:
+            Connection: The connection
+        """
         if not self._conn:
             import snowflake.connector.connection
             if not self._database:
