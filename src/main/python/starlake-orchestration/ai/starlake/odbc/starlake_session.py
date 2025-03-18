@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 class Cursor(ABC):
 
@@ -15,17 +15,6 @@ class Cursor(ABC):
     def close(self) -> None: ...
 
 class Connection(ABC):
-    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
-        super().__init__()
-        self._database = database
-        self._user = user
-        self._password = password
-        self._host = host
-        self._port = port
-
-    @property
-    def database(self) -> Optional[str]:
-        return self._database
 
     @abstractmethod
     def cursor(self) -> Cursor: ...
@@ -47,11 +36,12 @@ class SessionProvider(str, Enum):
     MYSQL = "mysql"
     REDSHIFT = "redshift"
     SNOWFLAKE = "snowflake"
+    BIGQUERY = "bigquery"
 
     def __str__(self):
         return self.value
 
-class Session(Connection):
+class Session(ABC):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
         """
         Create a new session
@@ -63,21 +53,39 @@ class Session(Connection):
             port (Optional[int]): The port
             kwargs: Additional keyword arguments
         """
-        super().__init__(database=database, user=user, password=password, host=host, port=port, **kwargs)
-        self._conn: Connection = None
+        self._database = database
+        self._user = user
+        self._password = password
+        self._host = host
+        self._port = port
+        self._conn: Optional[Connection] = None
+
+    @property
+    def database(self) -> Optional[str]:
+        return self._database
 
     @abstractmethod
     def provider(self) -> SessionProvider: ...
 
-    @property
     @abstractmethod
-    def conn(self) -> Connection: 
+    def _new_connection(self) -> Connection: 
         """
-        Get the connection
+        Create a new connection
         Returns:
             Connection: The connection
         """
         ...
+
+    @property
+    def conn(self) -> Connection: 
+        """
+        Get the current connection, if not available create a new one
+        Returns:
+            Connection: The current connection or a new one if not available
+        """
+        if not self._conn:
+            self._conn = self._new_connection()
+        return self._conn
 
     def sql(self, stmt: str) -> List[Any]:
         """
@@ -102,45 +110,36 @@ class Session(Connection):
         cur.close()
         return result
 
-    def cursor(self) -> Cursor:
-        """
-        Get a new cursor
-        Returns:
-            Cursor: The cursor
-        """
-        return self.conn.cursor()
-
     def commit(self) -> None:
         """
         Commit the transaction
         """
-        self.conn.commit()
+        if self._conn:
+            self.conn.commit()
 
     def rollback(self) -> None:
         """
         Rollback the transaction
         """
-        self.conn.rollback()
+        if self._conn:
+            self.conn.rollback()
 
     def close(self) -> None:
         """
         Close the connection
         """
-        self.conn.close()
+        if self._conn:
+            self.conn.close()
         self._conn = None
 
 import os
 
 class DuckDBSession(Session):
-    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+    def __init__(self, database: Optional[str] = None, **kwargs):
         """
         Create a new DuckDB session
         Args:
             database (Optional[str]): The database name
-            user (Optional[str]): The user name
-            password (Optional[str]): The password
-            host (Optional[str]): The host
-            port (Optional[int]): The port
             kwargs: Additional keyword arguments
         """
         env = os.environ.copy() # Copy the current environment variables
@@ -152,19 +151,16 @@ class DuckDBSession(Session):
     def provider(self) -> SessionProvider:
         return SessionProvider.DUCKDB
     
-    @property
-    def conn(self) -> Connection:
+    def _new_connection(self) -> Connection:
         """
-        Get the connection
+        Creates a new connection
         Returns:
-            Connection: The connection
+            Connection: The new connection
         """
-        if not self._conn:
-            if not self._database:
-                raise ValueError("Database name is required")
-            import duckdb
-            self._conn = duckdb.connect(database=self._database)
-        return self._conn
+        if not self._database:
+            raise ValueError("Database name is required")
+        import duckdb
+        return duckdb.connect(database=self._database)
 
 class PostgresSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -191,23 +187,20 @@ class PostgresSession(Session):
     def provider(self) -> SessionProvider:
         return SessionProvider.POSTGRES
 
-    @property
-    def conn(self) -> Connection:
+    def _new_connection(self) -> Connection:
         """
-        Get the connection
+        Creates a new connection
         Returns:
-            Connection: The connection
+            Connection: The new connection
         """
-        if not self._conn:
-            import psycopg2
-            if not self._database:
-                raise ValueError("Database name is required")
-            if not self._user:
-                raise ValueError("User name is required")
-            if not self._password:
-                raise ValueError("Password is required")
-            self._conn = psycopg2.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 5432)
-        return self._conn
+        import psycopg2
+        if not self._database:
+            raise ValueError("Database name is required")
+        if not self._user:
+            raise ValueError("User name is required")
+        if not self._password:
+            raise ValueError("Password is required")
+        return psycopg2.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 5432)
 
 class MySQLSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -234,23 +227,20 @@ class MySQLSession(Session):
     def provider(self) -> SessionProvider:
         return SessionProvider.MYSQL
 
-    @property
-    def conn(self) -> Connection:
+    def _new_connection(self) -> Connection:
         """
-        Get the connection
+        Creates a new connection
         Returns:
-            Connection: The connection
+            Connection: The new connection
         """
-        if not self._conn:
-            import mysql.connector
-            if not self._database:
-                raise ValueError("Database name is required")
-            if not self._user:
-                raise ValueError("User name is required")
-            if not self._password:
-                raise ValueError("Password is required")
-            self._conn = mysql.connector.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 3306)
-        return self._conn
+        import mysql.connector
+        if not self._database:
+            raise ValueError("Database name is required")
+        if not self._user:
+            raise ValueError("User name is required")
+        if not self._password:
+            raise ValueError("Password is required")
+        return mysql.connector.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 3306)
 
 class RedshiftSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -277,23 +267,20 @@ class RedshiftSession(Session):
     def provider(self) -> SessionProvider:
         return SessionProvider.REDSHIFT
     
-    @property
-    def conn(self) -> Connection:
+    def _new_connection(self) -> Connection:
         """
-        Get the connection
+        Creates a new connection
         Returns:
-            Connection: The connection
+            Connection: The new connection
         """
-        if not self._conn:
-            import redshift_connector
-            if not self._database:
-                raise ValueError("Database name is required")
-            if not self._user:
-                raise ValueError("User name is required")
-            if not self._password:
-                raise ValueError("Password is required")
-            self._conn = redshift_connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port)
-        return self._conn
+        import redshift_connector
+        if not self._database:
+            raise ValueError("Database name is required")
+        if not self._user:
+            raise ValueError("User name is required")
+        if not self._password:
+            raise ValueError("Password is required")
+        return redshift_connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port)
 
 class SnowflakeSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -326,27 +313,155 @@ class SnowflakeSession(Session):
     def provider(self) -> SessionProvider:
         return SessionProvider.SNOWFLAKE
 
-    @property
-    def conn(self) -> Connection:
+    def _new_connection(self) -> Connection:
         """
-        Get the connection
+        Creates a new connection
         Returns:
-            Connection: The connection
+            Connection: The new connection
         """
-        if not self._conn:
-            import snowflake.connector.connection
-            if not self._database:
-                raise ValueError("Database name is required")
-            if not self._user:
-                raise ValueError("User name is required")
-            if not self._password:
-                raise ValueError("Password is required")
-            if not self._account:
-                raise ValueError("Account is required")
-            if not self._warehouse:
-                raise ValueError("Warehouse is required")
-            self._conn = snowflake.connector.connect(database=self._database, user=self._user, host=self._host or f'{self._account}.snowflakecomputing.com', password=self._password, port=self._port or 443, account=self._account, warehouse=self._warehouse, role=self._role)
-        return self._conn
+        import snowflake.connector.connection
+        if not self._database:
+            raise ValueError("Database name is required")
+        if not self._user:
+            raise ValueError("User name is required")
+        if not self._password:
+            raise ValueError("Password is required")
+        if not self._account:
+            raise ValueError("Account is required")
+        if not self._warehouse:
+            raise ValueError("Warehouse is required")
+        return snowflake.connector.connect(database=self._database, user=self._user, host=self._host or f'{self._account}.snowflakecomputing.com', password=self._password, port=self._port or 443, account=self._account, warehouse=self._warehouse, role=self._role)
+
+from google.cloud import bigquery
+import google.auth.credentials
+import google.api_core.client_info
+import google.api_core.client_options
+
+class BigQueryConnection(bigquery.Client, Connection, Cursor):
+    def __init__(self, 
+                 project: Optional[str] = None, 
+                 credentials: Optional[google.auth.credentials.Credentials] = None, 
+                 location: Optional[str] = None, 
+                 client_info: Optional[google.api_core.client_info.ClientInfo] = None,
+                 client_options: Optional[Union[google.api_core.client_options.ClientOptions, Dict[str, Any]]] = None, 
+                 **kwargs):
+        super().__init__(project=project, credentials=credentials, location=location, client_info=client_info, client_options=client_options, **kwargs)
+
+    @property
+    def session(self) -> BigQuerySession:
+        return self._session 
+
+    def cursor(self) -> Cursor:
+        return self
+
+    def execute(self, stmt: str) -> None:
+        query_job = self.query(stmt)
+        self._iterator = query_job.result()
+
+    def fetchall(self) -> List[Tuple]:
+        if self._iterator:
+            from google.api_core.page_iterator import Page
+            from google.cloud.bigquery.table import Row
+            page: Page = next(self._iterator.pages)
+            rows: List[Row] = list(page)
+            return list(map(lambda row: tuple(row.items()), rows or []))
+        return []
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+class BigQuerySession(Session):
+
+    def __init__(self, database: Optional[str] = None, **kwargs):
+        """
+        Create a new BigQuery session
+        Args:
+            database (Optional[str]): The database name
+            kwargs: Additional keyword arguments
+        """
+        env = os.environ.copy() # Copy the current environment variables
+        scopes = kwargs.get('authScopes', 'https://www.googleapis.com/auth/cloud-platform').split(',')
+        auth_type = kwargs.get('authType', 'APPLICATION_DEFAULT')
+        if auth_type == 'APPLICATION_DEFAULT':
+            import google.auth
+            creds, _ = google.auth.default(scopes)
+        elif auth_type == 'SERVICE_ACCOUNT_JSON_KEYFILE':
+            filename = kwargs.get('jsonKeyfile', env.get('GOOGLE_APPLICATION_CREDENTIALS', None))
+            if not filename:
+                raise ValueError("JSON keyfile is required")
+            from google.oauth2 import service_account
+            creds = service_account.Credentials.from_service_account_file(filename=filename, scopes=scopes)
+        elif auth_type == 'USER_CREDENTIALS':
+            from google.oauth2 import credentials
+            creds = credentials.Credentials(
+                token=kwargs.get(accessToken, env.get('accessToken', None)),
+                refresh_token=kwargs.get('refreshToken', env.get('refreshToken', None)),
+                client_id=kwargs.get('clientId', env.get('clientId', None)),
+                client_secret=kwargs.get('clientSecret', env.get('clientSecret', None)),
+                scopes=scopes,
+            )
+        else:
+            raise ValueError(f"Invalid authType: {auth_type}")
+        project_id = database or kwargs.get('project_id', env.get('GOOGLE_CLOUD_PROJECT', None))
+        super().__init__(database=project_id, **kwargs)
+
+        impersonated_service_account = kwargs.get('impersonatedServiceAccount', None)
+        if impersonated_service_account:
+            import google.auth.impersonated_credentials
+            creds = google.auth.impersonated_credentials.Credentials(
+                source_credentials=creds,
+                target_principal=impersonated_service_account,
+                target_scopes=scopes,
+            )        
+
+        self._creds = creds
+        self._project_id = project_id
+        self._location = kwargs.get('location', env.get('location', None))
+        from google.api_core import client_info
+        self._client_info = client_info.ClientInfo(user_agent="starlake")
+        self._client_options = kwargs.get('client_options', env.get('client_options', None))
+
+    @property
+    def credentials(self) -> Optional[google.auth.credentials.Credentials]:
+        return self._creds
+
+    @property
+    def project_id(self) -> Optional[str]:
+        return self._project_id
+
+    @property
+    def location(self) -> Optional[str]:
+        return self._location
+
+    @property
+    def client_info(self) -> Optional[google.api_core.client_info.ClientInfo]:
+        return self._client_info
+
+    @property
+    def client_options(self) -> Optional[
+            Union[google.api_core.client_options.ClientOptions, Dict[str, Any]]
+        ]:
+        return self._client_options
+
+    def provider(self) -> SessionProvider:
+        return SessionProvider.BIGQUERY
+
+    def _new_connection(self) -> Connection:
+        """
+        Creates a new connection
+        Returns:
+            Connection: The new connection
+        """
+        return BigQueryConnection(
+            project=self.project_id,
+            credentials=self.credentials,
+            location=self.location,
+            client_info=self.client_info,
+            client_options=self.client_options
+        )
 
 class SessionFactory:
     def __init__(self, **kwargs):
@@ -370,7 +485,7 @@ class SessionFactory:
             session = SessionFactory.session(SessionProvider.POSTGRES, database="starlake", user="starlake")
         """
         if provider == SessionProvider.DUCKDB:
-            return DuckDBSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+            return DuckDBSession(database=database, **kwargs)
         elif provider == SessionProvider.POSTGRES:
             return PostgresSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.MYSQL:
@@ -379,6 +494,8 @@ class SessionFactory:
             return RedshiftSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.SNOWFLAKE:
             return SnowflakeSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+        elif provider == SessionProvider.BIGQUERY:
+            return BigQuerySession(database=database, **kwargs)
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
