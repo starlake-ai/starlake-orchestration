@@ -130,4 +130,11 @@ class StarlakeSQLJob(IStarlakeJob[SQLTask, StarlakeDataset], StarlakeOptions, SQ
         Returns:
             SQLTask: The SQL task.
         """
-        return SQLTaskFactory.task(self.caller_globals, arguments, self.options, **kwargs)
+        sink = kwargs.get('sink', None)
+        if not sink and dataset:
+            if isinstance(dataset, str):
+                sink = dataset
+            else:
+                sink = dataset.sink
+        kwargs.pop('sink', None)
+        return SQLTaskFactory.task(caller_globals=self.caller_globals, sink=sink, arguments=arguments, options=self.options, **kwargs)

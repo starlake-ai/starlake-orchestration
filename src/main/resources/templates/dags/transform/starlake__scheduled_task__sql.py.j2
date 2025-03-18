@@ -7,5 +7,5 @@
 #
 {% include 'templates/dags/__starlake_sl_orchestrator.py' %}
 {% include 'templates/dags/__starlake_sql_execution.py' %}
-provider = '''{{ provider }}'''
+provider = '{{ provider }}'
 {% include 'templates/dags/transform/__scheduled_task_tpl.py.j2' %}

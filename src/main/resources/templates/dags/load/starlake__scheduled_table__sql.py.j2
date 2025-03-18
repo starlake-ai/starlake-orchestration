@@ -7,6 +7,6 @@
 #
 {% include 'templates/dags/__starlake_sl_orchestrator.py' %}
 {% include 'templates/dags/__starlake_sql_execution.py' %}
-provider = '''{{ provider }}'''
+provider = '{{ provider }}'
 json_context = '''{{ pyjson }}'''
 {% include 'templates/dags/load/__scheduled_table_tpl.py.j2' %}

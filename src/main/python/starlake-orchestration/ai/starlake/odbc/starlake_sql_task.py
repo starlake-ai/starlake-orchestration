@@ -922,18 +922,17 @@ class SQLTaskFactory:
         ...
 
     @classmethod
-    def task(cls, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs) -> SQLTask:
+    def task(cls, caller_globals: dict = dict(), sink: Optional[str] = None, arguments: list = [], options: dict = dict(), **kwargs) -> SQLTask:
         """Create a task.
         Args:
             cls: The task class.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
+            sink (Optional[str], optional): The sink. Defaults to None.
             arguments (list): The required arguments of the starlake command to run.
             options (dict): The options.
         """
-        sink = kwargs.get('sink', None)
         if not sink:
             raise ValueError("Sink not found")
-        kwargs.pop('sink', None)
         command = arguments[0].lower()
         if command == TaskType.LOAD.value:
             return SQLLoadTask(sink, caller_globals, arguments, options, **kwargs)
