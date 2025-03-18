@@ -347,10 +347,6 @@ class BigQueryConnection(bigquery.Client, Connection, Cursor):
                  **kwargs):
         super().__init__(project=project, credentials=credentials, location=location, client_info=client_info, client_options=client_options, **kwargs)
 
-    @property
-    def session(self) -> BigQuerySession:
-        return self._session 
-
     def cursor(self) -> Cursor:
         return self
 
