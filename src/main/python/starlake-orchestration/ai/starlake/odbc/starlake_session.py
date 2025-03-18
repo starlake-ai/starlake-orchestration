@@ -41,6 +41,8 @@ class SessionProvider(str, Enum):
     def __str__(self):
         return self.value
 
+import inspect
+
 class Session(ABC):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
         """
@@ -53,16 +55,44 @@ class Session(ABC):
             port (Optional[int]): The port
             kwargs: Additional keyword arguments
         """
-        self._database = database
-        self._user = user
-        self._password = password
-        self._host = host
-        self._port = port
-        self._conn: Optional[Connection] = None
+        self.__database = database
+        self.__user = user
+        self.__password = password
+        self.__host = host
+        self.__port = port
+        self.__conn: Optional[Connection] = None
 
     @property
     def database(self) -> Optional[str]:
-        return self._database
+        return self.__database
+
+    @property
+    def user(self) -> Optional[str]:
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__user
+        else:
+            raise AttributeError("User name is not accessible")
+
+    @property
+    def password(self) -> Optional[str]:
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__password
+        else:
+            raise AttributeError("Password is not accessible")
+
+    @property
+    def host(self) -> Optional[str]:
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__host
+        else:
+            raise AttributeError("Host is not accessible")
+
+    @property
+    def port(self) -> Optional[int]:
+        if inspect.stack()[1].function == '_new_connection':            
+            return self.__port
+        else:
+            raise AttributeError("Port is not accessible")
 
     @abstractmethod
     def provider(self) -> SessionProvider: ...
@@ -83,9 +113,9 @@ class Session(ABC):
         Returns:
             Connection: The current connection or a new one if not available
         """
-        if not self._conn:
-            self._conn = self._new_connection()
-        return self._conn
+        if not self.__conn:
+            self.__conn = self._new_connection()
+        return self.__conn
 
     def sql(self, stmt: str) -> List[Any]:
         """
@@ -114,23 +144,23 @@ class Session(ABC):
         """
         Commit the transaction
         """
-        if self._conn:
+        if self.__conn:
             self.conn.commit()
 
     def rollback(self) -> None:
         """
         Rollback the transaction
         """
-        if self._conn:
+        if self.__conn:
             self.conn.rollback()
 
     def close(self) -> None:
         """
         Close the connection
         """
-        if self._conn:
+        if self.__conn:
             self.conn.close()
-        self._conn = None
+        self.__conn = None
 
 import os
 
@@ -157,10 +187,10 @@ class DuckDBSession(Session):
         Returns:
             Connection: The new connection
         """
-        if not self._database:
+        if not self.database:
             raise ValueError("Database name is required")
         import duckdb
-        return duckdb.connect(database=self._database)
+        return duckdb.connect(database=self.database)
 
 class PostgresSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -194,13 +224,13 @@ class PostgresSession(Session):
             Connection: The new connection
         """
         import psycopg2
-        if not self._database:
+        if not self.database:
             raise ValueError("Database name is required")
-        if not self._user:
+        if not self.user:
             raise ValueError("User name is required")
-        if not self._password:
+        if not self.password:
             raise ValueError("Password is required")
-        return psycopg2.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 5432)
+        return psycopg2.connect(database=self.database, user=self.user, host=self.host or '127.0.0.1', password=self.password, port=self.port or 5432)
 
 class MySQLSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -234,13 +264,13 @@ class MySQLSession(Session):
             Connection: The new connection
         """
         import mysql.connector
-        if not self._database:
+        if not self.database:
             raise ValueError("Database name is required")
-        if not self._user:
+        if not self.user:
             raise ValueError("User name is required")
-        if not self._password:
+        if not self.password:
             raise ValueError("Password is required")
-        return mysql.connector.connect(database=self._database, user=self._user, host=self._host or '127.0.0.1', password=self._password, port=self._port or 3306)
+        return mysql.connector.connect(database=self.database, user=self.user, host=self.host or '127.0.0.1', password=self.password, port=self.port or 3306)
 
 class RedshiftSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -274,13 +304,13 @@ class RedshiftSession(Session):
             Connection: The new connection
         """
         import redshift_connector
-        if not self._database:
+        if not self.database:
             raise ValueError("Database name is required")
-        if not self._user:
+        if not self.user:
             raise ValueError("User name is required")
-        if not self._password:
+        if not self.password:
             raise ValueError("Password is required")
-        return redshift_connector.connect(database=self._database, user=self._user, host=self._host, password=self._password, port=self._port)
+        return redshift_connector.connect(database=self.database, user=self.user, host=self.host, password=self.password, port=self.port)
 
 class SnowflakeSession(Session):
     def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
@@ -306,12 +336,33 @@ class SnowflakeSession(Session):
             "role": kwargs.get('SNOWFLAKE_ROLE', env.get('SNOWFLAKE_ROLE', None)),
         }
         super().__init__(database=options.get('database', None), user=options.get('user', None), password=options.get('password', None), host=options.get('host', None), port=options.get('port', 443), **kwargs)
-        self._account = options.get('account', None)
-        self._warehouse = options.get('warehouse', None)
-        self._role = options.get('role', None)
+        self.__account = options.get('account', None)
+        self.__warehouse = options.get('warehouse', None)
+        self.__role = options.get('role', None)
 
     def provider(self) -> SessionProvider:
         return SessionProvider.SNOWFLAKE
+
+    @property
+    def account(self) -> Optional[str]:
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__account
+        else:
+            raise AttributeError("Account is not accessible")
+
+    @property
+    def warehouse(self) -> Optional[str]:
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__warehouse
+        else:
+            raise AttributeError("Warehouse is not accessible")
+
+    @property
+    def role(self) -> Optional[str]:
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__role
+        else:
+            raise AttributeError("Role is not accessible")
 
     def _new_connection(self) -> Connection:
         """
@@ -320,17 +371,17 @@ class SnowflakeSession(Session):
             Connection: The new connection
         """
         import snowflake.connector.connection
-        if not self._database:
+        if not self.database:
             raise ValueError("Database name is required")
-        if not self._user:
+        if not self.user:
             raise ValueError("User name is required")
-        if not self._password:
+        if not self.password:
             raise ValueError("Password is required")
-        if not self._account:
+        if not self.account:
             raise ValueError("Account is required")
-        if not self._warehouse:
+        if not self.warehouse:
             raise ValueError("Warehouse is required")
-        return snowflake.connector.connect(database=self._database, user=self._user, host=self._host or f'{self._account}.snowflakecomputing.com', password=self._password, port=self._port or 443, account=self._account, warehouse=self._warehouse, role=self._role)
+        return snowflake.connector.connect(database=self.database, user=self.user, host=self.host or f'{self.account}.snowflakecomputing.com', password=self.password, port=self.port or 443, account=self.account, warehouse=self.warehouse, role=self.role)
 
 from google.cloud import bigquery
 import google.auth.credentials
@@ -352,13 +403,13 @@ class BigQueryConnection(bigquery.Client, Connection, Cursor):
 
     def execute(self, stmt: str) -> None:
         query_job = self.query(stmt)
-        self._iterator = query_job.result()
+        self.__iterator = query_job.result()
 
     def fetchall(self) -> List[Tuple]:
-        if self._iterator:
+        if self.__iterator:
             from google.api_core.page_iterator import Page
             from google.cloud.bigquery.table import Row
-            page: Page = next(self._iterator.pages)
+            page: Page = next(self.__iterator.pages)
             rows: List[Row] = list(page)
             return list(map(lambda row: tuple(row.items()), rows or []))
         return []
@@ -413,34 +464,49 @@ class BigQuerySession(Session):
                 target_scopes=scopes,
             )        
 
-        self._creds = creds
-        self._project_id = project_id
-        self._location = kwargs.get('location', env.get('location', None))
+        self.__credentials = creds
+        self.__project_id = project_id
+        self.__location = kwargs.get('location', env.get('location', None))
         from google.api_core import client_info
-        self._client_info = client_info.ClientInfo(user_agent="starlake")
-        self._client_options = kwargs.get('client_options', env.get('client_options', None))
+        self.__client_info = client_info.ClientInfo(user_agent="starlake")
+        self.__client_options = kwargs.get('client_options', env.get('client_options', None))
 
     @property
     def credentials(self) -> Optional[google.auth.credentials.Credentials]:
-        return self._creds
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__credentials
+        else:
+            raise AttributeError("Credentials are not accessible")
 
     @property
     def project_id(self) -> Optional[str]:
-        return self._project_id
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__project_id
+        else:
+            raise AttributeError("Project ID is not accessible")
 
     @property
     def location(self) -> Optional[str]:
-        return self._location
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__location
+        else:
+            raise AttributeError("Location is not accessible")
 
     @property
     def client_info(self) -> Optional[google.api_core.client_info.ClientInfo]:
-        return self._client_info
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__client_info
+        else:
+            raise AttributeError("Client info is not accessible")
 
     @property
     def client_options(self) -> Optional[
             Union[google.api_core.client_options.ClientOptions, Dict[str, Any]]
         ]:
-        return self._client_options
+        if inspect.stack()[1].function == '_new_connection':
+            return self.__client_options
+        else:
+            raise AttributeError("Client options are not accessible")
 
     def provider(self) -> SessionProvider:
         return SessionProvider.BIGQUERY
