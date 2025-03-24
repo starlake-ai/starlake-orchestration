@@ -1,8 +1,8 @@
 from ai.starlake.job import StarlakeOrchestrator
-orchestrator = StarlakeOrchestrator.STARLAKE
+orchestrator = StarlakeOrchestrator.AIRFLOW
 
 from ai.starlake.job import StarlakeExecutionEnvironment
-execution_environment = StarlakeExecutionEnvironment.SQL
+execution_environment = StarlakeExecutionEnvironment.SHELL
 
 description="""sample dag configuration"""
 
@@ -13,12 +13,13 @@ access_control = None
 options={
     'sl_env_var':'{"SL_ROOT": ".", "SL_ENV": "SNOWFLAKE"}', 
     'tags':'starlake', 
-    'load_dependencies':'false', 
+    'load_dependencies':'true', 
     'retries':'1',
     'retry_delay':'30',
     'stage_location':'staging',
     'schema': 'starbake',
     'warehouse':'COMPUTE_WH',
+    'SL_STARLAKE_PATH': '/Users/smanciot/starlake/starlake'
 }
 
 from ai.starlake.job import StarlakeJobFactory
@@ -41,7 +42,7 @@ cron = "None"
 
 from ai.starlake.orchestration import StarlakeDependencies, StarlakeDependency, StarlakeDependencyType, OrchestrationFactory, AbstractTaskGroup, AbstractTask, TreeNodeMixin as TreeNode
 
-from typing import List, Optional, Set, Union
+from typing import Dict, List, Optional, Set, Union
 
 dependencies=StarlakeDependencies(dependencies="""[ {
   "data" : {
@@ -408,7 +409,6 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
               task >> end
         
         for graph in graphs:
-            # print(graph)
             generate_tasks_for_graph(graph)
 
 pipelines = [pipeline]
