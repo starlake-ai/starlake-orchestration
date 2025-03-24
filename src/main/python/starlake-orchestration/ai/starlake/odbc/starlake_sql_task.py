@@ -118,9 +118,9 @@ class SQLTask(ABC, StarlakeOptions):
                 else:
                     stmt = f"USE `{session.database}.{schema}`"
             elif session.provider() == SessionProvider.BIGQUERY and (check_stmt.startswith("BEGIN") or check_stmt.startswith("COMMIT") or check_stmt.startswith("ROLLBACK")):
-                stmt = f"# {stmt} not supported with BigQuery provider"
+                stmt = f"-- {stmt} not supported with BigQuery provider"
             elif dry_run and message:
-                print(f"# {message}")
+                print(f"-- {message}")
             if dry_run:
                 print(f"{stmt};")
                 return []
@@ -143,7 +143,7 @@ class SQLTask(ABC, StarlakeOptions):
         """
         if sqls:
             if dry_run and message:
-                print(f"# {message}")
+                print(f"-- {message}")
             for sql in sqls:
                 self.execute_sql(session, sql, None, dry_run)
 
@@ -157,7 +157,7 @@ class SQLTask(ABC, StarlakeOptions):
             bool: True if the table exists, False otherwise.
         """
         dataset = (domain + '.') if session.provider() == SessionProvider.BIGQUERY else ''
-        query=f"SELECT * FROM `{dataset}INFORMATION_SCHEMA.TABLES` WHERE LOWER(CONCAT(TABLE_SCHEMA, '.', TABLE_NAME)) LIKE '{domain}.{table}'"
+        query=f"SELECT * FROM {dataset}INFORMATION_SCHEMA.TABLES WHERE LOWER(CONCAT(TABLE_SCHEMA, '.', TABLE_NAME)) LIKE '{domain}.{table}'"
         return self.execute_sql(session, query, f"Check if table {domain}.{table} exists:", False).__len__() > 0
 
     def check_if_audit_table_exists(self, session: Session, dry_run: bool = False) -> bool:
@@ -185,7 +185,7 @@ class SQLTask(ABC, StarlakeOptions):
                 else:
                     return True
             except Exception as e:
-                print(f"Error creating audit table: {str(e)}")
+                print(f"-- Error creating audit table: {str(e)}")
                 return False
         else:
             return False
@@ -211,7 +211,7 @@ class SQLTask(ABC, StarlakeOptions):
                 else:
                     return True
             except Exception as e:
-                print(f"Error creating expectations table: {str(e)}")
+                print(f"-- Error creating expectations table: {str(e)}")
                 return False
         else:
             return False
@@ -262,7 +262,7 @@ class SQLTask(ABC, StarlakeOptions):
                     self.execute_sql(session, insert_sql, "Insert audit record:", dry_run)
                     return True
                 except Exception as e:
-                    print(f"Error inserting audit record: {str(e)}")
+                    print(f"-- Error inserting audit record: {str(e)}")
                     return False
             else:
                 return False
@@ -308,7 +308,7 @@ class SQLTask(ABC, StarlakeOptions):
                     self.execute_sql(session, insert_sql, "Insert expectations record:", dry_run)
                     return True
                 except Exception as e:
-                    print(f"Error inserting expectations record: {str(e)}")
+                    print(f"-- Error inserting expectations record: {str(e)}")
                     return False
             else:
                 return False
@@ -342,7 +342,7 @@ class SQLTask(ABC, StarlakeOptions):
             else:
                 raise Exception(f'Expectation failed for {self.sink}: {name}. Query not found')
         except Exception as e:
-            print(f"Error running expectation {name}: {str(e)}")
+            print(f"-- Error running expectation {name}: {str(e)}")
             self.log_expectation(session=session, domain=self.domain, table=self.table,success=False, name=name, params=params, sql=query, count=count, exception=str(e), ts=datetime.now(), jobid=jobid, dry_run=dry_run)
             if failOnError and not dry_run:
                 raise e
@@ -572,7 +572,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             existing_columns.append((str(row[0]).lower(), str(row[1]).lower()))
         existing_schema = dict(existing_columns)
         if dry_run:
-            print(f"# Existing schema for {self.domain}.{self.table}: {existing_schema}")
+            print(f"-- Existing schema for {self.domain}.{self.table}: {existing_schema}")
         schema_string = self.statements.get("schemaString", "") 
         if schema_string.strip() == "":
             return False
@@ -584,7 +584,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         update_required = nb_new_columns + nb_old_columns > 0
         if not update_required:
             if dry_run:
-                print(f"# No schema update required for {self.domain}.{self.table}")
+                print(f"-- No schema update required for {self.domain}.{self.table}")
             return False
         new_columns_dict = {key: new_schema[key] for key in new_columns}
         old_columns_dict = {key: existing_schema[key] for key in old_columns}
@@ -698,7 +698,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
         if dry_run:
-            print(f"#Loading {self.sink} in dry run mode")
+            print(f"-- Loading {self.sink} in dry run mode")
 
         if not jobid:
             jobid = self.sink
@@ -782,7 +782,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             self.commit_transaction(session, dry_run)
             end = datetime.now()
             duration = (end - start).total_seconds()
-            print(f"#Duration in seconds: {duration}")
+            print(f"-- Duration in seconds: {duration}")
             files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = self.get_audit_info(copy_results)
             message = first_error_line + '\n' + first_error_column_name
             success = errors_seen == 0
@@ -791,11 +791,11 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         except Exception as e:
             # ROLLBACK transaction
             error_message = str(e)
-            print(f"Error executing load for {self.sink}: {error_message}")
+            print(f"-- Error executing load for {self.sink}: {error_message}")
             self.rollback_transaction(session, dry_run)
             end = datetime.now()
             duration = (end - start).total_seconds()
-            print(f"Duration in seconds: {duration}")
+            print(f"-- Duration in seconds: {duration}")
             self.log_audit(session=session, domain=self.domain, table=self.table, paths=None, count=-1, countAccepted=-1, countRejected=-1, success=False, duration=duration, message=error_message, ts=end, jobid=jobid, step="LOAD", dry_run=dry_run)
             raise e
 
@@ -824,7 +824,7 @@ class SQLTransformTask(SQLTask):
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
         if dry_run:
-            print(f"#Executing transform for {self.sink} in dry run mode")
+            print(f"-- Executing transform for {self.sink} in dry run mode")
 
         if not jobid:
             jobid = self.sink
@@ -901,17 +901,17 @@ class SQLTransformTask(SQLTask):
             self.commit_transaction(session, dry_run)
             end = datetime.now()
             duration = (end - start).total_seconds()
-            print(f"#Duration in seconds: {duration}")
+            print(f"-- Duration in seconds: {duration}")
             self.log_audit(session=session, domain=self.domain, table=self.table, paths=None, count=-1, countAccepted=-1, countRejected=-1, success=True, duration=duration, message='Success', ts=end, jobid=jobid, step="TRANSFORM", dry_run=dry_run)
             
         except Exception as e:
             # ROLLBACK transaction
             error_message = str(e)
-            print(f"Error executing transform for {self.sink}: {error_message}")
+            print(f"-- Error executing transform for {self.sink}: {error_message}")
             self.rollback_transaction(session, dry_run)
             end = datetime.now()
             duration = (end - start).total_seconds()
-            print(f"Duration in seconds: {duration}")
+            print(f"-- Duration in seconds: {duration}")
             self.log_audit(session=session, domain=self.domain, table=self.table, paths=None, count=-1, countAccepted=-1, countRejected=-1, success=False, duration=duration, message=error_message, ts=end, jobid=jobid, step="TRANSFORM", dry_run=dry_run)
             raise e
 
