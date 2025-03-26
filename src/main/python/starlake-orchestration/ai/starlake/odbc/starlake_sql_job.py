@@ -1,6 +1,6 @@
 from typing import List, Optional, Union
 
-from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, StarlakeExecutionEnvironment
+from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, StarlakeExecutionEnvironment, TaskType
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 from ai.starlake.odbc import SQLTask, SQLEmptyTask, SQLTaskFactory
@@ -37,13 +37,14 @@ class StarlakeSQLJob(IStarlakeJob[SQLTask, StarlakeDataset], StarlakeOptions, SQ
         """
         return StarlakeExecutionEnvironment.SQL
 
-    def dummy_op(self, task_id: str, events: Optional[List[StarlakeDataset]] = None, **kwargs) -> SQLTask:
+    def dummy_op(self, task_id: str, events: Optional[List[StarlakeDataset]] = None, task_type: Optional[TaskType] = TaskType.EMPTY, **kwargs) -> SQLTask:
         """Dummy op.
         Generate a SQL dummy task.
 
         Args:
             task_id (str): The required task id.
             events (Optional[List[StarlakeDataset]]): The optional events to materialize.
+            task_type (Optional[TaskType]): The optional task type.
 
         Returns:
             SQLTask: The SQL task.
@@ -57,6 +58,7 @@ class StarlakeSQLJob(IStarlakeJob[SQLTask, StarlakeDataset], StarlakeOptions, SQ
             sink=task_id,
             caller_globals=self.caller_globals,            
             comment=comment, 
+            task_type=task_type,
             **kwargs
         )
 
@@ -117,7 +119,7 @@ class StarlakeSQLJob(IStarlakeJob[SQLTask, StarlakeDataset], StarlakeOptions, SQ
         kwargs.update({'comment': comment})
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset, **kwargs)
 
-    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> SQLTask:
+    def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[Union[StarlakeDataset, str]]= None, task_type: Optional[TaskType]=None, **kwargs) -> SQLTask:
         """Overrides IStarlakeJob.sl_job()
         Generate the SQL task that will run the starlake command.
 
@@ -137,4 +139,4 @@ class StarlakeSQLJob(IStarlakeJob[SQLTask, StarlakeDataset], StarlakeOptions, SQ
             else:
                 sink = dataset.sink
         kwargs.pop('sink', None)
-        return SQLTaskFactory.task(caller_globals=self.caller_globals, sink=sink, arguments=arguments, options=self.options, **kwargs)
+        return SQLTaskFactory.task(caller_globals=self.caller_globals, sink=sink, arguments=arguments, options=self.options, task_type=task_type, **kwargs)

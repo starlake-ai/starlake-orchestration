@@ -6,29 +6,22 @@ from datetime import datetime
 from typing import List, Optional, Tuple
 
 from ai.starlake.common import MissingEnvironmentVariable
-from ai.starlake.job import StarlakeOptions
+from ai.starlake.job import StarlakeOptions, TaskType
 
 from ai.starlake.odbc import Session, SessionProvider
 
 from enum import Enum
 
-class TaskType(str, Enum):
-    LOAD = "load"
-    TRANSFORM = "transform"
-    EMPTY = "empty"
-
-    def __str__(self):
-        return self.value
-
 class SQLTask(ABC, StarlakeOptions):
 
-    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), task_type: Optional[TaskType]=None, **kwargs):
         """Initialize the SQL task.
         Args:
             sink (str): The sink.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
             arguments (list, optional): The arguments of the task. Defaults to [].
             options (dict, optional): The options of the task. Defaults to dict().
+            task_type (Optional[TaskType], optional): The task type. Defaults to None.
         """
         super().__init__(**kwargs)
         self.sink = sink
@@ -62,15 +55,15 @@ class SQLTask(ABC, StarlakeOptions):
                     })
                 break
         self.safe_params = defaultdict(lambda: 'NULL', task_options)
+        self.__task_type = task_type
 
     @property
-    @abstractmethod
     def task_type(self) -> TaskType:
         """Get the task type.
         Returns:
             TaskType: The task type.
         """
-        ...
+        return self.__task_type
 
     def bindParams(self, stmt: str) -> str:
         """Bind parameters to the SQL statement.
@@ -412,19 +405,16 @@ class SQLTask(ABC, StarlakeOptions):
         ...
 
 class SQLEmptyTask(SQLTask):
-    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), **kwargs):
+    def __init__(self, sink: str, caller_globals: dict = dict(), arguments: list = [], options: dict = dict(), task_type: Optional[TaskType]=TaskType.EMPTY, **kwargs):
         """Initialize the SQL empty task.
         Args:
             sink (str): The sink.
             caller_globals (dict, optional): The caller globals. Defaults to dict().
             arguments (list, optional): The arguments of the task. Defaults to [].
             options (dict, optional): The options. Defaults to dict().
+            task_type (Optional[TaskType], optional): The task type. Defaults to TaskType.EMPTY.
         """
-        super().__init__(sink, caller_globals, arguments, options, **kwargs)
-
-    @property
-    def task_type(self) -> TaskType:
-        return TaskType.EMPTY
+        super().__init__(sink, caller_globals, arguments, options, task_type or TaskType.EMPTY, **kwargs)
 
     def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
         """Execute the empty task.
@@ -434,7 +424,7 @@ class SQLEmptyTask(SQLTask):
             config (dict, optional): The config. Defaults to dict().
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
-        self.execute_sql(session, f"SELECT '{self.sink}'", "Execute empty task:", dry_run)
+        self.execute_sql(session, f"SELECT '{self.sink}'", f"Execute {self.task_type} task:", dry_run)
 
 class SQLLoadTask(SQLTask, StarlakeOptions):
 
@@ -446,7 +436,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             arguments (list, optional): The arguments of the task. Defaults to [].
             options (dict, optional): The options. Defaults to dict().
         """
-        super().__init__(sink, caller_globals, arguments, options, **kwargs)
+        super().__init__(sink, caller_globals, arguments, options, TaskType.LOAD, **kwargs)
         json_context = self.caller_globals.get('json_context', '{}')
         import json
         context = json.loads(json_context).get(sink, None)
@@ -500,10 +490,6 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             self.purge = "FALSE"
         else:
             self.purge = purge.upper()
-
-    @property
-    def task_type(self) -> TaskType:
-        return TaskType.LOAD
 
     def get_option(self, key: str, metadata_key: Optional[str]) -> Optional[str]:
         if self.metadata_options and key.lower() in self.metadata_options:
@@ -809,11 +795,7 @@ class SQLTransformTask(SQLTask):
             arguments (list, optional): The arguments of the task. Defaults to [].
             options (dict, optional): The options. Defaults to dict().
         """
-        super().__init__(sink, caller_globals, arguments, options, **kwargs)
-
-    @property
-    def task_type(self) -> TaskType:
-        return TaskType.TRANSFORM
+        super().__init__(sink, caller_globals, arguments, options, TaskType.TRANSFORM, **kwargs)
 
     def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
         """Transform the data.
@@ -922,7 +904,7 @@ class SQLTaskFactory:
         ...
 
     @classmethod
-    def task(cls, caller_globals: dict = dict(), sink: Optional[str] = None, arguments: list = [], options: dict = dict(), **kwargs) -> SQLTask:
+    def task(cls, caller_globals: dict = dict(), sink: Optional[str] = None, arguments: list = [], options: dict = dict(), task_type: Optional[TaskType] = None, **kwargs) -> SQLTask:
         """Create a task.
         Args:
             cls: The task class.
@@ -930,15 +912,21 @@ class SQLTaskFactory:
             sink (Optional[str], optional): The sink. Defaults to None.
             arguments (list): The required arguments of the starlake command to run.
             options (dict): The options.
+            task_type (Optional[TaskType], optional): The task type. Defaults to None.
+        Returns:
+            SQLTask: The SQL task.
         """
         if not sink:
             raise ValueError("Sink not found")
-        command = arguments[0].lower()
-        if command == TaskType.LOAD.value:
+        if not task_type and len(arguments) > 0:
+            task_type = TaskType.from_str(arguments[0])
+        else:
+            task_type = TaskType.EMPTY
+        if task_type == TaskType.LOAD:
             return SQLLoadTask(sink, caller_globals, arguments, options, **kwargs)
-        elif command == TaskType.TRANSFORM.value:
+        elif task_type == TaskType.TRANSFORM:
             return SQLTransformTask(sink, caller_globals, arguments, options, **kwargs)
-        elif command == TaskType.EMPTY.value:
+        elif task_type == TaskType.EMPTY:
             return SQLEmptyTask(sink, caller_globals, arguments, options, **kwargs)
         else:
-            raise ValueError(f"Unsupported command: {command}")
+            raise ValueError(f"Unsupported task type: {task_type}")
