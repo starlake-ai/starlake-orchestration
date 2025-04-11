@@ -911,7 +911,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             variant = context.get('variant', "false")
                             if (variant == "false"):
                                 match_by_columnName = "MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE"
-                            else
+                            else:
                                 ''
                             sql = f'''
                                 COPY INTO {temp_table_name or sink} 
