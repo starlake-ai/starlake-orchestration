@@ -71,11 +71,11 @@ class TaskType(str, Enum):
 
     @classmethod
     def from_str(cls, value: str) -> Optional["TaskType"]:
-        """Returns an instance of TaskType if the value is valid, otherwise raise a ValueError exception."""
+        """Returns an instance of TaskType if the value is valid, otherwise None."""
         try:
             return cls(value.lower())
         except ValueError:
-            raise ValueError(f"Unsupported task type: {value}")
+            return None
 
 class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
     def __init__(self, filename: str, module_name: str, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None], options: dict, **kwargs) -> None:
