@@ -350,6 +350,12 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         # op.delete(pipeline_id)
         op.deploy(self.dag, mode = CreateMode.or_replace)
         print(f"Pipeline {self.pipeline_id} deployed")
+        if self.job.allow_overlapping_execution:
+            session.sql(f"ALTER TASK IF EXISTS {self.pipeline_id} SET ALLOW_OVERLAPPING_EXECUTION = TRUE").collect()
+            print(f"Pipeline {self.pipeline_id} set to allow overlapping execution")
+        else:
+            session.sql(f"ALTER TASK IF EXISTS {self.pipeline_id} SET ALLOW_OVERLAPPING_EXECUTION = FALSE").collect()
+            print(f"Pipeline {self.pipeline_id} set to not allow overlapping execution")
 
     def delete(self, **kwargs) -> None:
         import os
@@ -475,6 +481,48 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
 
         else:
             raise StarlakeSnowflakeError(f"Execution mode {mode} is not supported")
+
+    def backfill(self, timeout: str = '120', start_date: Optional[str] = None, end_date: Optional[str] = None, **kwargs) -> None:
+        """Backfill the pipeline.
+        Args:
+            timeout (str): the timeout in seconds.
+            start_date (Optional[str]): the start date.
+            end_date (Optional[str]): the end date.
+        """
+        # check if backfill has been enabled for the pipeline
+        if self.job.allow_overlapping_execution:
+            from datetime import datetime
+            cron = self.cron
+            if not cron or cron.strip().lower() == 'none':
+                raise ValueError("The pipeline must have a cron expression to backfill")
+            if not start_date or start_date.strip().lower() == 'none':
+                raise ValueError("The pipeline must have a start date to backfill")
+            if not end_date or end_date.strip().lower() == 'none':
+                end_date = datetime.fromtimestamp(datetime.now().timestamp()).isoformat()
+            from croniter import croniter
+            start_time = datetime.fromisoformat(start_date)
+            end_time = datetime.fromisoformat(end_date)
+            if start_time > end_time:
+                raise ValueError("The start date must be before the end date")
+            # reference datetime
+            base_time = datetime.now()
+
+            # Init croniter
+            iter = croniter(cron, base_time)
+
+            # Get the next cron time
+            next_time = iter.get_next(datetime)
+            next_next_time = iter.get_next(datetime)
+
+            # Calculate the interval in minutes
+            interval = (next_next_time - next_time).total_seconds() / 60
+
+            session = self.__class__.session(**kwargs)
+            session.call('SYSTEM$TASK_BACKFILL', self.pipeline_id, start_time, end_time, f'{interval} minutes')
+            print(f"Pipeline {self.pipeline_id} backfilled from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        else:
+            super().backfill(timeout=timeout, start_date=start_date, end_date=end_date, **kwargs)
 
     def get_dag_operation(self, session: Session, database: str, schema: str) -> DAGOperation:
         session.sql(f"USE DATABASE {database}").collect()
