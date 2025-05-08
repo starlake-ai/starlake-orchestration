@@ -34,6 +34,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             self._sl_incoming_file_stage = kwargs.get('sl_incoming_file_stage', __class__.get_context_var(var_name='sl_incoming_file_stage', options=self.options))
         except MissingEnvironmentVariable:
             self._sl_incoming_file_stage = None
+        allow_overlapping_execution: bool = kwargs.get('allow_overlapping_execution', __class__.get_context_var(var_name='allow_overlapping_execution', default_value='False', options=self.options).lower() == 'true')
+        self._allow_overlapping_execution = allow_overlapping_execution
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -50,6 +52,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
     @property
     def timezone(self) -> str:
         return self._timezone
+
+    @property
+    def allow_overlapping_execution(self) -> bool:
+        return self._allow_overlapping_execution
 
     @property
     def sl_incoming_file_stage(self) -> Optional[str]:
@@ -608,7 +614,45 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         if dry_run:
                             print(f"-- Executing transform for {sink} in dry run mode")
 
-                        if cron_expr:
+                        sl_start_date = None
+                        sl_end_date = None
+                        # check if the task is a backfill
+                        backfill = False
+                        if self.allow_overlapping_execution:
+                            query = "SELECT system$task_runtime_info('IS_BACKFILL')"
+                            rows = execute_sql(session, query, "Check if the task is a backfill", dry_run)
+                            if rows.__len__() == 1:
+                                backfill = rows[0][0]
+                                print(f"-- The task is a backfill: {backfill}")
+                        if backfill:
+                            query = "SELECT to_timestamp(system$task_runtime_info('PARTITION_START'))"
+                            print(f"-- Get the partition start date and time of the initial graph run:\n{query};")
+                            rows = execute_sql(session, query, "Get the partition start date and time of the initial graph run", dry_run)
+                            if rows.__len__() == 1:
+                                partition_start = rows[0][0]
+                            else:
+                                partition_start = None
+                            if partition_start:
+                                if isinstance(partition_start, str):
+                                    from dateutil import parser
+                                    sl_start_date = parser.parse(partition_start)
+                                else:
+                                    sl_start_date = partition_start
+                            query = "SELECT to_timestamp(system$task_runtime_info('PARTITION_END'))"
+                            print(f"-- Get the partition end date and time of the initial graph run:\n{query};")
+                            rows = execute_sql(session, query, "Get the partition end date and time of the initial graph run", dry_run)
+                            if rows.__len__() == 1:
+                                partition_end = rows[0][0]
+                            else:
+                                partition_end = None
+                            if partition_end:
+                                if isinstance(partition_end, str):
+                                    from dateutil import parser
+                                    sl_end_date = parser.parse(partition_end)
+                                else:
+                                    sl_end_date = partition_end
+
+                        if cron_expr and (not sl_start_date or not sl_end_date):
                             from croniter import croniter
                             from croniter.croniter import CroniterBadCronError
                             # get the original scheduled timestamp of the initial graph run in the current group
@@ -624,6 +668,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 config = {}
                             original_schedule = config.get("logical_date", None)
                             if not original_schedule:
+                                # get the original scheduled timestamp of the initial graph run in the current group
                                 query = "SELECT to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))"
                                 print(f"-- Get the original scheduled timestamp of the initial graph run:\n{query};")
                                 rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
@@ -650,9 +695,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 else:
                                     sl_end_date = previous
                                 sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
-                                safe_params.update({'sl_start_date': sl_start_date.strftime(format), 'sl_end_date': sl_end_date.strftime(format)})
                             except CroniterBadCronError:
                                 raise ValueError(f"Invalid cron expression: {cron_expr}")
+
+                        if sl_start_date and sl_end_date:
+                            safe_params.update({'sl_start_date': sl_start_date.strftime(format), 'sl_end_date': sl_end_date.strftime(format)})
 
                         if dry_run:
                             jobid = sink
