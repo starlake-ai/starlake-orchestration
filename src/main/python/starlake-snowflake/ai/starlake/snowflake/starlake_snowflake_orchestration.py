@@ -511,7 +511,11 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                     interval = int((next_next_time - next_time).total_seconds() / 60)
 
             session = self.__class__.session(**kwargs)
-            session.call('SYSTEM$TASK_BACKFILL', self.pipeline_id, start_time, end_time, f'{interval} minutes')
+            import json
+            result: dict = json.loads(session.call('SYSTEM$TASK_BACKFILL', self.pipeline_id, start_time, end_time, f'{interval} minutes'))
+            backfill_job_id: Optional[str] = result.get('backfill_job_id', None)
+            partition_count: Optional[int] = int(result.get('partition_count', None))
+            print(f"backfill_job_id '{backfill_job_id}' - {partition_count} partition(s)")
             format = '%Y-%m-%d %H:%M:%S%z'
             print(f"Pipeline {self.pipeline_id} backfilled from '{start_time.strftime(format)}' to '{end_time.strftime(format)}' using {interval} minutes interval")
 
