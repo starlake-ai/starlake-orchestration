@@ -486,34 +486,32 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         # check if backfill has been enabled for the pipeline
         if self.job.allow_overlapping_execution:
             from datetime import datetime
-            cron = self.cron
-            if not cron or cron.strip().lower() == 'none':
-                raise ValueError("The pipeline must have a cron expression to backfill")
-            if not start_date or start_date.strip().lower() == 'none':
-                raise ValueError("The pipeline must have a start date to backfill")
-            if not end_date or end_date.strip().lower() == 'none':
-                end_date = datetime.fromtimestamp(datetime.now().timestamp()).isoformat()
-            from croniter import croniter
             start_time = datetime.fromisoformat(start_date)
             end_time = datetime.fromisoformat(end_date)
             if start_time > end_time:
                 raise ValueError("The start date must be before the end date")
-            # reference datetime
-            base_time = datetime.now()
+            cron = self.computed_cron_expr
+            interval = kwargs.get('interval', None)
+            if interval is None:
+                interval = int((end_time - start_time).total_seconds() / 60)
+                if cron and cron.strip().lower() != 'none':
+                    from croniter import croniter
+                    # reference datetime
+                    base_time = datetime.now()
 
-            # Init croniter
-            iter = croniter(cron, base_time)
+                    # Init croniter
+                    iter = croniter(cron, base_time)
 
-            # Get the next cron time
-            next_time = iter.get_next(datetime)
-            next_next_time = iter.get_next(datetime)
+                    # Get the next cron time
+                    next_time = iter.get_next(datetime)
+                    next_next_time = iter.get_next(datetime)
 
-            # Calculate the interval in minutes
-            interval = (next_next_time - next_time).total_seconds() / 60
+                    # Calculate the interval in minutes
+                    interval = int((next_next_time - next_time).total_seconds() / 60)
 
             session = self.__class__.session(**kwargs)
             session.call('SYSTEM$TASK_BACKFILL', self.pipeline_id, start_time, end_time, f'{interval} minutes')
-            print(f"Pipeline {self.pipeline_id} backfilled from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Pipeline {self.pipeline_id} backfilled from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')} using {interval} minutes interval")
 
         else:
             super().backfill(timeout=timeout, start_date=start_date, end_date=end_date, **kwargs)
