@@ -298,7 +298,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             least_frequent_datasets=self.least_frequent_datasets,
             most_frequent_datasets=self.most_frequent_datasets,
             task_auto_retry_attempts=job.retries,
-            
+            allow_overlapping_execution=job.allow_overlapping_execution,
         )
 
     def __enter__(self):
@@ -350,12 +350,6 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         # op.delete(pipeline_id)
         op.deploy(self.dag, mode = CreateMode.or_replace)
         print(f"Pipeline {self.pipeline_id} deployed")
-        if self.job.allow_overlapping_execution:
-            session.sql(f"ALTER TASK IF EXISTS {self.pipeline_id} SET ALLOW_OVERLAPPING_EXECUTION = TRUE").collect()
-            print(f"Pipeline {self.pipeline_id} set to allow overlapping execution")
-        else:
-            session.sql(f"ALTER TASK IF EXISTS {self.pipeline_id} SET ALLOW_OVERLAPPING_EXECUTION = FALSE").collect()
-            print(f"Pipeline {self.pipeline_id} set to not allow overlapping execution")
 
     def delete(self, **kwargs) -> None:
         import os
