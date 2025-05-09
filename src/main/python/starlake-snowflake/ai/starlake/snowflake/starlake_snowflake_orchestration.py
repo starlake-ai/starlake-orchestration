@@ -486,8 +486,9 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         # check if backfill has been enabled for the pipeline
         if self.job.allow_overlapping_execution:
             from datetime import datetime
-            start_time = datetime.fromisoformat(start_date)
-            end_time = datetime.fromisoformat(end_date)
+            import pytz
+            start_time = datetime.fromisoformat(start_date).astimezone(pytz.timezone('UTC'))
+            end_time = datetime.fromisoformat(end_date).astimezone(pytz.timezone('UTC'))
             if start_time > end_time:
                 raise ValueError("The start date must be before the end date")
             cron = self.computed_cron_expr
@@ -511,7 +512,8 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
 
             session = self.__class__.session(**kwargs)
             session.call('SYSTEM$TASK_BACKFILL', self.pipeline_id, start_time, end_time, f'{interval} minutes')
-            print(f"Pipeline {self.pipeline_id} backfilled from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')} using {interval} minutes interval")
+            format = '%Y-%m-%d %H:%M:%S%z'
+            print(f"Pipeline {self.pipeline_id} backfilled from '{start_time.strftime(format)}' to '{end_time.strftime(format)}' using {interval} minutes interval")
 
         else:
             super().backfill(timeout=timeout, start_date=start_date, end_date=end_date, **kwargs)
