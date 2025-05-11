@@ -512,7 +512,13 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
 
             session = self.__class__.session(**kwargs)
             import json
-            result: dict = json.loads(session.call('SYSTEM$TASK_BACKFILL', self.pipeline_id, start_time, end_time, f'{interval} minutes'))
+            # call the backfill stored procedure
+            rows = session.sql(f"call system$task_backfill(?, ?, ?, ?)", (self.pipeline_id, ('TIMESTAMP_LTZ', start_time), ('TIMESTAMP_LTZ', end_time), f'{interval} minutes')).collect()
+            # get the backfill job id and partition count
+            if not rows:
+                raise StarlakeSnowflakeError(f"Pipeline {self.pipeline_id} backfill failed")
+            else:
+                result: dict = json.loads(rows[0][0])
             backfill_job_id: Optional[str] = result.get('backfill_job_id', None)
             partition_count: Optional[int] = result.get('partition_count', None)
             print(f"backfill_job_id '{backfill_job_id}' - {partition_count} partition(s)")
