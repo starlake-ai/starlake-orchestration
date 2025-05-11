@@ -36,6 +36,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             self._sl_incoming_file_stage = None
         allow_overlapping_execution: bool = kwargs.get('allow_overlapping_execution', __class__.get_context_var(var_name='allow_overlapping_execution', default_value='False', options=self.options).lower() == 'true')
         self._allow_overlapping_execution = allow_overlapping_execution
+        check_freshness: bool = kwargs.get('check_freshness', __class__.get_context_var(var_name='check_freshness', default_value='False', options=self.options).lower() == 'true')
+        self._check_freshness = check_freshness
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -56,6 +58,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
     @property
     def allow_overlapping_execution(self) -> bool:
         return self._allow_overlapping_execution
+
+    @property
+    def check_freshness(self) -> bool:
+        return self._check_freshness
 
     @property
     def sl_incoming_file_stage(self) -> Optional[str]:
