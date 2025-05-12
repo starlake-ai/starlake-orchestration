@@ -18,7 +18,7 @@ setup(name='starlake-snowflake',
 #      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-snowflake',
       packages=find_packages(include=['ai', 'ai.*']),
       install_requires=[
-          'starlake-orchestration>=0.2.6',
+          'starlake-orchestration>=0.3.1.2',
           'croniter',
           'sqlalchemy',
           'snowflake',
