@@ -271,7 +271,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         dag_args.update({'start_date': self.start_date, 'retry_delay': timedelta(seconds=self.retry_delay), 'retries': self.retries})
         return dag_args
 
-from airflow.lineage import prepare_lineage, apply_lineage
+from airflow.lineage import prepare_lineage
 
 class StarlakeDatasetMixin:
     """Mixin to update Airflow outlets with Starlake datasets."""
@@ -285,12 +285,8 @@ class StarlakeDatasetMixin:
         self.task_id = task_id
         params: dict = kwargs.get("params", dict())
         outlets = kwargs.get("outlets", [])
-        extra = params
+        extra = dict()
         extra.update({"source": source})
-        self.extra = extra
-        self.alias = sanitize_id(params.get("uri", task_id)).lower()
-        self.dataset_alias: Optional[DatasetAlias] = None
-        self.dataset: Optional[Dataset] = None
         if dataset:
             if isinstance(dataset, StarlakeDataset):
                 params.update({
@@ -301,44 +297,41 @@ class StarlakeDatasetMixin:
                     'previous': previous
                 })
                 kwargs['params'] = params
-                self.dataset_str = "{{sl_scheduled_dataset(params.uri, params.cron, data_interval_end | ts, params.sl_schedule_parameter_name, params.sl_schedule_format, params.previous)}}"
-                self.alias = dataset.uri
+                extra.update({
+                    'uri': dataset.uri,
+                    'cron': dataset.cron,
+                    'sink': dataset.sink,
+                    'freshness': dataset.freshness,
+                })
+                if dataset.cron: # if the dataset is scheduled
+                    self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, data_interval_end | ts, params.sl_schedule_parameter_name, params.sl_schedule_format, params.previous)}}"
+                else:
+                    self.scheduled_dataset = None
+                self.scheduled_date = "{{sl_scheduled_date(params.cron, data_interval_end | ts, params.previous)}}"
+                uri = dataset.uri
             else:
-                self.dataset_str = dataset
-                self.alias = dataset
-            self.dataset_alias = DatasetAlias(self.alias)
-            outlets.append(self.dataset_alias)
-            self.outlets = outlets
+                self.scheduled_dataset = None
+                uri = dataset
+            outlets.append(Dataset(uri=uri, extra=extra))
             kwargs["outlets"] = outlets
-            self.template_fields = getattr(self, "template_fields", tuple()) + ("dataset",)
+            self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date",)
         else:
-            self.alias = None
-            self.dataset_str = None
+            self.scheduled_dataset = None
+        self.extra = extra
         super().__init__(task_id=task_id, **kwargs)  # Appelle l'init de l'opérateur principal
 
     @prepare_lineage
     def pre_execute(self, context):
-        if self.dataset_str:
-            self.log.info(f"Pre execute {self.task_id} with dataset={self.dataset_str}, alias={self.alias}, extra={self.extra}, outlets={self.outlets}")
-            from urllib.parse import parse_qs
-            uri: str = self.render_template(self.dataset_str, context)
-            query = uri.split("?")
-            if query.__len__() > 1:
-                self.extra.update(parse_qs(query[-1]))
-            self.dataset = Dataset(uri, self.extra)
-            context["outlet_events"][self.dataset_alias].add(self.dataset)
+        if self.scheduled_date:
+            self.extra.update({"scheduled_date": self.scheduled_date})
+        if self.scheduled_dataset:
+            dataset = Dataset(uri=self.scheduled_dataset, extra=self.extra)
+            self.outlets.append(dataset)
+        for outlet in self.outlets:
+            outlet_event = context["outlet_events"][outlet]
+            self.log.info(f"updating outlet event {outlet_event} with extra {self.extra}")
+            outlet_event.extra = self.extra
         return super().pre_execute(context)
-
-    @apply_lineage
-    def post_execute(self, context: Any, result: Any = None):
-        """
-        Execute right after self.execute() is called.
-
-        It is passed the execution context and any results returned by the operator.
-        """
-        if self.dataset_alias:
-            context["outlet_events"][self.dataset].extra = self.extra
-        return super().post_execute(context, result)
 
 class StarlakeEmptyOperator(StarlakeDatasetMixin, EmptyOperator):
     """StarlakeEmptyOperator."""
