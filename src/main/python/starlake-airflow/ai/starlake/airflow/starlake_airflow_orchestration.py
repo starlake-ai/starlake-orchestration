@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset
 
-from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_dataset
+from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset
 
 from ai.starlake.job import StarlakeOrchestrator, StarlakeExecutionMode
 
@@ -48,6 +48,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         user_defined_macros["sl_dates"] = sl_cron_start_end_dates
         user_defined_macros["ts_as_datetime"] = ts_as_datetime
         user_defined_macros["sl_scheduled_dataset"] = sl_scheduled_dataset
+        user_defined_macros["sl_scheduled_date"] = sl_scheduled_date
 
         user_defined_filters = kwargs.get('user_defined_filters', job.caller_globals.get('user_defined_filters', None))
         kwargs.pop('user_defined_filters', None)
