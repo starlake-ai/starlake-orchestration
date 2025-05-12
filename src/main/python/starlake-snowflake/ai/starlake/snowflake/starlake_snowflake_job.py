@@ -613,6 +613,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                     format = '%Y-%m-%d %H:%M:%S%z'
 
+                    allow_overlapping_execution = self.allow_overlapping_execution
+
                     # create the function that will execute the transform
                     def fun(session: Session, dry_run: bool) -> None:
                         from datetime import datetime
@@ -623,40 +625,28 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         sl_start_date = None
                         sl_end_date = None
                         # check if the task is a backfill
-                        backfill = False
-                        if self.allow_overlapping_execution:
-                            query = "SELECT system$task_runtime_info('IS_BACKFILL')"
-                            rows = execute_sql(session, query, "Check if the task is a backfill", dry_run)
-                            if rows.__len__() == 1:
-                                backfill = rows[0][0]
-                                print(f"-- The task is a backfill: {backfill}")
+                        backfill: bool = False
+                        if allow_overlapping_execution and not dry_run:
+                            backfill = session.call("system$task_runtime_info", "IS_BACKFILL")
                         if backfill:
-                            query = "SELECT to_timestamp(system$task_runtime_info('PARTITION_START'))"
-                            print(f"-- Get the partition start date and time of the initial graph run:\n{query};")
-                            rows = execute_sql(session, query, "Get the partition start date and time of the initial graph run", dry_run)
-                            if rows.__len__() == 1:
-                                partition_start = rows[0][0]
-                            else:
-                                partition_start = None
+                            partition_start = session.call("system$task_runtime_info", "PARTITION_START")
                             if partition_start:
                                 if isinstance(partition_start, str):
                                     from dateutil import parser
                                     sl_start_date = parser.parse(partition_start)
                                 else:
                                     sl_start_date = partition_start
-                            query = "SELECT to_timestamp(system$task_runtime_info('PARTITION_END'))"
-                            print(f"-- Get the partition end date and time of the initial graph run:\n{query};")
-                            rows = execute_sql(session, query, "Get the partition end date and time of the initial graph run", dry_run)
-                            if rows.__len__() == 1:
-                                partition_end = rows[0][0]
-                            else:
-                                partition_end = None
+                            elif not dry_run:
+                                raise ValueError("Error getting the partition start date and time of the initial graph run")
+                            partition_end = session.call("system$task_runtime_info", "PARTITION_END")
                             if partition_end:
                                 if isinstance(partition_end, str):
                                     from dateutil import parser
                                     sl_end_date = parser.parse(partition_end)
                                 else:
                                     sl_end_date = partition_end
+                            elif not dry_run:
+                                raise ValueError("Error getting the partition end date and time of the initial graph run")
 
                         if cron_expr and (not sl_start_date or not sl_end_date):
                             from croniter import croniter
