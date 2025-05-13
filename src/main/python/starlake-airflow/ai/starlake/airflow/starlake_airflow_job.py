@@ -26,8 +26,6 @@ from airflow.operators.python import ShortCircuitOperator
 
 from airflow.utils.context import Context
 
-from airflow.utils.task_group import TaskGroup
-
 import logging
 
 DEFAULT_POOL:str ="default_pool"
@@ -203,7 +201,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 event: DatasetEvent = dataset_events[-i]
                                 extra = event.extra or {}
                                 scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
-                                if scheduled_datetime and scheduled_datetime >= scheduled_date_to_check: #TODO check if it should be ==
+                                if scheduled_datetime and scheduled_datetime >= scheduled_date_to_check:
                                     dataset_event = event
                                     break;
                                 else:
@@ -218,14 +216,20 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         print(f"Missing non scheduled dataset {dataset.uri}")
                         missing_datasets.append(dataset)
                     else:
-                        print(f"Non scheduled dataset {dataset.uri} checked")
-                return not missing_datasets
+                        print(f"Non scheduled dataset {dataset.uri} checked with event {dataset_events[-1]}")
+                checked = not missing_datasets
+                if checked:
+                    print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
+                    context['task_instance'].xcom_push(key='sl_logical_date', value=scheduled_date)
+                return checked
 
             def should_continue(**context) -> bool:
                 triggering_datasets = get_triggering_datasets(context)
                 if not triggering_datasets:
                     print("No triggering datasets found. Manually triggered.")
-                    return True
+                    return False #True
+                # if triggering_datasets.__len__() == datasets.__len__():
+                #     return True
                 else:
                     triggering_uris = {dataset.uri: dataset for dataset in triggering_datasets}
                     datasets_uris = {dataset.uri: dataset for dataset in datasets}
@@ -443,10 +447,10 @@ class StarlakeDatasetMixin:
                     'freshness': dataset.freshness,
                 })
                 if dataset.cron: # if the dataset is scheduled
-                    self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, data_interval_end | ts, params.sl_schedule_parameter_name, params.sl_schedule_format, params.previous)}}"
+                    self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, ts_as_datetime(data_interval_end | ts), params.sl_schedule_parameter_name, params.sl_schedule_format, params.previous)}}"
                 else:
                     self.scheduled_dataset = None
-                self.scheduled_date = "{{sl_scheduled_date(params.cron, data_interval_end | ts, params.previous)}}"
+                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts), params.previous)}}"
                 uri = dataset.uri
             else:
                 self.scheduled_dataset = None
