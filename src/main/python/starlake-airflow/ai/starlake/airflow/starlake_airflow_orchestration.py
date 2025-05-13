@@ -33,10 +33,12 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
 
         airflow_schedule: Union[str, List[Dataset], None] = None
 
+        # AssetOrTimeSchedule is not supported yet within SL
         if self.cron is not None:
             airflow_schedule = self.cron
         elif self.events is not None:
-            airflow_schedule = self.events
+            from functools import reduce
+            airflow_schedule = reduce(lambda a, b: a | b, self.events)
 
         def ts_as_datetime(ts):
             # Convert ts to a datetime object
