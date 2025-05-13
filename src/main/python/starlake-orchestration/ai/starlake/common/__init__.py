@@ -130,19 +130,22 @@ def sl_cron_start_end_dates(cron_expr: str, start_time: datetime = cron_start_ti
     sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
     return f"sl_start_date='{sl_start_date.strftime(format)}',sl_end_date='{sl_end_date.strftime(format)}'"
 
-def sl_scheduled_date(cron: Optional[str], ts: str, previous: bool=False) -> datetime:
+def sl_scheduled_date(cron: Optional[str], ts: Union[datetime, str], previous: bool=False) -> datetime:
     """
     Returns the scheduled date for a cron expression and timestamp or the timestamp itself if no cron expression is provided.
     Args:
         cron (str): The optional cron expression.
-        ts (str): The timestamp.
+        ts (Union[datetime, str]): The timestamp.
         previous (bool): If True, returns the previous scheduled date. Defaults to False.
     """
     try:
-        # Convert ts to a datetime object
-        from dateutil import parser
-        import pytz
-        start_time = parser.isoparse(ts).astimezone(pytz.timezone('UTC'))
+        if isinstance(ts, str):
+            # Convert ts to a datetime object
+            from dateutil import parser
+            import pytz
+            start_time = parser.isoparse(ts).astimezone(pytz.timezone('UTC'))
+        elif isinstance(ts, datetime):
+            start_time = ts
         if cron and not is_valid_cron(cron):
             raise ValueError(f"Invalid cron expression: {cron}")
         elif cron:
@@ -156,13 +159,13 @@ def sl_scheduled_date(cron: Optional[str], ts: str, previous: bool=False) -> dat
         print(f"Error converting timestamp to datetime: {e}")
         raise e
 
-def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts: str, parameter_name: str = 'sl_schedule', format: str = sl_timestamp_format, previous: bool=False) -> str:
+def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts:  Union[datetime, str], parameter_name: str = 'sl_schedule', format: str = sl_timestamp_format, previous: bool=False) -> str:
     """
     Returns the dataset url with the schedule parameter added if a cron expression has been provided.
     Args:
         dataset (str): The dataset name.
         cron (str): The optional cron expression.
-        ts (str): The timestamp.
+        ts (Union[datetime, str]): The timestamp.
         parameter_name (str): The parameter name. Defaults to 'sl_schedule'.
         format (str): The format to return the schedule in. Defaults to '%Y%m%dT%H%M'.
     """

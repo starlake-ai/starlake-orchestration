@@ -16,6 +16,8 @@ from airflow.datasets import Dataset
 
 from airflow.models.baseoperator import BaseOperator
 
+from airflow.utils.context import Context
+
 from airflow.utils.task_group import TaskGroup, TaskGroupContext
 
 from airflow.utils.state import DagRunState
@@ -40,10 +42,26 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             from functools import reduce
             airflow_schedule = reduce(lambda a, b: a | b, self.events)
 
-        def ts_as_datetime(ts):
-            # Convert ts to a datetime object
+        def ts_as_datetime(ts, context: Context = None):
             from datetime import datetime
-            return datetime.fromisoformat(ts)
+            if not context:
+                from airflow.operators.python import get_current_context
+                context = get_current_context()
+            ti = context["task_instance"]
+            sl_logical_date = ti.xcom_pull(task_ids="start", key="sl_logical_date")
+            if sl_logical_date:
+                ts = sl_logical_date
+            if isinstance(ts, str):
+                # # Convert ts to a datetime object
+                # if len(ts) == 10:
+                #     from datetime import datetime
+                #     return datetime.fromisoformat(ts)
+                # else:
+                from dateutil import parser
+                import pytz
+                return parser.isoparse(ts).astimezone(pytz.timezone('UTC'))
+            elif isinstance(ts, datetime):
+                return ts
 
         user_defined_macros = kwargs.get('user_defined_macros', job.caller_globals.get('user_defined_macros', dict()))
         kwargs.pop('user_defined_macros', None)
