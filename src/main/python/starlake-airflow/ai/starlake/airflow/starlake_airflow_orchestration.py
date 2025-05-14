@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset
+from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset, supports_inlet_events
 
 from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset
 
@@ -35,12 +35,17 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
 
         airflow_schedule: Union[str, List[Dataset], None] = None
 
+        events = self.events
+
         # AssetOrTimeSchedule is not supported yet within SL
         if self.cron is not None:
             airflow_schedule = self.cron
-        elif self.events is not None:
-            from functools import reduce
-            airflow_schedule = reduce(lambda a, b: a | b, self.events)
+        elif events:
+            if not supports_inlet_events():
+                airflow_schedule = events
+            else:
+                from functools import reduce
+                airflow_schedule = reduce(lambda a, b: a | b, events)
 
         def ts_as_datetime(ts, context: Context = None):
             from datetime import datetime

@@ -26,6 +26,8 @@ from airflow.operators.python import ShortCircuitOperator
 
 from airflow.utils.context import Context
 
+from airflow.utils.task_group import TaskGroup
+
 import logging
 
 DEFAULT_POOL:str ="default_pool"
@@ -40,6 +42,29 @@ DEFAULT_DAG_ARGS = {
     'max_active_runs': 1,
 }
 
+def __check_version__(version: str) -> bool:
+    """
+    Check if the current version is compatible with the given version.
+    """
+    from packaging.version import parse
+    import airflow
+
+    current_version = parse(airflow.__version__)
+
+    return current_version >= parse(version)
+
+def supports_inlet_events():
+    """
+    Check if the current environment supports inlet events.
+    """
+    return __check_version__("2.10.0")
+
+def supports_assets():
+    """
+    Check if the current environment supports assets.
+    """
+    return __check_version__("3.0.0")
+
 class AirflowDataset(AbstractEvent[Dataset]):
     @classmethod
     def to_event(cls, dataset: StarlakeDataset, source: Optional[str] = None) -> Dataset:
@@ -50,7 +75,8 @@ class AirflowDataset(AbstractEvent[Dataset]):
         }
         if source:
             extra["source"] = source
-        #return Dataset(dataset.refresh().url, extra)
+        if not supports_inlet_events():
+            return Dataset(dataset.refresh().url, extra)
         return Dataset(dataset.uri, extra)
 
 class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOptions, AirflowDataset):
@@ -114,7 +140,18 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         Returns:
             Optional[BaseOperator]: The optional Airflow task.
         """
-        if not scheduled:
+        if not supports_inlet_events() and not scheduled and least_frequent_datasets:
+            with TaskGroup(group_id=f'{task_id}') as start:
+                with TaskGroup(group_id=f'trigger_least_frequent_datasets') as trigger_least_frequent_datasets:
+                     for dataset in least_frequent_datasets:
+                         StarlakeEmptyOperator(
+                             task_id=f"trigger_{dataset.uri}",
+                             dataset=dataset,
+                             previous=True,
+                             source=self.source,
+                             **kwargs.copy())
+            return start 
+        elif supports_inlet_events() and not scheduled:
             datasets: List[Dataset] = []
             datasets += list(map(lambda dataset: self.to_event(dataset=dataset), not_scheduled_datasets or []))
             datasets += list(map(lambda dataset: self.to_event(dataset=dataset), least_frequent_datasets or []))
