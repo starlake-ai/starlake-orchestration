@@ -8,29 +8,8 @@ from datetime import datetime
 
 from typing import Generic, List, Optional, TypeVar, Union
 
-from enum import Enum
-
-class StarlakeFreshnessType(str, Enum):
-    """Enum for Starlake freshness types."""
-    HOURLY = "hourly"
-    DAILY = "daily"
-    WEEKLY = "weekly"
-    MONTHLY = "monthly"
-    YEARLY = "yearly"
-
-    def __str__(self):
-        return self.value
-
-    @classmethod
-    def from_str(cls, value: str):
-        """Returns an instance of StarlakeFreshnessType if the value is valid, otherwise raise a ValueError exception."""
-        try:
-            return cls(value.lower())
-        except ValueError:
-            raise ValueError(f"Unsupported freshness type: {value}")
-
 class StarlakeDataset():
-    def __init__(self, name: str, parameters: Optional[dict] = None, cron: Optional[str] = None, sink: Optional[str] = None, stream: Optional[str] = None, start_time: Optional[Union[str, datetime]] = None, freshness: Optional[StarlakeFreshnessType] = None, **kwargs):
+    def __init__(self, name: str, parameters: Optional[dict] = None, cron: Optional[str] = None, sink: Optional[str] = None, stream: Optional[str] = None, start_time: Optional[Union[str, datetime]] = None, freshness: int = 0, **kwargs):
         """Initializes a new StarlakeDataset instance.
 
         Args:
@@ -40,7 +19,7 @@ class StarlakeDataset():
             sink (str, optional): The optional sink. Defaults to None.
             stream (str, optional): The optional stream. Defaults to None.
             start_time (Optional[Union[str, datetime]], optional): The optional start time. Defaults to None.
-            freshness (Optional[StarlakeFreshnessType], optional): The optional freshness type. Defaults to None.
+            freshness (int): The freshness in seconds. Defaults to 0.
         """
         self._name = name
         if sink:
@@ -131,7 +110,7 @@ class StarlakeDataset():
         return f"{self.domain}.{self.table}"
 
     @property
-    def freshness(self) -> Optional[StarlakeFreshnessType]:
+    def freshness(self) -> int:
         return self._freshness
 
     def refresh(self, start_time: Optional[Union[str, datetime]] = None) -> StarlakeDataset:
