@@ -175,6 +175,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     dataset_events = inlet_events.get(dataset, None)
                     extra = dataset.extra or {}
                     cron = extra.get("cron", None)
+                    freshness = extra.get("freshness", 0)
                     if cron:
                         iter = croniter(cron, scheduled_date)
                         curr = iter.get_current(datetime)
@@ -184,13 +185,21 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             scheduled_date_to_check = curr
                         else:
                             scheduled_date_to_check = previous
+                        scheduled_date_to_check_min = scheduled_date_to_check - timedelta(seconds=freshness)
+                        scheduled_date_to_check_max = scheduled_date_to_check + timedelta(seconds=freshness)
                         scheduled_datetime = extra.get("scheduled_datetime", None)
                         if scheduled_datetime:
-                            if scheduled_datetime < scheduled_date_to_check:
+                            if freshness > 0:
+                                if scheduled_date_to_check_min > scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
+                                    missing_datasets.append(dataset)
+                                    print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
+                                else:
+                                    print(f"Found trigerring dataset {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
+                            elif scheduled_datetime != scheduled_date_to_check:
                                 missing_datasets.append(dataset)
-                                print(f"Missing dataset {dataset.uri} with scheduled datetime {scheduled_datetime} < {scheduled_date_to_check}")
+                                print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} != {scheduled_date_to_check}")
                             else:
-                                print(f"Dataset {dataset.uri} with scheduled datetime {scheduled_datetime} >= {scheduled_date_to_check} checked")
+                                print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} == {scheduled_date_to_check} found")
                         else:
                             dataset_events = inlet_events.get(dataset, [])
                             dataset_event: Optional[DatasetEvent] = None
@@ -201,22 +210,28 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 event: DatasetEvent = dataset_events[-i]
                                 extra = event.extra or {}
                                 scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
-                                if scheduled_datetime and scheduled_datetime >= scheduled_date_to_check:
+                                if scheduled_datetime and freshness > 0:
+                                    if scheduled_date_to_check_min > scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
+                                        print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
+                                        i += 1
+                                    else:
+                                        print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max} found")
+                                        dataset_event = event
+                                        break;
+                                elif scheduled_datetime and scheduled_datetime == scheduled_date_to_check:
+                                    print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} found")
                                     dataset_event = event
                                     break;
                                 else:
-                                    print(f"Dataset {dataset.uri} with event {event} not checked for scheduled datetime {scheduled_datetime} < {scheduled_date_to_check}")
+                                    print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} != {scheduled_date_to_check}")
                                     i += 1
                             if not dataset_event:
                                 missing_datasets.append(dataset)
-                                print(f"Missing dataset {dataset.uri} with no scheduled datetime")
-                            else:
-                                print(f"Dataset {dataset.uri} with event {dataset_event} checked")
                     elif not dataset_events:
-                        print(f"Missing non scheduled dataset {dataset.uri}")
+                        print(f"No dataset events for {dataset.uri} found")
                         missing_datasets.append(dataset)
                     else:
-                        print(f"Non scheduled dataset {dataset.uri} checked with event {dataset_events[-1]}")
+                        print(f"Found dataset event for {dataset.uri} not scheduled")
                 checked = not missing_datasets
                 if checked:
                     print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
@@ -227,7 +242,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 triggering_datasets = get_triggering_datasets(context)
                 if not triggering_datasets:
                     print("No triggering datasets found. Manually triggered.")
-                    return False #True
+                    return True
                 # if triggering_datasets.__len__() == datasets.__len__():
                 #     return True
                 else:
