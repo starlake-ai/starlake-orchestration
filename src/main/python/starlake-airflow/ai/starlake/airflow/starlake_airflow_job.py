@@ -181,6 +181,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
                 triggering_dataset_events = context['task_instance'].get_template_context()["triggering_dataset_events"]
                 triggering_uris = {}
+                dataset_uris = {}
                 for uri, events in triggering_dataset_events.items():
                     if not isinstance(events, list):
                         continue
@@ -195,14 +196,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         ds = Dataset(uri=uri, extra=extra)
                         if uri not in triggering_uris:
                             triggering_uris[uri] = event
-                            datasets.append(ds)
+                            dataset_uris.update({uri: ds})
                         else:
                             previous_event: DatasetEvent = triggering_uris[uri]
                             if event.timestamp > previous_event.timestamp:
                                 triggering_uris[uri] = event
-                                datasets.append(ds)
+                                dataset_uris.update({uri: ds})
 
-                return datasets
+                return list(dataset_uris.values())
 
             def check_datasets(scheduled_date: datetime, datasets: List[Dataset], context: Context) -> bool:
                 from croniter import croniter
@@ -298,20 +299,37 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
                     return check_datasets(greatest_triggering_dataset_datetime, checking_datasets, context)
 
-            inlets = kwargs.get("inlets", [])
+            dag_id = kwargs.get('dag_id', None)
+            if not dag_id:
+                dag_id = self.source
+            dag_checked = f"{dag_id}_checked"
+            dag_checked_dataset = Dataset(uri=dag_checked, extra={"source": self.source})
+            inlets: list = kwargs.get("inlets", [])
             inlets += datasets
+            inlets.append(dag_checked_dataset)
             kwargs.update({'inlets': inlets})
-            kwargs.update({'doc': kwargs.get('doc', f'Check if the DAG should be triggered.')})
+            kwargs.update({'doc': kwargs.get('doc', f'Check if the DAG should be started.')})
             kwargs.update({'pool': kwargs.get('pool', self.pool)})
             kwargs.update({'do_xcom_push': True})
-            return ShortCircuitOperator(
-                task_id = task_id,
-                python_callable = should_continue,
-                op_args=[],
-                op_kwargs=kwargs,
-                trigger_rule = 'all_done',
-                **kwargs
-            )
+
+            if len(datasets) > 0:
+                with TaskGroup(group_id=f'{task_id}') as start:
+                    check = ShortCircuitOperator(
+                        task_id = f"check_datasets",
+                        python_callable = should_continue,
+                        op_args=[],
+                        op_kwargs=kwargs,
+                        trigger_rule = 'all_done',
+                        **kwargs
+                    )
+                    check >> StarlakeEmptyOperator(
+                        task_id = f"datasets_checked",
+                        dataset=dag_checked, # will be used to track the previous checked dag run
+                        source=self.source,
+                    )
+                return start
+            else:
+                return super().start_op(task_id, scheduled, not_scheduled_datasets, least_frequent_datasets, most_frequent_datasets, **kwargs)
         else:
             return super().start_op(task_id, scheduled, not_scheduled_datasets, least_frequent_datasets, most_frequent_datasets, **kwargs)
 
@@ -507,6 +525,15 @@ class StarlakeDatasetMixin:
             else:
                 self.scheduled_dataset = None
                 uri = dataset
+                params.update({
+                    'uri': dataset,
+                    'cron': None,
+                    'sl_schedule_parameter_name': None,
+                    'sl_schedule_format': None,
+                    'previous': previous
+                })
+                kwargs['params'] = params
+                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts), params.previous)}}"
             outlets.append(Dataset(uri=uri, extra=extra))
             kwargs["outlets"] = outlets
             self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date", "ts",)
