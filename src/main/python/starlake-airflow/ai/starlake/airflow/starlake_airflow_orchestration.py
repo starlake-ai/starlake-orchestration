@@ -53,7 +53,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_logical_date = ti.xcom_pull(task_ids="start", key="sl_logical_date")
+            sl_logical_date = ti.xcom_pull(task_ids="check_datasets", key="sl_logical_date")
             if sl_logical_date:
                 ts = sl_logical_date
             if isinstance(ts, str):
