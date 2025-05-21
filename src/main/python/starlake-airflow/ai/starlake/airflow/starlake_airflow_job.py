@@ -157,6 +157,12 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             datasets += list(map(lambda dataset: self.to_event(dataset=dataset), least_frequent_datasets or []))
             datasets += list(map(lambda dataset: self.to_event(dataset=dataset), most_frequent_datasets or []))
 
+            dag_id = kwargs.get('dag_id', None)
+            if not dag_id:
+                dag_id = self.source
+            dag_checked = f"{dag_id}_checked"
+            dag_checked_dataset = Dataset(uri=dag_checked, extra={"source": self.source})
+
             def get_scheduled_datetime(dataset: Dataset) -> Optional[datetime]:
                 extra = dataset.extra or {}
                 scheduled_date = extra.get("scheduled_date", None)
@@ -209,6 +215,34 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 from croniter import croniter
                 missing_datasets = []
                 inlet_events = context['task_instance'].get_template_context()['inlet_events']
+
+                previous_dag_checked: Optional[datetime] = None
+                previous_dag_checked_events = inlet_events.get(dag_checked, [])
+                nb_events = len(previous_dag_checked_events)
+                i = 1
+                # if the dag was checked, we check the previous dag checked events in reverse order
+                while i < nb_events and not previous_dag_checked:
+                    event: DatasetEvent = previous_dag_checked_events[-i]
+                    extra = event.extra or {}
+                    scheduled_datetime = get_scheduled_datetime(Dataset(uri=dag_checked, extra=extra))
+                    if scheduled_datetime:
+                        if scheduled_date <= scheduled_datetime:
+                            print(f"Previous dag checked event {event.id} with scheduled datetime {scheduled_datetime} >= {scheduled_date}")
+                            i += 1
+                        else:
+                            print(f"Previous dag checked event {event.id} with scheduled datetime {scheduled_datetime} < {scheduled_date} found")
+                            previous_dag_checked = scheduled_datetime
+                            break
+                    else:
+                        i += 1
+                if not previous_dag_checked:
+                    # if the dag was not checked, we set the previous dag checked to the start date of the dag
+                    previous_dag_checked = context["dag"].start_date
+                    print(f"No previous dag checked event found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
+                else:
+                    print(f"Previous dag checked event found: {previous_dag_checked}")
+
+                # we check the datasets
                 for dataset in datasets:
                     dataset_events = inlet_events.get(dataset, None)
                     extra = dataset.extra or {}
@@ -274,6 +308,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 if checked:
                     print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
                     context['task_instance'].xcom_push(key='sl_logical_date', value=scheduled_date)
+                    context['task_instance'].xcom_push(key='previous_dag_checked', value=previous_dag_checked)
                 return checked
 
             def should_continue(**context) -> bool:
@@ -299,11 +334,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
                     return check_datasets(greatest_triggering_dataset_datetime, checking_datasets, context)
 
-            dag_id = kwargs.get('dag_id', None)
-            if not dag_id:
-                dag_id = self.source
-            dag_checked = f"{dag_id}_checked"
-            dag_checked_dataset = Dataset(uri=dag_checked, extra={"source": self.source})
             inlets: list = kwargs.get("inlets", [])
             inlets += datasets
             inlets.append(dag_checked_dataset)
