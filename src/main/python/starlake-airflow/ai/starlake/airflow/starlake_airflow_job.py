@@ -308,7 +308,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 if checked:
                     print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
                     context['task_instance'].xcom_push(key='sl_logical_date', value=scheduled_date)
-                    context['task_instance'].xcom_push(key='previous_dag_checked', value=previous_dag_checked)
+                    context['task_instance'].xcom_push(key='sl_previous_logical_date', value=previous_dag_checked)
                 return checked
 
             def should_continue(**context) -> bool:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset, supports_inlet_events
 
-from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset
+from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset, sl_timestamp_format
 
 from ai.starlake.job import StarlakeOrchestrator, StarlakeExecutionMode
 
@@ -68,9 +68,21 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             elif isinstance(ts, datetime):
                 return ts
 
+        from datetime import datetime
+        def sl_dates(cron_expr: str, start_time: datetime, context: Context = None) -> str:
+            if not context:
+                from airflow.operators.python import get_current_context
+                context = get_current_context()
+            ti = context["task_instance"]
+            sl_start_date = ti.xcom_pull(task_ids="check_datasets", key="sl_previous_logical_date")
+            sl_end_date = ti.xcom_pull(task_ids="check_datasets", key="sl_logical_date")
+            if sl_start_date and sl_end_date:
+                return f"sl_start_date='{sl_start_date.strftime(sl_timestamp_format)}',sl_end_date='{sl_end_date.strftime(sl_timestamp_format)}'"
+            return sl_cron_start_end_dates(cron_expr, start_time, sl_timestamp_format)
+
         user_defined_macros = kwargs.get('user_defined_macros', job.caller_globals.get('user_defined_macros', dict()))
         kwargs.pop('user_defined_macros', None)
-        user_defined_macros["sl_dates"] = sl_cron_start_end_dates
+        user_defined_macros["sl_dates"] = sl_dates
         user_defined_macros["ts_as_datetime"] = ts_as_datetime
         user_defined_macros["sl_scheduled_dataset"] = sl_scheduled_dataset
         user_defined_macros["sl_scheduled_date"] = sl_scheduled_date
