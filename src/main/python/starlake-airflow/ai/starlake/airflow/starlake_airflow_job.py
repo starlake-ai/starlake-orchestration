@@ -303,7 +303,29 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         print(f"No dataset events for {dataset.uri} found")
                         missing_datasets.append(dataset)
                     else:
-                        print(f"Found dataset event for {dataset.uri} not scheduled")
+                        # we check if one dataset event at least has been published since the previous dag checked
+                        dataset_events = inlet_events.get(dataset, [])
+                        dataset_event: Optional[DatasetEvent] = None
+                        nb_events = len(dataset_events)
+                        i = 1
+                        # we check the dataset events in reverse order
+                        while i < nb_events and not dataset_event:
+                            event: DatasetEvent = dataset_events[-i]
+                            extra = event.extra or {}
+                            scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
+                            if scheduled_datetime and scheduled_datetime > previous_dag_checked:
+                                print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} > {previous_dag_checked} found")
+                                dataset_event = event
+                                break;
+                            else:
+                                print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} <= {previous_dag_checked}")
+                                i += 1
+                        if not dataset_event:
+                            missing_datasets.append(dataset)
+                            print(f"No dataset event for {dataset.uri} found since the previous dag checked {previous_dag_checked}")
+                        else:
+                            print(f"Found dataset event for {dataset.uri} after the previous dag checked {previous_dag_checked} with scheduled datetime {scheduled_datetime}")
+                # if all the datasets have been found, we can continue the dag
                 checked = not missing_datasets
                 if checked:
                     print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
