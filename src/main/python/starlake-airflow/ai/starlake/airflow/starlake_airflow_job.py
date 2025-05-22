@@ -8,7 +8,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSpark
 
 from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
-from ai.starlake.common import MissingEnvironmentVariable, is_valid_cron
+from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron
 
 from ai.starlake.job.starlake_job import StarlakeOrchestrator
 
@@ -94,19 +94,74 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         pattern = re.compile(r'\d{4}-\d{2}-\d{2}')
         if pattern.fullmatch(sd):
             from airflow.utils import timezone
-            self.start_date = timezone.make_aware(datetime.strptime(sd, "%Y-%m-%d"))
+            self.__start_date = timezone.make_aware(datetime.strptime(sd, "%Y-%m-%d"))
         else:
             from airflow.utils.dates import days_ago
-            self.start_date = days_ago(1)
+            self.__start_date = days_ago(1)
         try:
             ed = __class__.get_context_var(var_name='end_date', options=self.options)
         except MissingEnvironmentVariable:
             ed = ""
         if pattern.fullmatch(ed):
             from airflow.utils import timezone
-            self.end_date = timezone.make_aware(datetime.strptime(ed, "%Y-%m-%d"))
+            self.__end_date = timezone.make_aware(datetime.strptime(ed, "%Y-%m-%d"))
         else:
-            self.end_date = None
+            self.__end_date = None
+        data_cycle_enabled = str(__class__.get_context_var(var_name='data_cycle_enabled', default_value="false", options=self.options)).strip().lower() == "true"
+        self.__data_cycle_enabled = data_cycle_enabled
+        data_cycle: Optional[str] = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
+        self.data_cycle = data_cycle
+        optional_dataset_enabled = str(__class__.get_context_var(var_name='optional_dataset_enabled', default_value="false", options=self.options)).strip().lower() == "true"
+        self.__optional_dataset_enabled = optional_dataset_enabled
+
+    @property
+    def start_date(self) -> datetime:
+        """Get the start date value."""
+        return self.__start_date
+
+    @property
+    def end_date(self) -> Optional[datetime]:
+        """Get the end date value."""
+        return self.__end_date
+
+    @property
+    def data_cycle_enabled(self) -> bool:
+        """whether the data cycle is enabled or not."""
+        return self.__data_cycle_enabled
+
+    @property
+    def data_cycle(self) -> Optional[str]:
+        """Get the data cycle value."""
+        return self.__data_cycle
+
+    @data_cycle.setter
+    def data_cycle(self, value: Optional[str]) -> None:
+        """Set the data cycle value."""
+        if self.data_cycle_enabled and value:
+            data_cycle = value.strip().lower()
+            if data_cycle == "none":
+                self.__data_cycle = None
+            elif data_cycle == "hourly":
+                self.__data_cycle = "0 * * * *"
+            elif data_cycle == "daily":
+                self.__data_cycle = "0 0 * * *"
+            elif data_cycle == "weekly":
+                self.__data_cycle = "0 0 * * 0"
+            elif data_cycle == "monthly":
+                self.__data_cycle = "0 0 1 * *"
+            elif data_cycle == "yearly":
+                self.__data_cycle = "0 0 1 1 *"
+            elif is_valid_cron(data_cycle):
+                self.__data_cycle = data_cycle
+            else:
+                raise ValueError(f"Invalid data cycle value: {data_cycle}")
+        else:
+            self.__data_cycle = None
+
+    @property
+    def optional_dataset_enabled(self) -> bool:
+        """whether a dataset can be optional or not."""
+        return self.__optional_dataset_enabled
 
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
@@ -242,14 +297,26 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 else:
                     print(f"Previous dag checked event found: {previous_dag_checked}")
 
+                data_cycle_diff = None
+                if self.data_cycle:
+                    data_cycle_diff = get_cron_frequency(self.data_cycle)
+
                 # we check the datasets
                 for dataset in datasets:
                     dataset_events = inlet_events.get(dataset, [])
                     nb_events = len(dataset_events)
                     extra = dataset.extra or {}
-                    cron = extra.get("cron", None)
+                    cron = extra.get("cron", None) or self.data_cycle
                     freshness = int(extra.get("freshness", 0))
-                    if cron and is_valid_cron(cron):
+                    scheduled = cron and is_valid_cron(cron)
+                    optional = False
+                    if self.optional_dataset_enabled and data_cycle_diff:
+                        # we check if the dataset is optional
+                        optional = (scheduled and abs(data_cycle_diff.total_seconds()) < abs(get_cron_frequency(cron).total_seconds())) or (data_cycle_diff.total_seconds() < freshness)
+                    if optional:
+                        print(f"Dataset {dataset.uri} is optional, we skip it")
+                        continue
+                    elif scheduled:
                         iter = croniter(cron, scheduled_date)
                         curr = iter.get_current(datetime)
                         previous = iter.get_prev(datetime)
@@ -361,8 +428,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 if not triggering_datasets:
                     print("No triggering datasets found. Manually triggered.")
                     return True
-                # if triggering_datasets.__len__() == datasets.__len__():
-                #     return True
                 else:
                     triggering_uris = {dataset.uri: dataset for dataset in triggering_datasets}
                     datasets_uris = {dataset.uri: dataset for dataset in datasets}
