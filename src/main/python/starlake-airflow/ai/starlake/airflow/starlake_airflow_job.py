@@ -310,36 +310,42 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         print(f"No dataset events for {dataset.uri} found")
                         missing_datasets.append(dataset)
                     else:
+                        # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
                         scheduled_date_to_check_min = scheduled_date - timedelta(seconds=freshness)
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
-                        # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds
                         dataset_event: Optional[DatasetEvent] = None
+                        scheduled_datetime: Optional[datetime] = None
                         i = 1
                         # we check the dataset events in reverse order
-                        while i < nb_events and not dataset_event:
+                        while i < nb_events:
                             event: DatasetEvent = dataset_events[-i]
                             extra = event.extra or {}
                             scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
                             if scheduled_datetime:
                                 if scheduled_datetime > previous_dag_checked:
-                                    if scheduled_date_to_check_min > scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
+                                    if scheduled_date_to_check_min > scheduled_datetime:
+                                        # we stop because all previous dataset events would be also before the scheduled date to check
+                                        break;
+                                    elif scheduled_datetime > scheduled_date_to_check_max:
                                         i += 1
                                     else:
                                         print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} after {previous_dag_checked} and  around the scheduled date {scheduled_date} +- {freshness} in seconds found")
                                         dataset_event = event
-                                        if scheduled_datetime > max_scheduled_date:
-                                            max_scheduled_date = scheduled_datetime
-                                        break;
+                                        if scheduled_datetime <= scheduled_date:
+                                            # we stop because all previous dataset events would be also before the scheduled date but not closer than the current one
+                                            break;
                                 else:
                                     # we stop because all previous dataset events would be also before the previous dag checked
                                     break;
                             else:
                                 i += 1
-                        if not dataset_event:
+                        if not dataset_event or not scheduled_datetime:
                             missing_datasets.append(dataset)
                             print(f"No dataset event for {dataset.uri} found since the previous dag checked {previous_dag_checked} and around the scheduled date {scheduled_date} +- {freshness} in seconds")
                         else:
                             print(f"Found dataset event {dataset_event.id} for {dataset.uri} after the previous dag checked {previous_dag_checked}  and  around the scheduled date {scheduled_date} +- {freshness} in seconds")
+                            if scheduled_datetime > max_scheduled_date:
+                                max_scheduled_date = scheduled_datetime
                 # if all the required datasets have been found, we can continue the dag
                 checked = not missing_datasets
                 if checked:
