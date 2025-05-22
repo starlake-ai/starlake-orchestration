@@ -46,6 +46,9 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             else:
                 from functools import reduce
                 airflow_schedule = reduce(lambda a, b: a | b, events)
+                if self.job.data_cycle_enabled and not self.job.data_cycle:
+                    self.job.data_cycle = self.computed_cron_expr
+                    
 
         def ts_as_datetime(ts, context: Context = None):
             from datetime import datetime
@@ -57,11 +60,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             if sl_logical_date:
                 ts = sl_logical_date
             if isinstance(ts, str):
-                # # Convert ts to a datetime object
-                # if len(ts) == 10:
-                #     from datetime import datetime
-                #     return datetime.fromisoformat(ts)
-                # else:
                 from dateutil import parser
                 import pytz
                 return parser.isoparse(ts).astimezone(pytz.timezone('UTC'))
