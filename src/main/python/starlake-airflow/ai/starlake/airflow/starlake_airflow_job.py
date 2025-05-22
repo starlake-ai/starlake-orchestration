@@ -291,7 +291,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     else:
                         i += 1
                 if not previous_dag_checked:
-                    # if the dag was not checked, we set the previous dag checked to the start date of the dag
+                    # if the dag was never checked, we set the previous dag checked to the start date of the dag
                     previous_dag_checked = context["dag"].start_date
                     print(f"No previous dag checked event found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
                 else:
