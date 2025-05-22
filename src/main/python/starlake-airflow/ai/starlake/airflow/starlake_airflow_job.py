@@ -312,7 +312,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     optional = False
                     if self.optional_dataset_enabled and data_cycle_diff:
                         # we check if the dataset is optional
-                        optional = (scheduled and abs(data_cycle_diff.total_seconds()) < abs(get_cron_frequency(cron).total_seconds())) or (data_cycle_diff.total_seconds() < freshness)
+                        optional = (scheduled and abs(data_cycle_diff.total_seconds()) < abs(get_cron_frequency(cron).total_seconds())) or (not scheduled and data_cycle_diff.total_seconds() < freshness)
                     if optional:
                         print(f"Dataset {dataset.uri} is optional, we skip it")
                         continue
