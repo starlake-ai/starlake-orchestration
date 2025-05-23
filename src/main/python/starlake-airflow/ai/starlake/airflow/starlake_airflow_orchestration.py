@@ -56,7 +56,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_logical_date = ti.xcom_pull(task_ids="check_datasets", key="sl_logical_date")
+            sl_logical_date = ti.xcom_pull(task_ids="start", key="sl_logical_date")
             if sl_logical_date:
                 ts = sl_logical_date
             if isinstance(ts, str):
@@ -72,8 +72,8 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_start_date = ti.xcom_pull(task_ids="check_datasets", key="sl_previous_logical_date")
-            sl_end_date = ti.xcom_pull(task_ids="check_datasets", key="sl_logical_date")
+            sl_start_date = ti.xcom_pull(task_ids="start", key="sl_previous_logical_date")
+            sl_end_date = ti.xcom_pull(task_ids="start", key="sl_logical_date")
             if sl_start_date and sl_end_date:
                 return f"sl_start_date='{sl_start_date.strftime(sl_timestamp_format)}',sl_end_date='{sl_end_date.strftime(sl_timestamp_format)}'"
             return sl_cron_start_end_dates(cron_expr, start_time, sl_timestamp_format)
