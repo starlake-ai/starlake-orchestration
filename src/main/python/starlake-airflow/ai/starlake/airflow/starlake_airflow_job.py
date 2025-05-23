@@ -512,21 +512,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             kwargs.update({'do_xcom_push': True})
 
             if len(datasets) > 0:
-                with TaskGroup(group_id=f'{task_id}') as start:
-                    check = ShortCircuitOperator(
-                        task_id = f"check_datasets",
+                return ShortCircuitOperator(
+                        task_id = "start",
                         python_callable = should_continue,
                         op_args=[],
                         op_kwargs=kwargs,
                         trigger_rule = 'all_done',
                         **kwargs
                     )
-                    check >> StarlakeEmptyOperator(
-                        task_id = f"datasets_checked",
-                        dataset=dag_checked, # will be used to track the previous checked dag run
-                        source=self.source,
-                    )
-                return start
             else:
                 return super().start_op(task_id, scheduled, not_scheduled_datasets, least_frequent_datasets, most_frequent_datasets, **kwargs)
         else:
