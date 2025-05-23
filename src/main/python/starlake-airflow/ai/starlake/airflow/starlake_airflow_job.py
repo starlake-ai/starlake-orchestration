@@ -107,12 +107,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             self.__end_date = timezone.make_aware(datetime.strptime(ed, "%Y-%m-%d"))
         else:
             self.__end_date = None
-        data_cycle_enabled = str(__class__.get_context_var(var_name='data_cycle_enabled', default_value="false", options=self.options)).strip().lower() == "true"
-        self.__data_cycle_enabled = data_cycle_enabled
-        data_cycle: Optional[str] = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
-        self.data_cycle = data_cycle
-        optional_dataset_enabled = str(__class__.get_context_var(var_name='optional_dataset_enabled', default_value="false", options=self.options)).strip().lower() == "true"
-        self.__optional_dataset_enabled = optional_dataset_enabled
+        self.__optional_dataset_enabled = str(__class__.get_context_var(var_name='optional_dataset_enabled', default_value="false", options=self.options)).strip().lower() == "true"
+        self.__data_cycle_enabled = str(__class__.get_context_var(var_name='data_cycle_enabled', default_value="false", options=self.options)).strip().lower() == "true"
+        self.data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
+        self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
 
     @property
     def start_date(self) -> datetime:
@@ -162,6 +160,11 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
     def optional_dataset_enabled(self) -> bool:
         """whether a dataset can be optional or not."""
         return self.__optional_dataset_enabled
+
+    @property
+    def beyond_data_cycle_enabled(self) -> bool:
+        """whether the beyond data cycle feature is enabled or not."""
+        return self.__beyond_data_cycle_enabled
 
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
@@ -297,22 +300,33 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 else:
                     print(f"Previous dag checked event found: {previous_dag_checked}")
 
-                data_cycle_diff = None
+                data_cycle_freshness = None
                 if self.data_cycle:
-                    data_cycle_diff = get_cron_frequency(self.data_cycle)
+                    # the freshness of the data cycle is the time delta between 2 iterations of its schedule
+                    data_cycle_freshness = get_cron_frequency(self.data_cycle)
 
                 # we check the datasets
                 for dataset in datasets:
                     dataset_events = inlet_events.get(dataset, [])
                     nb_events = len(dataset_events)
                     extra = dataset.extra or {}
-                    cron = extra.get("cron", None) or self.data_cycle
-                    freshness = int(extra.get("freshness", 0))
+                    original_cron = extra.get("cron", None)
+                    cron = original_cron or self.data_cycle
                     scheduled = cron and is_valid_cron(cron)
+                    freshness = int(extra.get("freshness", 0))
                     optional = False
-                    if self.optional_dataset_enabled and data_cycle_diff:
-                        # we check if the dataset is optional
-                        optional = (scheduled and abs(data_cycle_diff.total_seconds()) < abs(get_cron_frequency(cron).total_seconds())) or (not scheduled and data_cycle_diff.total_seconds() < freshness)
+                    beyond_data_cycle_allowed = False
+                    if data_cycle_freshness:
+                        original_scheduled = original_cron and is_valid_cron(original_cron)
+                        if self.optional_dataset_enabled:
+                            # we check if the dataset is optional by comparing its freshness with that of the data cycle
+                            # the freshness of a scheduled dataset is the time delta between 2 iterations of its schedule
+                            # the freshness of a non scheduled dataset is defined by its freshness parameter
+                            optional = (original_scheduled and abs(data_cycle_freshness.total_seconds()) < abs(get_cron_frequency(original_cron).total_seconds())) or (not original_scheduled and abs(data_cycle_freshness.total_seconds()) < freshness)
+                        if self.beyond_data_cycle_enabled:
+                            # we check if the dataset scheduled date is allowed to be beyond the data cycle by comparing its freshness with that of the data cycle
+                            beyond_data_cycle_allowed = (original_scheduled and abs(data_cycle_freshness.total_seconds()) < abs(get_cron_frequency(original_cron).total_seconds() + freshness)) or (not original_scheduled and abs(data_cycle_freshness.total_seconds()) < freshness)
+                    found = False
                     if optional:
                         print(f"Dataset {dataset.uri} is optional, we skip it")
                         continue
@@ -322,29 +336,27 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         previous = iter.get_prev(datetime)
                         next = croniter(cron, previous).get_next(datetime)
                         if curr == next :
-                            scheduled_date_to_check = curr
+                            scheduled_date_to_check_max = curr
                         else:
-                            scheduled_date_to_check = previous
-                        scheduled_date_to_check_min = scheduled_date_to_check - timedelta(seconds=freshness)
-                        scheduled_date_to_check_max = scheduled_date_to_check + timedelta(seconds=freshness)
+                            scheduled_date_to_check_max = previous
+                        scheduled_date_to_check_min = croniter(cron, scheduled_date_to_check_max).get_prev(datetime)
+                        if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
+                            scheduled_date_to_check_min = previous_dag_checked
+                        if beyond_data_cycle_allowed:
+                            scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
+                            scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
                         scheduled_datetime = extra.get("scheduled_datetime", None)
                         if scheduled_datetime:
-                            if freshness > 0:
-                                if scheduled_date_to_check_min > scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
-                                    missing_datasets.append(dataset)
-                                    print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                                else:
-                                    print(f"Found trigerring dataset {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                                    if scheduled_datetime > max_scheduled_date:
-                                        max_scheduled_date = scheduled_datetime
-                            elif scheduled_datetime != scheduled_date_to_check:
-                                missing_datasets.append(dataset)
-                                print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} != {scheduled_date_to_check}")
+                            # we check if the scheduled datetime is between the scheduled date to check min and max
+                            if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
+                                # we will check within the inlet events
+                                print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
                             else:
-                                print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} == {scheduled_date_to_check} found")
+                                found = True
+                                print(f"Found trigerring dataset {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
                                 if scheduled_datetime > max_scheduled_date:
                                     max_scheduled_date = scheduled_datetime
-                        else:
+                        if not found:
                             dataset_event: Optional[DatasetEvent] = None
                             i = 1
                             # we check the dataset events in reverse order
@@ -352,26 +364,21 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 event: DatasetEvent = dataset_events[-i]
                                 extra = event.extra or {}
                                 scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
-                                if scheduled_datetime and freshness > 0:
-                                    if scheduled_date_to_check_min > scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
+                                if scheduled_datetime:
+                                    if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
                                         print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
                                         i += 1
                                     else:
+                                        found = True
                                         print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max} found")
                                         dataset_event = event
                                         if scheduled_datetime > max_scheduled_date:
                                             max_scheduled_date = scheduled_datetime
                                         break;
-                                elif scheduled_datetime and scheduled_datetime == scheduled_date_to_check:
-                                    print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} found")
-                                    dataset_event = event
-                                    if scheduled_datetime > max_scheduled_date:
-                                        max_scheduled_date = scheduled_datetime
-                                    break;
                                 else:
-                                    print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} != {scheduled_date_to_check}")
+                                    print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
                                     i += 1
-                            if not dataset_event:
+                            if not found:
                                 missing_datasets.append(dataset)
                     elif not dataset_events or nb_events == 0:
                         print(f"No dataset events for {dataset.uri} found")
@@ -396,6 +403,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                     elif scheduled_datetime > scheduled_date_to_check_max:
                                         i += 1
                                     else:
+                                        found = True
                                         print(f"Dataset event for {dataset.uri} with scheduled datetime {scheduled_datetime} after {previous_dag_checked} and  around the scheduled date {scheduled_date} +- {freshness} in seconds found")
                                         dataset_event = event
                                         if scheduled_datetime <= scheduled_date:
@@ -406,7 +414,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                     break;
                             else:
                                 i += 1
-                        if not dataset_event or not scheduled_datetime:
+                        if not found or not scheduled_datetime:
                             missing_datasets.append(dataset)
                             print(f"No dataset event for {dataset.uri} found since the previous dag checked {previous_dag_checked} and around the scheduled date {scheduled_date} +- {freshness} in seconds")
                         else:
