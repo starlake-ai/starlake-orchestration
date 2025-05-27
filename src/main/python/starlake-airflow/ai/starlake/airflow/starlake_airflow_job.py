@@ -222,8 +222,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             dag_id = kwargs.get('dag_id', None)
             if not dag_id:
                 dag_id = self.source
-            dag_checked = f"{dag_id}_checked"
-            dag_checked_dataset = Dataset(uri=dag_checked, extra={"source": self.source})
 
             def get_scheduled_datetime(dataset: Dataset) -> Optional[datetime]:
                 extra = dataset.extra or {}
@@ -505,7 +503,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
             inlets: list = kwargs.get("inlets", [])
             inlets += datasets
-            inlets.append(dag_checked_dataset)
             kwargs.update({'inlets': inlets})
             kwargs.update({'doc': kwargs.get('doc', f'Check if the DAG should be started.')})
             kwargs.update({'pool': kwargs.get('pool', self.pool)})
