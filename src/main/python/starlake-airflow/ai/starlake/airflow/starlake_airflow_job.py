@@ -223,7 +223,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             if not dag_id:
                 dag_id = self.source
 
-            def get_scheduled_datetime(dataset: Dataset) -> Optional[datetime]:
+            def get_scheduled_datetime(dataset: Dataset) -> datetime:
                 extra = dataset.extra or {}
                 scheduled_date = extra.get("scheduled_date", None)
                 if scheduled_date:
@@ -233,7 +233,8 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     extra.update({"scheduled_datetime": dt})
                     dataset.extra = extra
                     return dt
-                return None
+                else:
+                    raise ValueError(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a 'scheduled_date' key in its extra data.")
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
 
@@ -327,13 +328,12 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     dag_run = dag_runs[0]
                     previous_dag_checked = dag_run.data_interval_end
                     print(f"Found previous non skipped dag run {dag_run.dag_id} with scheduled date {previous_dag_checked}")
+                    print(f"Previous dag checked event found: {previous_dag_checked}")
 
                 if not previous_dag_checked:
                     # if the dag was never checked, we set the previous dag checked to the start date of the dag
                     previous_dag_checked = context["dag"].start_date
                     print(f"No previous dag checked event found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
-                else:
-                    print(f"Previous dag checked event found: {previous_dag_checked}")
 
                 data_cycle_freshness = None
                 if self.data_cycle:
