@@ -175,6 +175,7 @@ class DuckDBSession(Session):
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('DUCKDB_DB', env.get('DUCKDB_DB', None)),
+            "schema": kwargs.get('DUCKDB_SCHEMA', env.get('DUCKDB_SCHEMA', None))
         }
         super().__init__(database=options.get('database', None), **kwargs)
 
@@ -207,6 +208,7 @@ class PostgresSession(Session):
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('POSTGRES_DB', env.get('POSTGRES_DB', None)),
+            "currentSchema": database or kwargs.get('POSTGRES_SCHEMA', env.get('POSTGRES_SCHEMA', None)),
             "user": user or kwargs.get('POSTGRES_USER', env.get('POSTGRES_USER', None)),
             "password": password or kwargs.get('POSTGRES_PASSWORD', env.get('POSTGRES_PASSWORD', None)),
             "host": host or kwargs.get('POSTGRES_HOST', env.get('POSTGRES_HOST', None)),
@@ -313,7 +315,7 @@ class RedshiftSession(Session):
         return redshift_connector.connect(database=self.database, user=self.user, host=self.host, password=self.password, port=self.port)
 
 class SnowflakeSession(Session):
-    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+    def __init__(self, database: Optional[str] = None, schema: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
         """
         Create a new Snowflake session
         Args:
@@ -327,6 +329,7 @@ class SnowflakeSession(Session):
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None)),
+            "schema": schema or kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None)),
             "user": user or kwargs.get('SNOWFLAKE_USER', env.get('SNOWFLAKE_USER', None)),
             "password": password or kwargs.get('SNOWFLAKE_PASSWORD', env.get('SNOWFLAKE_PASSWORD', None)),
             "host": host or kwargs.get('SNOWFLAKE_HOST', env.get('SNOWFLAKE_HOST', None)),
@@ -530,7 +533,7 @@ class SessionFactory:
         super().__init__(**kwargs)
 
     @classmethod
-    def session(cls, provider: SessionProvider = SessionProvider.DUCKDB, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs) -> Session: 
+    def session(cls, provider: SessionProvider = SessionProvider.DUCKDB, database: Optional[str] = None,  schema: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs) -> Session: 
         """
         Create a new session based on the provider
         Args:
@@ -555,7 +558,7 @@ class SessionFactory:
         elif provider == SessionProvider.REDSHIFT:
             return RedshiftSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.SNOWFLAKE:
-            return SnowflakeSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+            return SnowflakeSession(database=database, schema=schema, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.BIGQUERY:
             return BigQuerySession(database=database, **kwargs)
         else:
