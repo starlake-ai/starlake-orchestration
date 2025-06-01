@@ -168,7 +168,7 @@ def creds(options: dict):
             token=options['accessToken'],
             refresh_token=options['refreshToken'],
             client_id=options['clientId'],
-            client_secret=options['clientSecret'],
+            client_secret=options['clientSecret'],  
             scopes=scopes,
         )
     else:
