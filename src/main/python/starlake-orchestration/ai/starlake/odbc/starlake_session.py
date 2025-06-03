@@ -165,7 +165,7 @@ class Session(ABC):
 import os
 
 class DuckDBSession(Session):
-    def __init__(self, database: Optional[str] = None, **kwargs):
+    def __init__(self, database: Optional[str] = None, schema: Optional[str] = None, **kwargs):
         """
         Create a new DuckDB session
         Args:
@@ -175,7 +175,7 @@ class DuckDBSession(Session):
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('DUCKDB_DB', env.get('DUCKDB_DB', None)),
-            "schema": kwargs.get('DUCKDB_SCHEMA', env.get('DUCKDB_SCHEMA', None))
+            "schema": schema or kwargs.get('DUCKDB_SCHEMA', env.get('DUCKDB_SCHEMA', None))
         }
         super().__init__(database=options.get('database', None), **kwargs)
 
@@ -194,7 +194,7 @@ class DuckDBSession(Session):
         return duckdb.connect(database=self.database)
 
 class PostgresSession(Session):
-    def __init__(self, database: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
+    def __init__(self, database: Optional[str] = None, schema: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, host: Optional[str] = None, port: Optional[int] = None, **kwargs):
         """
         Create a new Postgres session
         Args:
@@ -208,7 +208,7 @@ class PostgresSession(Session):
         env = os.environ.copy() # Copy the current environment variables
         options = {
             "database": database or kwargs.get('POSTGRES_DB', env.get('POSTGRES_DB', None)),
-            "currentSchema": database or kwargs.get('POSTGRES_SCHEMA', env.get('POSTGRES_SCHEMA', None)),
+            "currentSchema": schema or kwargs.get('POSTGRES_SCHEMA', env.get('POSTGRES_SCHEMA', None)),
             "user": user or kwargs.get('POSTGRES_USER', env.get('POSTGRES_USER', None)),
             "password": password or kwargs.get('POSTGRES_PASSWORD', env.get('POSTGRES_PASSWORD', None)),
             "host": host or kwargs.get('POSTGRES_HOST', env.get('POSTGRES_HOST', None)),
