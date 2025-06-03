@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 class Cursor(ABC):
 
@@ -447,7 +447,7 @@ class BigQuerySession(Session):
         elif auth_type == 'USER_CREDENTIALS':
             from google.oauth2 import credentials
             creds = credentials.Credentials(
-                token=kwargs.get(accessToken, env.get('accessToken', None)),
+                token=kwargs.get('accessToken', env.get('accessToken', None)),
                 refresh_token=kwargs.get('refreshToken', env.get('refreshToken', None)),
                 client_id=kwargs.get('clientId', env.get('clientId', None)),
                 client_secret=kwargs.get('clientSecret', env.get('clientSecret', None)),
@@ -539,6 +539,7 @@ class SessionFactory:
         Args:
             provider (SessionProvider): The provider to use
             database (Optional[str]): The database name
+            schema (Optional[str]): The schema name
             user (Optional[str]): The user name
             password (Optional[str]): The password
             host (Optional[str]): The host
