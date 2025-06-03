@@ -550,9 +550,9 @@ class SessionFactory:
             session = SessionFactory.session(SessionProvider.POSTGRES, database="starlake", user="starlake")
         """
         if provider == SessionProvider.DUCKDB:
-            return DuckDBSession(database=database, **kwargs)
+            return DuckDBSession(database=database, schema=schema, **kwargs)
         elif provider == SessionProvider.POSTGRES:
-            return PostgresSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
+            return PostgresSession(database=database, schema=schema, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.MYSQL:
             return MySQLSession(database=database, user=user, password=password, host=host, port=port, **kwargs)
         elif provider == SessionProvider.REDSHIFT:
