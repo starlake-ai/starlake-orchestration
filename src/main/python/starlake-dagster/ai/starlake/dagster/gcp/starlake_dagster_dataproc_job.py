@@ -14,7 +14,7 @@ from ai.starlake.common import TODAY
 
 from ai.starlake.gcp import StarlakeDataprocClusterConfig
 
-from dagster import Failure, Output, AssetMaterialization, AssetKey, Out, op, RetryPolicy
+from dagster import Failure, Output, AssetMaterialization, AssetKey, Out, op, RetryPolicy, OpExecutionContext
 
 from dagster._core.definitions import NodeDefinition
 
@@ -190,7 +190,7 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
             out=outs,
             retry_policy=retry_policy,
         )
-        def submit_dataproc_job(context, config: DagsterLogicalDatetimeConfig, **kwargs):
+        def submit_dataproc_job(context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, **kwargs):
             if dataset:
                 assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset))
 
@@ -206,7 +206,7 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 job_details["job"] = job
 
             if config.dry_run:
-                output = f"Starlake command {command} execution skipped due to dry run mode."
+                output = f"Starlake command {" ".join(arguments)} execution skipped due to dry run mode."
                 context.log.info(output)
                 result = {"status": {"state": "DONE"}}
             else:
@@ -229,6 +229,8 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
             else:
                 for asset in assets:
                     yield AssetMaterialization(asset_key=asset.path, description=f"Spark job {job_id} submitted to Dataproc cluster {self.__dataproc__.cluster_name}")
+                if dataset:
+                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, **kwargs)
 
                 yield Output(value=job_id, output_name=out)
 

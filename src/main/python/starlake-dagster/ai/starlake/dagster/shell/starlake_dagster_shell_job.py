@@ -6,7 +6,7 @@ from ai.starlake.dataset import StarlakeDataset
 
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment, TaskType
 
-from dagster import Failure, Output, AssetMaterialization, AssetKey, Out, op, RetryPolicy
+from dagster import Failure, Output, AssetMaterialization, AssetKey, Out, op, RetryPolicy, OpExecutionContext
 
 from dagster._core.definitions import NodeDefinition
 
@@ -99,7 +99,7 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
             out=outs,
             retry_policy=retry_policy,
         )
-        def job(context, config: DagsterLogicalDatetimeConfig, **kwargs):
+        def job(context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, **kwargs):
 
             if dataset:
                 assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset, **kwargs))
@@ -141,6 +141,8 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
             else:
                 for asset in assets:
                     yield AssetMaterialization(asset_key=asset.path, description=kwargs.get("description", f"Starlake command {command} execution succeeded"))
+                if dataset:
+                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, **kwargs)
 
                 yield Output(value=output, output_name=out)
 
