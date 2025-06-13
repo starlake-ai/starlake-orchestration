@@ -104,10 +104,12 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                     max_scheduled_date: Optional[datetime] = t[2]
                     if checked and previous_partition and max_scheduled_date:
                         # If all datasets are consistent with the most recent materialized dataset, we run the pipeline
+                        print(f"All datasets are consistent with the most recent materialized dataset {freshest_materialized_dataset_datetime.strftime(sl_timestamp_format)}, we run the pipeline {pipeline_id}")
                         logical_datetime = max_scheduled_date.strftime(sl_timestamp_format)
                         previous_logical_datetime=previous_partition.strftime(sl_timestamp_format)
+                        context.advance_cursor(asset_events)
                         return RunRequest(
-                            run_config=dg_pipeline.__ops_config(logical_datetime=logical_datetime, previous_logical_datetime=previous_logical_datetime),
+                            run_config=dg_pipeline._ops_config(logical_datetime=logical_datetime, previous_logical_datetime=previous_logical_datetime),
                             partition_key=logical_datetime,
                             tags={
                                 PARTITION_NAME_TAG: logical_datetime,
@@ -116,10 +118,12 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                             },
                         )
                     else:
+                        all_materialized_assets = ",".join(materialized_asset_key_strs)
+                        all_uris = ",".join([f"{dataset.uri}" for dataset in datasets_to_check])
                         # If any dataset is not consistent with the most recent materialized dataset, we skip the run
                         return SkipReason(
-                            f"Observed materializations for {materialized_asset_key_strs}, "
-                            f"but some datasets {datasets_to_check} are not consitent with {freshest_materialized_dataset_datetime.strftime(sl_timestamp_format)}"
+                            f"Observed materializations for {all_materialized_assets}, "
+                            f"but some datasets {all_uris} are not consistent with {freshest_materialized_dataset_datetime.strftime(sl_timestamp_format)}"
                         )
                 else:
                     return SkipReason("No materializations observed")
@@ -449,7 +453,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 else:
                     logical_datetime = str(value)
 
-                return self.__ops_config(logical_datetime)
+                return self._ops_config(logical_datetime)
 
             partition_config = PartitionedConfig(
                 partitions_def=TimeWindowPartitionsDefinition(
@@ -468,7 +472,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             config=partition_config,
         )
 
-    def __ops_config(self, logical_datetime: str, dry_run: bool = False, previous_logical_datetime: Optional[str] = None) -> dict:
+    def _ops_config(self, logical_datetime: str, dry_run: bool = False, previous_logical_datetime: Optional[str] = None) -> dict:
         def walk(node: NodeDefinition, config: dict = dict()) -> dict:
             if isinstance(node, OpDefinition):
                 config[node.name] = {'config': {'logical_datetime': logical_datetime, 'dry_run': dry_run, 'previous_logical_datetime': previous_logical_datetime}}
@@ -549,9 +553,12 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
         if partition:
             from dateutil import parser
             try:
-                return parser.isoparse(event.partition_key).astimezone(pytz.timezone('UTC'))
+                partition = partition.replace('T', ' ').replace('.', ':').replace('_', '+')
+                print(f"Partition {partition} found for event {event.asset_key.to_user_string()} with id {event.storage_id}")
+                # Attempt to parse the partition key as a datetime
+                return parser.isoparse(partition).astimezone(pytz.timezone('UTC'))
             except ValueError:
-                print(f"Invalid partition key: {event.partition_key} for event {event.asset_key.to_user_string()} with id {event.storage_id}")
+                print(f"Invalid partition key: {partition} for event {event.asset_key.to_user_string()} with id {event.storage_id}")
                 partition = None
         if not partition:
             mat = event.asset_materialization
@@ -572,13 +579,13 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 print(f"Invalid cron expression: {cron_expr} in materialization {mat}")
         return None
 
-    def get_freshness(self, mat: AssetMaterialization) -> int:
+    def get_freshness(self, mat: AssetMaterialization) -> Optional[int]:
         """Extracts the freshness from an asset materialization."""
         metadata = mat.metadata
         freshness = metadata.get('freshness', None)
         if freshness and isinstance(freshness, IntMetadataValue):
             return freshness.value
-        return 0
+        return None
 
     def find_dataset_events(self, instance: DagsterInstance, asset_key: AssetKey, partitions: Optional[Sequence[str]] = None, limit: int = 100) -> Sequence[EventLogRecord]:
         """Retrieves the events for the specified dataset and optional partitions."""
@@ -600,14 +607,11 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
         dataset = next((dataset for dataset in self.datasets or [] if dataset.uri == uri), None)
         mat = event.asset_materialization
         if mat:
-            parameters={key: value.value for key, value in mat.metadata.items()}
-            if dataset:
+            parameters={key: value.value for key, value in mat.metadata.items()} if mat.metadata else {}
+            if dataset and dataset.parameters:
                 parameters.update(dataset.parameters)
-                cron = dataset.cron # Use dataset cron if available, otherwise use materialization cron
-                freshness = dataset.freshness # Use dataset freshness if available, otherwise use materialization freshness
-            else:
-                cron = self.get_cron(mat) # Use materialization cron if available
-                freshness = self.get_freshness(mat) # Use materialization freshness if available
+            cron = parameters.get('cron', None) or self.get_cron(mat) or (dataset.cron if dataset else None)
+            freshness = parameters.get('freshness', None) or self.get_freshness(mat) or (dataset.freshness if dataset else 0)
             # If materialization, return a dataset with the name and start_time from the materialization
         else:
             if dataset:
@@ -618,9 +622,11 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 parameters = None
                 cron = None
                 freshness = 0
+        print(f"Dataset {uri} with parameters {parameters}, cron {cron}, freshness {freshness} for event {event.asset_key.to_user_string()} with id {event.storage_id}")
         return (
             StarlakeDataset(
                 name=uri,
+                sink=uri,
                 parameters=parameters,
                 cron=cron,
                 freshness=freshness,
@@ -784,10 +790,10 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
             print(f"Starlake start date will be set to {previous_partition}")
             print(f"Starlake end date will be set to {max_scheduled_date}")
-            return (True, previous_partition, max_scheduled_date)
+            return (True, previous_partition, max_scheduled_date, [])
         else:
             print(f"Some datasets are missing: {', '.join([dataset.uri for dataset in missing_datasets])}")
-            return (False, None, None)
+            return (False, None, None, missing_datasets)
 
     def run(self, logical_date: Optional[str] = None, timeout: str = '120', mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN, **kwargs) -> None:
         """Run the pipeline.
@@ -807,7 +813,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 print(f"No logical date provided and no cron defined for {self.pipeline_id}, using current date.")
                 logical_date = datetime.now(pytz.utc).strftime(sl_timestamp_format)
         dry_run = mode == StarlakeExecutionMode.DRY_RUN
-        run_config = self.__ops_config(logical_date, dry_run)
+        run_config = self._ops_config(logical_date, dry_run)
         with DagsterInstance.ephemeral() as instance:
             # Run the job with the provided configuration
             print(f"Running {self.pipeline_id}...")
