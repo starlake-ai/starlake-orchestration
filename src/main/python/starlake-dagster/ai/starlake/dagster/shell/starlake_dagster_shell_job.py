@@ -116,6 +116,8 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
                 output, return_code = f"Starlake command {command} execution skipped due to dry run mode.", 0
                 context.log.info(output)
             else:
+                context.log.info(f"Executing Starlake command: {command}")
+                # Execute the shell command
                 output, return_code = execute_shell_command(
                     shell_command=command,
                     output_logging="STREAM",
