@@ -119,9 +119,9 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
 
         pre_load_strategy = self.pre_load_strategy if not pre_load_strategy else pre_load_strategy
 
-        # FIXME if pre load strategy is defined and the corresponding operation is not successful, the pipeline will fail
-        # if pre_load_strategy != StarlakePreLoadStrategy.NONE:
-        #     kwargs.update({'out': 'succeeded', 'failure': 'failed',})
+        if pre_load_strategy != StarlakePreLoadStrategy.NONE:
+            kwargs.update({'skip_or_start': True,})
+            kwargs.update({'retries': 0,})
 
         return super().sl_pre_load(domain=domain, tables=tables, pre_load_strategy=pre_load_strategy, **kwargs)
 

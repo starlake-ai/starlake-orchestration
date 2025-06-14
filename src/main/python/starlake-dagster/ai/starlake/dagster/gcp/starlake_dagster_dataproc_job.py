@@ -175,12 +175,14 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
 
         out:str=kwargs.get("out", "result")
         failure:str=kwargs.get("failure", None)
-        outs=kwargs.get("outs", {out: Out(str, is_required=failure is None)})
+        skip_or_start = bool(kwargs.get("skip_or_start", False))
+        outs=kwargs.get("outs", {out: Out(str, is_required=not skip_or_start and failure is None)})
         if failure:
             outs.update({failure: Out(str, is_required=False)})
 
-        if self.retries:
-            retry_policy = RetryPolicy(max_retries=self.retries, delay=self.retry_delay)
+        max_retries = int(kwargs.get("retries", self.retries))
+        if max_retries > 0:
+            retry_policy = RetryPolicy(max_retries=max_retries, delay=self.retry_delay)
         else:
             retry_policy = None
 
@@ -215,15 +217,15 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
 
             if result.get("status", {}).get("state") != "DONE":
                 value=f"Spark job {job_id} submission failed with result: {result}"
+                if retry_policy:
+                    retry_count = context.retry_number
+                    if retry_count < retry_policy.max_retries:
+                        raise Failure(description=value)
                 if failure:
-                    if retry_policy:
-                        retry_count = context.retry_number
-                        if retry_count < retry_policy.max_retries:
-                            raise Failure(description=value)
-                        else:
-                            yield Output(value=value, output_name=failure)
-                    else:
-                        yield Output(value=value, output_name=failure)
+                    yield Output(value=value, output_name=failure)
+                elif skip_or_start:
+                    context.log.info(f"Skipping Starlake command {" ".join(arguments)} execution due to skip_or_start flag.")
+                    return
                 else:
                     raise Failure(description=value)
             else:
