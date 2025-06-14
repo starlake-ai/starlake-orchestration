@@ -8,7 +8,7 @@ from ai.starlake.job import StarlakeOrchestrator, StarlakeExecutionMode
 
 from ai.starlake.orchestration import StarlakeSchedule, StarlakeDependencies
 
-from dagster import AssetKey, ScheduleDefinition, GraphDefinition, Definitions, DependencyDefinition, JobDefinition, In, InputMapping,OutputMapping, DefaultScheduleStatus, MultiAssetSensorDefinition, MultiAssetSensorEvaluationContext, RunRequest, SkipReason, ScheduleDefinition, OpDefinition, TimeWindowPartitionsDefinition, Partition, PartitionedConfig, EventLogRecord, AssetMaterialization, DagsterInstance, EventRecordsResult
+from dagster import AssetKey, ScheduleDefinition, GraphDefinition, Definitions, DependencyDefinition, JobDefinition, In, InputMapping,OutputMapping, DefaultScheduleStatus, MultiAssetSensorDefinition, MultiAssetSensorEvaluationContext, RunRequest, SkipReason, ScheduleDefinition, OpDefinition, TimeWindowPartitionsDefinition, Partition, PartitionedConfig, EventLogRecord, AssetMaterialization, DagsterInstance, EventRecordsResult, AssetSpec
 
 from dagster._core.definitions.output import OutputDefinition
 
@@ -146,6 +146,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                 crons.append(ScheduleDefinition(job_name = pipeline_id, cron_schedule = cron, default_status=DefaultScheduleStatus.RUNNING))
 
         defs = Definitions(
+            assets=[AssetSpec(asset.uri) for pipeline in self.pipelines for asset in pipeline.assets],
             jobs=[pipeline.dag for pipeline in self.pipelines],
             sensors=sensors,
             schedules=crons,
