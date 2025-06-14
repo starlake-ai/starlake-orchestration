@@ -346,6 +346,8 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
         self.__datasets = datasets
 
+        self.__assets: List[StarlakeDatasets] = []
+
         if add_dag_dependency:
             TaskLinker = Callable[[Union[T, GT], Union[T, GT]], Any]
             self.__add_dag_dependency: TaskLinker = add_dag_dependency
@@ -585,6 +587,11 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         return self.__datasets
 
     @final
+    @property
+    def assets(self) -> List[StarlakeDataset]:
+        return self.__assets
+
+    @final
     def find_dataset_by_name(self, name: str) -> Optional[StarlakeDataset]:
         return next((dataset for dataset in self.datasets or [] if dataset.name == name), None)
 
@@ -804,6 +811,9 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         kwargs['params'] = params
         kwargs.pop('spark_config', None)
         kwargs.pop('dataset', None)
+        asset = StarlakeDataset(name, **kwargs)
+        if asset not in self.assets:
+            self.__assets.append(asset)
         return self.orchestration.sl_create_task(
             task_id, 
             self.job.sl_load(
@@ -811,7 +821,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 domain=domain, 
                 table=table, 
                 spark_config=self.sl_spark_config(name.lower()), 
-                dataset=StarlakeDataset(name, **kwargs),
+                dataset=asset,
                 **kwargs
             ),
             self
@@ -830,13 +840,17 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         kwargs.pop('transform_options', None)
         kwargs.pop('spark_config', None)
         kwargs.pop('dataset', None)
+        asset = StarlakeDataset(transform_name, **kwargs)
+        if asset not in self.assets:
+            self.__assets.append(asset)
         return self.orchestration.sl_create_task(
             task_id, 
                 self.job.sl_transform(
                 task_id=task_id, 
                 transform_name=transform_name, 
                 transform_options=self.sl_transform_options(self.computed_cron_expr), 
-                spark_config=self.sl_spark_config(transform_name.lower()),                 dataset=StarlakeDataset(transform_name, **kwargs),
+                spark_config=self.sl_spark_config(transform_name.lower()),
+                dataset=asset,
                 **kwargs
             ),
             self
