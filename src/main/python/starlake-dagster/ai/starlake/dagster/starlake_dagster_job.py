@@ -324,7 +324,7 @@ class StarlakeDagsterUtils:
             PARTITION_NAME_TAG: partition,
         })
         if config.previous_logical_datetime:
-            tags['previous_logical_datetime'] = config.previous_logical_datetime
+            tags['previous_logical_datetime'] = config.previous_logical_datetime.replace(' ', 'T').replace(':', '.').replace('+', '_')
         return AssetMaterialization(
             asset_key=asset_key, 
             description=kwargs.get("description", f"Asset {asset_key.to_user_string()} materialized"),
@@ -371,7 +371,7 @@ class StarlakeDagsterUtils:
         previous_logical_datetime = config.previous_logical_datetime or context.get_tag('previous_logical_datetime')
         logical_datetime: datetime = cls.get_logical_datetime(context, config, **kwargs)
         if previous_logical_datetime and logical_datetime:
-            return f"sl_start_date={previous_logical_datetime},sl_end_date={logical_datetime.strftime(sl_timestamp_format)}"
+            return f"sl_start_date='{previous_logical_datetime}',sl_end_date='{logical_datetime.strftime(sl_timestamp_format)}'"
         cron = params.get('cron', params.get('cron_expr', None))
         if cron and (cron.lower().strip() == 'none' or not is_valid_cron(cron)):
             cron = None
