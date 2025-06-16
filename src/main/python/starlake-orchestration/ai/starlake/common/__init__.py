@@ -55,7 +55,7 @@ def asQueryParameters(parameters: Union[dict,None]=None) -> str:
     if parameters is None:
         parameters = dict()
     if parameters.__len__() > 0:
-        return '?' + '&'.join(list(f'{quote(k)}={quote(v)}' for (k, v) in parameters.items()))
+        return '?' + '&'.join(list(f'{quote(str(k))}={quote(str(v))}' for (k, v) in parameters.items()))
     else:
         return ''
 
@@ -190,14 +190,14 @@ def sl_scheduled_date(cron: Optional[str], ts: Union[datetime, str], previous: b
         print(f"Error converting timestamp to datetime: {e}")
         raise e
 
-def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts:  Union[datetime, str], parameter_name: str = 'sl_schedule', format: str = sl_timestamp_format, previous: bool=False) -> str:
+def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts:  Union[datetime, str], parameter_name: str = StarlakeParameters.SCHEDULED_DATE_PARAMETER, format: str = sl_timestamp_format, previous: bool=False) -> str:
     """
     Returns the dataset url with the schedule parameter added if a cron expression has been provided.
     Args:
         dataset (str): The dataset name.
         cron (str): The optional cron expression.
         ts (Union[datetime, str]): The timestamp.
-        parameter_name (str): The parameter name. Defaults to 'sl_schedule'.
+        parameter_name (str): The parameter name. Defaults to StarlakeParameters.SCHEDULED_DATE_PARAMETER.
         format (str): The format to return the schedule in. Defaults to '%Y%m%dT%H%M'.
     """
     if cron:
