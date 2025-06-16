@@ -696,7 +696,7 @@ class StarlakeDatasetMixin:
                  ) -> None:
         self.task_id = task_id
         params: dict = kwargs.get("params", dict())
-        outlets = kwargs.get("outlets", [])
+        outlets: list = kwargs.get("outlets", [])
         extra = dict()
         extra.update({"source": source})
         self.ts = "{{ data_interval_end | ts }}"
@@ -726,7 +726,7 @@ class StarlakeDatasetMixin:
                 self.scheduled_dataset = None
                 uri = dataset
                 params.update({
-                    'uri': dataset,
+                    'uri': uri,
                     'cron': None,
                     'sl_schedule_parameter_name': None,
                     'sl_schedule_format': None,
