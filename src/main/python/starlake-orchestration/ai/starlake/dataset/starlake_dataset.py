@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from ai.starlake.common import asQueryParameters, sanitize_id, sl_schedule, sl_schedule_format, is_valid_cron
+from ai.starlake.common import asQueryParameters, sanitize_id, sl_schedule, sl_schedule_format, is_valid_cron, StarlakeParameters
 
 from datetime import datetime
 
@@ -50,7 +50,7 @@ class StarlakeDataset():
         temp_parameters: dict = dict()
         if parameters is not None:
             temp_parameters.update(parameters)
-        self.__sl_schedule_parameter_name = kwargs.get('sl_schedule_parameter__name', params.get('sl_schedule_parameter__name', 'sl_schedule'))
+        self.__sl_schedule_parameter_name = kwargs.get('sl_schedule_parameter_name', params.get('sl_schedule_parameter_name', StarlakeParameters.SCHEDULED_DATE_PARAMETER))
         self.__sl_schedule_format = kwargs.get('sl_schedule_format', params.get('sl_schedule_format', sl_schedule_format))
         self.__start_time = start_time
         if cron is not None:

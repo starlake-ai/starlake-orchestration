@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset, supports_inlet_events
 
-from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset, sl_timestamp_format
+from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset, sl_timestamp_format, StarlakeParameters
 
 from ai.starlake.job import StarlakeOrchestrator, StarlakeExecutionMode
 
@@ -56,7 +56,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_logical_date = ti.xcom_pull(task_ids="start", key="sl_logical_date")
+            sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER)
             if sl_logical_date:
                 ts = sl_logical_date
             if isinstance(ts, str):
@@ -72,10 +72,10 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_start_date = ti.xcom_pull(task_ids="start", key="sl_previous_logical_date")
-            sl_end_date = ti.xcom_pull(task_ids="start", key="sl_logical_date")
+            sl_start_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER)
+            sl_end_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER)
             if sl_start_date and sl_end_date:
-                return f"sl_start_date='{sl_start_date.strftime(sl_timestamp_format)}',sl_end_date='{sl_end_date.strftime(sl_timestamp_format)}'"
+                return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER}='{sl_start_date.strftime(sl_timestamp_format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{sl_end_date.strftime(sl_timestamp_format)}'"
             return sl_cron_start_end_dates(cron_expr, start_time, sl_timestamp_format)
 
         user_defined_macros = kwargs.get('user_defined_macros', job.caller_globals.get('user_defined_macros', dict()))

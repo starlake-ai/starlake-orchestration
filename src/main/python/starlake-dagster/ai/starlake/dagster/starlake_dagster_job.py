@@ -1,8 +1,8 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, TaskType
 
-from ai.starlake.common import is_valid_cron, sl_cron_start_end_dates, sl_timestamp_format
+from ai.starlake.common import is_valid_cron, sl_cron_start_end_dates, sl_timestamp_format, StarlakeParameters
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
@@ -30,10 +30,10 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
             import os
             file_path = module.__file__
             stat = os.stat(file_path)
-            now = datetime.fromtimestamp(stat.st_mtime, tz=pytz.timezone('UTC')).strftime('%Y-%m-%d')
+            default_start_date = datetime.fromtimestamp(stat.st_mtime, tz=pytz.timezone('UTC')).strftime('%Y-%m-%d')
         else:
-            now = datetime.now().strftime('%Y-%m-%d')
-        sd = __class__.get_context_var(var_name='start_date', default_value=now, options=self.options)
+            default_start_date = datetime.now().strftime('%Y-%m-%d')
+        sd = __class__.get_context_var(var_name='start_date', default_value=default_start_date, options=self.options)
         import re
         pattern = re.compile(r'\d{4}-\d{2}-\d{2}')
         if pattern.fullmatch(sd):
@@ -232,6 +232,30 @@ class DagsterLogicalDatetimeConfig(Config):
 class StarlakeDagsterUtils:
 
     @classmethod
+    def quote_datetime(cls, date_str: Optional[str]) -> Optional[str]:
+        """Quote the datetime string.
+        Args:
+            date_str (str): The datetime string to quote.
+        Returns:
+            str: The quoted datetime string.
+        """
+        if not date_str:
+            return None
+        return date_str.replace(' ', 'T').replace(':', '.').replace('+', '_')
+
+    @classmethod
+    def unquote_datetime(cls, date_str: Optional[str]) -> Optional[str]:
+        """Unquote the datetime string.
+        Args:
+            date_str (str): The datetime string to unquote.
+        Returns:
+            str: The unquoted datetime string.
+        """
+        if not date_str:
+            return None
+        return date_str.replace('T', ' ').replace('.', ':').replace('_', '+')
+
+    @classmethod
     def get_logical_datetime(cls, context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, **kwargs) -> datetime:
         """Get the logical datetime.
         Args:
@@ -301,30 +325,30 @@ class StarlakeDagsterUtils:
         partition_key = logical_datetime.strftime(sl_timestamp_format)
         if isinstance(dataset, str):
             metadata = {
-                "uri": dataset,
-                "cron": None,
-                "freshness": MetadataValue.int(0),
+                StarlakeParameters.URI_PARAMETER: dataset,
+                StarlakeParameters.CRON_PARAMETER: None,
+                StarlakeParameters.FRESHNESS_PARAMETER: MetadataValue.int(0),
             }
             asset_key = AssetKey(dataset)
         else:
             metadata = {
-                "uri": dataset.uri,
-                "cron": dataset.cron,
-                "freshness": MetadataValue.int(dataset.freshness),
+                StarlakeParameters.URI_PARAMETER: dataset.uri,
+                StarlakeParameters.CRON_PARAMETER: dataset.cron,
+                StarlakeParameters.FRESHNESS_PARAMETER: MetadataValue.int(dataset.freshness),
             }
             asset_key = AssetKey(dataset.uri)
         metadata.update({
-            "scheduled_date": MetadataValue.timestamp(logical_datetime),
-            "dry_run": MetadataValue.bool(config.dry_run),
+            StarlakeParameters.SCHEDULED_DATE_PARAMETER: MetadataValue.timestamp(logical_datetime),
+            StarlakeParameters.DRY_RUN_PARAMETER: MetadataValue.bool(config.dry_run),
         })
         tags = kwargs.get("tags", {})
-        partition = partition_key.replace(' ', 'T').replace(':', '.').replace('+', '_')
+        partition = cls.quote_datetime(partition_key)
         tags.update({
-            "logical_date": partition,
+            StarlakeParameters.DATA_INTERVAL_END_PARAMETER: partition,
             PARTITION_NAME_TAG: partition,
         })
         if config.previous_logical_datetime:
-            tags['previous_logical_datetime'] = config.previous_logical_datetime.replace(' ', 'T').replace(':', '.').replace('+', '_')
+            tags[StarlakeParameters.DATA_INTERVAL_START_PARAMETER] = cls.quote_datetime(config.previous_logical_datetime)
         return AssetMaterialization(
             asset_key=asset_key, 
             description=kwargs.get("description", f"Asset {asset_key.to_user_string()} materialized"),
@@ -371,8 +395,8 @@ class StarlakeDagsterUtils:
         previous_logical_datetime = config.previous_logical_datetime or context.get_tag('previous_logical_datetime')
         logical_datetime: datetime = cls.get_logical_datetime(context, config, **kwargs)
         if previous_logical_datetime and logical_datetime:
-            return f"sl_start_date='{previous_logical_datetime}',sl_end_date='{logical_datetime.strftime(sl_timestamp_format)}'"
-        cron = params.get('cron', params.get('cron_expr', None))
+            return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER}='{cls.unquote_datetime(previous_logical_datetime)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{logical_datetime.strftime(sl_timestamp_format)}'"
+        cron = params.get(StarlakeParameters.CRON_PARAMETER, params.get('cron', params.get('cron_expr', None)))
         if cron and (cron.lower().strip() == 'none' or not is_valid_cron(cron)):
             cron = None
         if cron:
