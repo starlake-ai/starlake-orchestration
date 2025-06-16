@@ -34,6 +34,20 @@ class StarlakeCronPeriod(str, Enum):
         except ValueError:
             raise ValueError(f"Unsupported cron period: {value}")
 
+# Starlake parameters
+class StarlakeParameters(str, Enum):
+    # The parameters are prefixed with "sl_" to avoid conflicts with other parameters.
+    __SL_PREFIX: str = "sl_"
+
+    SCHEDULED_DATE_PARAMETER: str = f"{__SL_PREFIX}scheduled_date"
+    URI_PARAMETER: str = f"{__SL_PREFIX}uri"
+    SINK_PARAMETER: str = f"{__SL_PREFIX}sink"
+    CRON_PARAMETER: str = f"{__SL_PREFIX}cron"
+    FRESHNESS_PARAMETER: str = f"{__SL_PREFIX}freshness"
+    DATA_INTERVAL_START_PARAMETER: str = f"{__SL_PREFIX}data_interval_start"
+    DATA_INTERVAL_END_PARAMETER: str = f"{__SL_PREFIX}data_interval_end"
+    DRY_RUN_PARAMETER: str = f"{__SL_PREFIX}dry_run"
+
 TODAY = datetime.today().strftime('%Y-%m-%d')
 
 def asQueryParameters(parameters: Union[dict,None]=None) -> str:
@@ -144,8 +158,8 @@ def sl_cron_start_end_dates(cron_expr: str, start_time: datetime = cron_start_ti
         sl_end_date = curr
     else:
         sl_end_date = previous
-    sl_start_date = croniter(cron_expr, sl_end_date).get_prev(datetime)
-    return f"sl_start_date='{sl_start_date.strftime(format)}',sl_end_date='{sl_end_date.strftime(format)}'"
+    sl_start_date: datetime = croniter(cron_expr, sl_end_date).get_prev(datetime)
+    return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER}='{sl_start_date.strftime(format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{sl_end_date.strftime(format)}'"
 
 def sl_scheduled_date(cron: Optional[str], ts: Union[datetime, str], previous: bool=False) -> datetime:
     """
