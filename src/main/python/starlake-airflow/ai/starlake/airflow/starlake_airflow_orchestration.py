@@ -72,10 +72,10 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_start_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER)
-            sl_end_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER)
-            if sl_start_date and sl_end_date:
-                return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER}='{sl_start_date.strftime(sl_timestamp_format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{sl_end_date.strftime(sl_timestamp_format)}'"
+            sl_data_interval_start = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER)
+            sl_data_interval_end = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER)
+            if sl_data_interval_start and sl_data_interval_end:
+                return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER}='{sl_data_interval_start.strftime(sl_timestamp_format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{sl_data_interval_end.strftime(sl_timestamp_format)}'"
             return sl_cron_start_end_dates(cron_expr, start_time, sl_timestamp_format)
 
         user_defined_macros = kwargs.get('user_defined_macros', job.caller_globals.get('user_defined_macros', dict()))
