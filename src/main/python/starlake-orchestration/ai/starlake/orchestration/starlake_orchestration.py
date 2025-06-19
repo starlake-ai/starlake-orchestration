@@ -346,7 +346,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
         self.__datasets = datasets
 
-        self.__assets: List[StarlakeDatasets] = []
+        self.__assets: List[StarlakeDataset] = []
 
         if add_dag_dependency:
             TaskLinker = Callable[[Union[T, GT], Union[T, GT]], Any]
