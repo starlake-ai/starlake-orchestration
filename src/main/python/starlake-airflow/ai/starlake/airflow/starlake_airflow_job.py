@@ -419,7 +419,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                             if scheduled_datetime > max_scheduled_date:
                                                 max_scheduled_date = scheduled_datetime
                                             break
-
                                     else:
                                         i += 1
                             if not found:
