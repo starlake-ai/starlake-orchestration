@@ -728,6 +728,7 @@ class StarlakeDatasetMixin:
             self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date", "ts",)
         else:
             self.scheduled_dataset = None
+            self.scheduled_date = None
         self.extra = extra
         super().__init__(task_id=task_id, **kwargs)  # Appelle l'init de l'opérateur principal
 
