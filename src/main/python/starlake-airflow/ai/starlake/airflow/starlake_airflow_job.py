@@ -239,13 +239,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 scheduled_date = extra.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER, extra.get('scheduled_date', None))
                 if scheduled_date:
                     from dateutil import parser
-                    import pytz
-                    dt = parser.isoparse(scheduled_date).astimezone(pytz.timezone('UTC'))
-                    extra.update({f"{StarlakeParameters.SCHEDULED_DATE_PARAMETER}time": dt})
-                    dataset.extra = extra
-                    return dt
+                    return parser.isoparse(scheduled_date).astimezone(pytz.timezone('UTC'))
                 else:
-                    raise ValueError(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a '{StarlakeParameters.SCHEDULED_DATE_PARAMETER}' key in its extra data.")
+                    print(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a '{StarlakeParameters.SCHEDULED_DATE_PARAMETER}' key in its extra data.")
+                    return None
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
 
@@ -352,10 +349,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 # we check the datasets
                 for dataset in datasets:
                     extra = dataset.extra or {}
-                    original_cron = extra.get("cron", None)
+                    original_cron = extra.get(StarlakeParameters.CRON_PARAMETER, None)
                     cron = original_cron or self.data_cycle
                     scheduled = cron and is_valid_cron(cron)
-                    freshness = int(extra.get("freshness", 0))
+                    freshness = int(extra.get(StarlakeParameters.FRESHNESS_PARAMETER, 0))
                     optional = False
                     beyond_data_cycle_allowed = False
                     if data_cycle_freshness:
