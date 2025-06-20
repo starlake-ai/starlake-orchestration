@@ -36,6 +36,9 @@ schedules= [{% for schedule in context.schedules %}
 with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
 
     def generate_pipeline(schedule: StarlakeSchedule):
+        if len(schedules) == 1:
+            # if only one schedule, do not use the schedule name within the pipeline name
+            schedule.name = None
         # generate the load pipeline
         with orchestration.sl_create_pipeline(
             schedule=schedule,
