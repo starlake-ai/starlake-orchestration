@@ -353,13 +353,13 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     # we take the first dag run before the scheduled date
                     dag_run = dag_runs[0]
                     previous_dag_checked = dag_run.data_interval_end
-                    print(f"Found previous non skipped dag run {dag_run.dag_id} with scheduled date {previous_dag_checked}")
+                    print(f"Found previous succeeded dag run {dag_run.dag_id} with scheduled date {previous_dag_checked}")
                     print(f"Previous dag checked event found: {previous_dag_checked}")
 
                 if not previous_dag_checked:
-                    # if the dag was never checked, we set the previous dag checked to the start date of the dag
+                    # if the dag never run successfuly, we set the previous dag checked to the start date of the dag
                     previous_dag_checked = context["dag"].start_date
-                    print(f"No previous dag checked event found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
+                    print(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
 
                 data_cycle_freshness = None
                 if self.data_cycle:
