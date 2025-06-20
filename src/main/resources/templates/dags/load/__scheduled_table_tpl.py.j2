@@ -45,7 +45,10 @@ with OrchestrationFactory.create_orchestration(job=sl_job) as orchestration:
         ) as pipeline:
 
             schedule       = pipeline.schedule
-            schedule_name  = pipeline.schedule_name
+            if schedule.name:
+                schedule_name = sanitize_id(schedule.name)
+            else:
+                schedule_name = None
 
             start = pipeline.start_task()
             if not start:
