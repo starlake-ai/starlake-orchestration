@@ -482,6 +482,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             task = self.sl_transform(
                 task_id=task_id, 
                 transform_name=task_name,
+                sink=task_sink,
                 params={'sink': task_sink},
             )
             self.__inner_tasks[task_id] = task
@@ -811,7 +812,12 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         kwargs['params'] = params
         kwargs.pop('spark_config', None)
         kwargs.pop('dataset', None)
-        asset = StarlakeDataset(name, **kwargs)
+        asset = StarlakeDataset(
+            name=name, 
+            sink=f"{domain}.{table}", 
+            cron = self.cron, 
+            **kwargs
+        )
         if asset not in self.assets:
             self.__assets.append(asset)
         return self.orchestration.sl_create_task(
@@ -828,7 +834,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         )
 
     @final
-    def sl_transform(self, task_id: str, transform_name: str, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
+    def sl_transform(self, task_id: str, transform_name: str, sink: Optional[str] = None, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
         params: dict = kwargs.get('params', dict())
         params.update({
             'cron': self.cron,
@@ -840,7 +846,12 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         kwargs.pop('transform_options', None)
         kwargs.pop('spark_config', None)
         kwargs.pop('dataset', None)
-        asset = StarlakeDataset(transform_name, **kwargs)
+        asset = StarlakeDataset(
+            name = transform_name, 
+            cron = self.cron,
+            sink = sink,
+            **kwargs
+        )
         if asset not in self.assets:
             self.__assets.append(asset)
         return self.orchestration.sl_create_task(
