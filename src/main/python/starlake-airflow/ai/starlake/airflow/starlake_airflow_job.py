@@ -317,7 +317,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 return dag_runs
 
             @provide_session
-            def find_dataset_events(dataset: Dataset, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, session=None) -> List[DatasetEvent]:
+            def find_dataset_events(uri: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, session=None) -> List[DatasetEvent]:
                 from sqlalchemy import and_, asc
                 from sqlalchemy.orm import joinedload
                 events: List[DatasetEvent] = (
@@ -325,13 +325,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     .options(joinedload(DatasetEvent.dataset))
                     .join(DagRun, and_(
                         DatasetEvent.source_dag_id == DagRun.dag_id,
-                        DatasetEvent.source_run_id == DagRun.run_id
+                        DatasetEvent.source_run_id == DagRun.run_id,
+                        DatasetEvent.timestamp <= ts
                     ))
                     .join(DatasetModel, DatasetEvent.dataset_id == DatasetModel.id)
                     .filter(
                         DagRun.data_interval_end > scheduled_date_to_check_min,
                         DagRun.data_interval_end <= scheduled_date_to_check_max,
-                        DatasetModel.uri == dataset.uri
+                        DatasetModel.uri == uri
                     )
                     .order_by(asc(DagRun.data_interval_end))
                     .all()
@@ -365,6 +366,18 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 if self.data_cycle:
                     # the freshness of the data cycle is the time delta between 2 iterations of its schedule
                     data_cycle_freshness = get_cron_frequency(self.data_cycle)
+
+                if not context:
+                    from airflow.operators.python import get_current_context
+                    context = get_current_context()
+
+                ts: datetime = context.get('start_date', None)
+                if not ts:
+                    raise ValueError("The start date is not set in the context. Please ensure that the start date is set in the context.")
+                if not isinstance(ts, datetime):
+                    raise ValueError(f"The start date is not a datetime object: {ts}[{type(ts)}]. Please ensure that the start date is a datetime object.")
+
+                print(f"Start date is {ts} and scheduled date is {scheduled_date}")
 
                 # we check the datasets
                 for dataset in datasets:
@@ -416,7 +429,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 if scheduled_datetime > max_scheduled_date:
                                     max_scheduled_date = scheduled_datetime
                         if not found:
-                            events = find_dataset_events(dataset=dataset, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, session=session)
+                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, session=session)
                             if events:
                                 dataset_events = events
                                 nb_events = len(events)
@@ -447,7 +460,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
                         scheduled_date_to_check_min = previous_dag_checked - timedelta(seconds=freshness)
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
-                        events = find_dataset_events(dataset=dataset, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, session=session)
+                        events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, session=session)
                         if events:
                             dataset_events = events
                             nb_events = len(events)
@@ -704,7 +717,7 @@ class StarlakeDatasetMixin:
         outlets: list = kwargs.get("outlets", [])
         extra = dict()
         extra.update({"source": source})
-        self.ts = "{{ data_interval_end | ts }}"
+        self.ts = "{{ start_date }}"
         if dataset:
             if isinstance(dataset, StarlakeDataset):
                 params.update({
