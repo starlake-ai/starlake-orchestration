@@ -340,7 +340,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 return events
 
             @provide_session
-            def check_datasets(scheduled_date: datetime, datasets: List[Dataset], context: Context, session=None) -> bool:
+            def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context, session=None) -> bool:
                 from croniter import croniter
                 missing_datasets = []
                 max_scheduled_date = scheduled_date
@@ -367,15 +367,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     # the freshness of the data cycle is the time delta between 2 iterations of its schedule
                     data_cycle_freshness = get_cron_frequency(self.data_cycle)
 
-                if not context:
-                    from airflow.operators.python import get_current_context
-                    context = get_current_context()
-
-                from airflow.models.taskinstance import TaskInstance
-                ti: TaskInstance = context.get('ti')
-                ts: datetime = ti.start_date
-
-                print(f"Start date is {ts} and scheduled date is {scheduled_date}")
+                print(f"Start date is {ts.strftime(sl_timestamp_format)} and scheduled date is {scheduled_date.strftime(sl_timestamp_format)}")
 
                 # we check the datasets
                 for dataset in datasets:
@@ -507,12 +499,15 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, value=max_scheduled_date)
                 return checked
 
-            def should_continue(**context) -> bool:
+            def should_continue(start_date: str = None, **context) -> bool:
                 triggering_datasets = get_triggering_datasets(context)
                 if not triggering_datasets:
                     print("No triggering datasets found. Manually triggered.")
                     return True
                 else:
+                    from dateutil import parser
+                    import pytz
+                    ts = parser.isoparse(start_date).astimezone(pytz.timezone('UTC'))
                     triggering_uris = {dataset.uri: dataset for dataset in triggering_datasets}
                     datasets_uris = {dataset.uri: dataset for dataset in datasets}
                     # we first retrieve the scheduled datetime of all the triggering datasets
@@ -526,7 +521,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     checking_triggering_datasets = [dataset for dataset in triggering_datasets if dataset.uri in checking_uris]
                     checking_missing_datasets = [dataset for dataset in datasets if dataset.uri in list(set(checking_uris) - set(triggering_uris.keys()))]
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
-                    return check_datasets(greatest_triggering_dataset_datetime, checking_datasets, context)
+                    return check_datasets(greatest_triggering_dataset_datetime, checking_datasets, ts, context)
 
             inlets: list = kwargs.get("inlets", [])
             inlets += datasets
@@ -539,7 +534,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 return ShortCircuitOperator(
                         task_id = "start",
                         python_callable = should_continue,
-                        op_args=[],
+                        op_args=[
+                            "{{ dag_run.start_date }}"
+                        ],
                         op_kwargs=kwargs,
                         trigger_rule = 'all_done',
                         **kwargs
