@@ -695,7 +695,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 raise ValueError(f"Invalid cron expression: {cron_expr}")
 
                         if sl_data_interval_start and sl_data_interval_end:
-                            safe_params.update({StarlakeParameters.DATA_INTERVAL_START_PARAMETER: sl_data_interval_start.strftime(format), StarlakeParameters.DATA_INTERVAL_END_PARAMETER: sl_data_interval_end.strftime(format)})
+                            safe_params.update({StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value: sl_data_interval_start.strftime(format), StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value: sl_data_interval_end.strftime(format)})
 
                         if dry_run:
                             jobid = sink

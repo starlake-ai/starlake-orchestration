@@ -162,7 +162,7 @@ def sl_cron_start_end_dates(cron_expr: str, start_time: datetime = cron_start_ti
     else:
         sl_end_date = previous
     sl_start_date: datetime = croniter(cron_expr, sl_end_date).get_prev(datetime)
-    return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value}='{sl_start_date.strftime(format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{sl_end_date.strftime(format)}'"
+    return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value}='{sl_start_date.strftime(format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value}='{sl_end_date.strftime(format)}'"
 
 def sl_scheduled_date(cron: Optional[str], ts: Union[datetime, str], previous: bool=False) -> datetime:
     """
@@ -193,7 +193,7 @@ def sl_scheduled_date(cron: Optional[str], ts: Union[datetime, str], previous: b
         print(f"Error converting timestamp to datetime: {e}")
         raise e
 
-def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts:  Union[datetime, str], parameter_name: str = StarlakeParameters.SCHEDULED_DATE_PARAMETER, format: str = sl_timestamp_format, previous: bool=False) -> str:
+def sl_scheduled_dataset(dataset: str, cron: Optional[str], ts:  Union[datetime, str], parameter_name: str = StarlakeParameters.SCHEDULED_DATE_PARAMETER.value, format: str = sl_timestamp_format, previous: bool=False) -> str:
     """
     Returns the dataset url with the schedule parameter added if a cron expression has been provided.
     Args:

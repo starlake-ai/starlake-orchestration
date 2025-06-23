@@ -325,30 +325,30 @@ class StarlakeDagsterUtils:
         partition_key = logical_datetime.strftime(sl_timestamp_format)
         if isinstance(dataset, str):
             metadata = {
-                StarlakeParameters.URI_PARAMETER: dataset,
-                StarlakeParameters.CRON_PARAMETER: None,
-                StarlakeParameters.FRESHNESS_PARAMETER: MetadataValue.int(0),
+                StarlakeParameters.URI_PARAMETER.value: dataset,
+                StarlakeParameters.CRON_PARAMETER.value: None,
+                StarlakeParameters.FRESHNESS_PARAMETER.value: MetadataValue.int(0),
             }
             asset_key = AssetKey(dataset)
         else:
             metadata = {
-                StarlakeParameters.URI_PARAMETER: dataset.uri,
-                StarlakeParameters.CRON_PARAMETER: dataset.cron,
-                StarlakeParameters.FRESHNESS_PARAMETER: MetadataValue.int(dataset.freshness),
+                StarlakeParameters.URI_PARAMETER.value: dataset.uri,
+                StarlakeParameters.CRON_PARAMETER.value: dataset.cron,
+                StarlakeParameters.FRESHNESS_PARAMETER.value: MetadataValue.int(dataset.freshness),
             }
             asset_key = AssetKey(dataset.uri)
         metadata.update({
-            StarlakeParameters.SCHEDULED_DATE_PARAMETER: MetadataValue.timestamp(logical_datetime),
-            StarlakeParameters.DRY_RUN_PARAMETER: MetadataValue.bool(config.dry_run),
+            StarlakeParameters.SCHEDULED_DATE_PARAMETER.value: MetadataValue.timestamp(logical_datetime),
+            StarlakeParameters.DRY_RUN_PARAMETER.value: MetadataValue.bool(config.dry_run),
         })
         tags = kwargs.get("tags", {})
         partition = cls.quote_datetime(partition_key)
         tags.update({
-            StarlakeParameters.DATA_INTERVAL_END_PARAMETER: partition,
+            StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value: partition,
             PARTITION_NAME_TAG: partition,
         })
         if config.previous_logical_datetime:
-            tags[StarlakeParameters.DATA_INTERVAL_START_PARAMETER] = cls.quote_datetime(config.previous_logical_datetime)
+            tags[StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value] = cls.quote_datetime(config.previous_logical_datetime)
         return AssetMaterialization(
             asset_key=asset_key, 
             description=kwargs.get("description", f"Asset {asset_key.to_user_string()} materialized"),
@@ -395,8 +395,8 @@ class StarlakeDagsterUtils:
         previous_logical_datetime = config.previous_logical_datetime or context.get_tag('previous_logical_datetime')
         logical_datetime: datetime = cls.get_logical_datetime(context, config, **kwargs)
         if previous_logical_datetime and logical_datetime:
-            return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER}='{cls.unquote_datetime(previous_logical_datetime)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{logical_datetime.strftime(sl_timestamp_format)}'"
-        cron = params.get(StarlakeParameters.CRON_PARAMETER, params.get('cron', params.get('cron_expr', None)))
+            return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value}='{cls.unquote_datetime(previous_logical_datetime)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value}='{logical_datetime.strftime(sl_timestamp_format)}'"
+        cron = params.get(StarlakeParameters.CRON_PARAMETER.value, params.get('cron', params.get('cron_expr', None)))
         if cron and (cron.lower().strip() == 'none' or not is_valid_cron(cron)):
             cron = None
         if cron:
