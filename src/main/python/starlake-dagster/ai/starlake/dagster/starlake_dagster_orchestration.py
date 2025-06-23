@@ -113,8 +113,8 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                             partition_key=logical_datetime,
                             tags={
                                 PARTITION_NAME_TAG: logical_datetime,
-                                StarlakeParameters.DATA_INTERVAL_END_PARAMETER: logical_datetime,
-                                StarlakeParameters.DATA_INTERVAL_START_PARAMETER: previous_logical_datetime,
+                                StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value: logical_datetime,
+                                StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value: previous_logical_datetime,
                             },
                         )
                     else:
@@ -512,7 +512,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
         if len(runs) > 0:
             matching_runs = []
             for run in runs:
-                partition_key = run.tags.get(PARTITION_NAME_TAG, None) or run.tags.get(StarlakeParameters.DATA_INTERVAL_END_PARAMETER, None) 
+                partition_key = run.tags.get(PARTITION_NAME_TAG, None) or run.tags.get(StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, None) 
                 if partition_key:
                     try:
                         from dateutil import parser
@@ -532,7 +532,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
     def get_materialization_partition(self, mat: AssetMaterialization) -> Optional[datetime]:
         """Extracts the partition from an asset materialization."""
         tags = mat.tags or {}
-        partition_date = mat.partition or tags.get(PARTITION_NAME_TAG, None) or tags.get(StarlakeParameters.DATA_INTERVAL_END_PARAMETER, None) or mat.metadata.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER, None)
+        partition_date = mat.partition or tags.get(PARTITION_NAME_TAG, None) or tags.get(StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, None) or mat.metadata.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER.value, None)
         if partition_date:
             if isinstance(partition_date, TimestampMetadataValue):
                 return datetime.fromtimestamp(partition_date.value, pytz.timezone('UTC'))
@@ -571,7 +571,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
     def get_cron(self, mat: AssetMaterialization) -> Optional[str]:
         """Extracts the cron from an asset materialization."""
         metadata = mat.metadata
-        cron = metadata.get(StarlakeParameters.CRON_PARAMETER, None)
+        cron = metadata.get(StarlakeParameters.CRON_PARAMETER.value, None)
         if cron:
             cron_expr = str(cron.value)
             if is_valid_cron(cron_expr):
@@ -583,7 +583,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
     def get_freshness(self, mat: AssetMaterialization) -> Optional[int]:
         """Extracts the freshness from an asset materialization."""
         metadata = mat.metadata
-        freshness = metadata.get(StarlakeParameters.FRESHNESS_PARAMETER, None)
+        freshness = metadata.get(StarlakeParameters.FRESHNESS_PARAMETER.value, None)
         if freshness and isinstance(freshness, IntMetadataValue):
             return freshness.value
         return None
@@ -611,8 +611,8 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             parameters={key: value.value for key, value in mat.metadata.items()} if mat.metadata else {}
             if dataset and dataset.parameters:
                 parameters.update(dataset.parameters)
-            cron = parameters.get(StarlakeParameters.CRON_PARAMETER, None) or self.get_cron(mat) or (dataset.cron if dataset else None)
-            freshness = parameters.get(StarlakeParameters.FRESHNESS_PARAMETER, None) or self.get_freshness(mat) or (dataset.freshness if dataset else 0)
+            cron = parameters.get(StarlakeParameters.CRON_PARAMETER.value, None) or self.get_cron(mat) or (dataset.cron if dataset else None)
+            freshness = parameters.get(StarlakeParameters.FRESHNESS_PARAMETER.value, None) or self.get_freshness(mat) or (dataset.freshness if dataset else 0)
             # If materialization, return a dataset with the name and start_time from the materialization
         else:
             if dataset:
@@ -825,7 +825,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 instance=instance,
                 tags={
                     PARTITION_NAME_TAG: logical_date,
-                    StarlakeParameters.DATA_INTERVAL_END_PARAMETER: logical_date,
+                    StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value: logical_date,
                 },
             )
 
