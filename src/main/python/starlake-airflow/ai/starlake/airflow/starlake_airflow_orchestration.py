@@ -99,7 +99,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             schedule=airflow_schedule,
             catchup=self.catchup,
             tags=list(set([tag.upper() for tag in self.tags])), 
-            default_args=job.caller_globals.get('default_dag_args', job.default_dag_args()),
+            default_args={**job.default_dag_args(), **job.caller_globals.get('default_dag_args', {})},
             description=job.caller_globals.get('description', ""),
             start_date=job.start_date,
             end_date=job.end_date,
