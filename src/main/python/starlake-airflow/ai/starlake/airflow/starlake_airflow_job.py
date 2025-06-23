@@ -8,7 +8,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSpark
 
 from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
-from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters
+from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format
 
 from ai.starlake.job.starlake_job import StarlakeOrchestrator
 
@@ -371,11 +371,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     from airflow.operators.python import get_current_context
                     context = get_current_context()
 
-                ts: datetime = context.get('start_date', None)
-                if not ts:
-                    raise ValueError("The start date is not set in the context. Please ensure that the start date is set in the context.")
-                if not isinstance(ts, datetime):
-                    raise ValueError(f"The start date is not a datetime object: {ts}[{type(ts)}]. Please ensure that the start date is a datetime object.")
+                from airflow.models.taskinstance import TaskInstance
+                ti: TaskInstance = context.get('ti')
+                ts: datetime = ti.start_date
 
                 print(f"Start date is {ts} and scheduled date is {scheduled_date}")
 
@@ -717,7 +715,6 @@ class StarlakeDatasetMixin:
         outlets: list = kwargs.get("outlets", [])
         extra = dict()
         extra.update({"source": source})
-        self.ts = "{{ start_date }}"
         if dataset:
             if isinstance(dataset, StarlakeDataset):
                 params.update({
@@ -754,7 +751,7 @@ class StarlakeDatasetMixin:
                 self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts), params.previous)}}"
             outlets.append(Dataset(uri=uri, extra=extra))
             kwargs["outlets"] = outlets
-            self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date", "ts",)
+            self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date",)
         else:
             self.scheduled_dataset = None
             self.scheduled_date = None
@@ -762,8 +759,16 @@ class StarlakeDatasetMixin:
         super().__init__(task_id=task_id, **kwargs)  # Appelle l'init de l'opérateur principal
 
     @prepare_lineage
-    def pre_execute(self, context):
-        self.extra.update({"ts": self.ts})
+    def pre_execute(self, context: Context):
+        if not context:
+            from airflow.operators.python import get_current_context
+            context = get_current_context()
+
+        from airflow.models.taskinstance import TaskInstance
+        ti: TaskInstance = context.get('ti')
+        ts: datetime = ti.start_date
+
+        self.extra.update({"ts": ts.strftime(sl_timestamp_format)})
         if self.scheduled_date:
             self.extra.update({StarlakeParameters.SCHEDULED_DATE_PARAMETER.value: self.scheduled_date})
         if self.scheduled_dataset:
