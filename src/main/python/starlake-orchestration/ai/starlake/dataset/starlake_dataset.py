@@ -50,7 +50,7 @@ class StarlakeDataset():
         temp_parameters: dict = dict()
         if parameters is not None:
             temp_parameters.update(parameters)
-        self.__sl_schedule_parameter_name = kwargs.get('sl_schedule_parameter_name', params.get('sl_schedule_parameter_name', StarlakeParameters.SCHEDULED_DATE_PARAMETER.value))
+        self.__sl_schedule_parameter_name = kwargs.get('sl_schedule_parameter_name', params.get('sl_schedule_parameter_name', StarlakeParameters.SCHEDULED_DATE_PARAMETER))
         self.__sl_schedule_format = kwargs.get('sl_schedule_format', params.get('sl_schedule_format', sl_schedule_format))
         self.__start_time = start_time
         if cron is not None:

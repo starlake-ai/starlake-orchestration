@@ -56,7 +56,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
+            sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER)
             if sl_logical_date:
                 ts = sl_logical_date
             if isinstance(ts, str):
@@ -72,10 +72,10 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
-            sl_data_interval_start = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value)
-            sl_data_interval_end = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
+            sl_data_interval_start = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER)
+            sl_data_interval_end = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER)
             if sl_data_interval_start and sl_data_interval_end:
-                return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value}='{sl_data_interval_start.strftime(sl_timestamp_format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value}='{sl_data_interval_end.strftime(sl_timestamp_format)}'"
+                return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER}='{sl_data_interval_start.strftime(sl_timestamp_format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER}='{sl_data_interval_end.strftime(sl_timestamp_format)}'"
             return sl_cron_start_end_dates(cron_expr, start_time, sl_timestamp_format)
 
         user_defined_macros = kwargs.get('user_defined_macros', job.caller_globals.get('user_defined_macros', dict()))

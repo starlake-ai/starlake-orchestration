@@ -75,9 +75,9 @@ class AirflowDataset(AbstractEvent[Dataset]):
     @classmethod
     def to_event(cls, dataset: StarlakeDataset, source: Optional[str] = None) -> Dataset:
         extra = {
-            StarlakeParameters.URI_PARAMETER.value: dataset.uri,
-            StarlakeParameters.CRON_PARAMETER.value: dataset.cron,
-            StarlakeParameters.FRESHNESS_PARAMETER.value: dataset.freshness,
+            StarlakeParameters.URI_PARAMETER: dataset.uri,
+            StarlakeParameters.CRON_PARAMETER: dataset.cron,
+            StarlakeParameters.FRESHNESS_PARAMETER: dataset.freshness,
         }
         if source:
             extra["source"] = source
@@ -242,14 +242,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
             def get_scheduled_datetime(dataset: Dataset) -> Optional[datetime]:
                 extra = dataset.extra or {}
-                scheduled_date = extra.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER.value, extra.get('scheduled_date', None))
+                scheduled_date = extra.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER, extra.get('scheduled_date', None))
                 if not scheduled_date:
                     # for backward compatibility
                     from urllib.parse import urlparse, parse_qs
                     parsed_url = urlparse(dataset.uri)
                     query_string = parsed_url.query
                     params = parse_qs(query_string)
-                    scheduled_dates = params.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER.value, params.get('sl_schedule', None))
+                    scheduled_dates = params.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER, params.get('sl_schedule', None))
                     if scheduled_dates:
                         try:
                             from ai.starlake.common import sl_schedule_format
@@ -261,7 +261,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     from dateutil import parser
                     return parser.isoparse(scheduled_date).astimezone(pytz.timezone('UTC'))
                 else:
-                    print(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a '{StarlakeParameters.SCHEDULED_DATE_PARAMETER.value}' key in its extra data.")
+                    print(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a '{StarlakeParameters.SCHEDULED_DATE_PARAMETER}' key in its extra data.")
                     return None
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
@@ -369,10 +369,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 # we check the datasets
                 for dataset in datasets:
                     extra = dataset.extra or {}
-                    original_cron = extra.get(StarlakeParameters.CRON_PARAMETER.value, None)
+                    original_cron = extra.get(StarlakeParameters.CRON_PARAMETER, None)
                     cron = original_cron or self.data_cycle
                     scheduled = cron and is_valid_cron(cron)
-                    freshness = int(extra.get(StarlakeParameters.FRESHNESS_PARAMETER.value, 0))
+                    freshness = int(extra.get(StarlakeParameters.FRESHNESS_PARAMETER, 0))
                     optional = False
                     beyond_data_cycle_allowed = False
                     if data_cycle_freshness:
@@ -491,9 +491,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 if checked:
                     print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
                     print(f"Starlake start date will be set to {previous_dag_checked}")
-                    context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value, value=previous_dag_checked)
+                    context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER, value=previous_dag_checked)
                     print(f"Starlake end date will be set to {max_scheduled_date}")
-                    context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, value=max_scheduled_date)
+                    context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER, value=max_scheduled_date)
                 return checked
 
             def should_continue(**context) -> bool:
@@ -716,10 +716,10 @@ class StarlakeDatasetMixin:
                 })
                 kwargs['params'] = params
                 extra.update({
-                    StarlakeParameters.URI_PARAMETER.value: dataset.uri,
-                    StarlakeParameters.SINK_PARAMETER.value: dataset.sink,
-                    StarlakeParameters.CRON_PARAMETER.value: dataset.cron,
-                    StarlakeParameters.FRESHNESS_PARAMETER.value: dataset.freshness,
+                    StarlakeParameters.URI_PARAMETER: dataset.uri,
+                    StarlakeParameters.SINK_PARAMETER: dataset.sink,
+                    StarlakeParameters.CRON_PARAMETER: dataset.cron,
+                    StarlakeParameters.FRESHNESS_PARAMETER: dataset.freshness,
                 })
                 if dataset.cron: # if the dataset is scheduled
                     self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, ts_as_datetime(data_interval_end | ts), params.sl_schedule_parameter_name, params.sl_schedule_format, params.previous)}}"
@@ -752,7 +752,7 @@ class StarlakeDatasetMixin:
     def pre_execute(self, context):
         self.extra.update({"ts": self.ts})
         if self.scheduled_date:
-            self.extra.update({StarlakeParameters.SCHEDULED_DATE_PARAMETER.value: self.scheduled_date})
+            self.extra.update({StarlakeParameters.SCHEDULED_DATE_PARAMETER: self.scheduled_date})
         if self.scheduled_dataset:
             dataset = Dataset(uri=self.scheduled_dataset, extra=self.extra)
             self.outlets.append(dataset)
