@@ -557,8 +557,8 @@ def fun(session: Session, model_name: str, dry_run: bool, ) -> None:
             # enable change tracking
             enable_change_tracking(session, sink, dry_run)
 
-        # execute postSqls
-        execute_sqls(session, statements.get('postSqls', []) , "Post sqls", dry_run)
+        # execute postsql
+        execute_sqls(session, statements.get('postsql', []) , "Post sqls", dry_run)
 
         # run expectations
         run_expectations(session, jobid, dry_run)

@@ -263,7 +263,7 @@ def sl_run_task(session: Session, task: str):
             print(sql)
             session.sql(sql).collect()
 
-      post_sql = statements.get(task, {}).get('postSqls', [])
+      post_sql = statements.get(task, {}).get('postsql', [])
       for sql in post_sql:
          session.sql(sql).collect()
       session.sql("COMMIT").collect()
