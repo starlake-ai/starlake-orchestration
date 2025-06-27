@@ -169,6 +169,8 @@ def drop_columns_from_dict(domain:str, table: str, dictionary):
     # In the current version, we do not drop any existing columns for backward compatibility
     # return [f"ALTER TABLE IF EXISTS {domain}.{table} DROP COLUMN IF EXISTS {k};" for k, v in dictionary.items()]
     return []
+
+
     
 
 def update_table_schema(domain: str, table: str, new_columns):
@@ -217,6 +219,8 @@ expectations = {
   "table" : [ "expectations" ],
   "connectionType" : [ "JDBC" ]
 }
+
+
 sl_debug = True
 def run_sql(session: Session, sql: str) -> List[Row]:
   my_schema = StructType([StructField("a", IntegerType())])
@@ -285,6 +289,68 @@ else:
 # ELSE tempStage = context["tempStage"]
 ###################################################################
 
+sl_temporaray = "TEMP|"
+sl_write_strategy = "OVERWRITE|INTO"
+sl_target_table_name="sales.customers"
+
+"""
+LOAD DATA {sl_write_strategy}  {sl_temporary} TABLE {sl_target_table_name}
+[(
+  column_list
+)]
+[[OVERWRITE] PARTITIONS (partition_column_name=partition_value)]
+[PARTITION BY partition_expression]
+[CLUSTER BY clustering_column_list]
+[OPTIONS (table_option_list)]
+FROM FILES(load_option_list)
+[WITH PARTITION COLUMNS
+  [(partition_column_list)]
+]
+[WITH CONNECTION connection_name]
+
+column_list: column[, ...]
+
+partition_column_list: partition_column_name, partition_column_type[, ...]
+"""
+
+def sl_build_copy_csv(targetTable: str) -> str:
+  skipCount = sl_get_option(metadata, "SKIP_HEADER", None)
+  purge = sl_purge_option(metadata)
+
+  if skipCount is None and metadata['withHeader']:
+    skipCount = '1'
+    common_options = [
+      'SKIP_HEADER', 
+      'NULL_IF', 
+      'FIELD_OPTIONALLY_ENCLOSED_BY', 
+      'FIELD_DELIMITER',
+      'ESCAPE_UNENCLOSED_FIELD', 
+      'ENCODING'
+  ]
+  copy_extra_options = sl_extra_copy_options(metadata, common_options)
+  if compression:
+    extension = ".gz"
+  else:
+    extension = ""
+  sql = f'''
+    COPY INTO {targetTable} 
+    FROM @{context['tempStage']}/{domain}/
+    PATTERN = '{schema['pattern']}{extension}'
+    PURGE = {purge}
+    FILE_FORMAT = (
+      TYPE = CSV
+      ERROR_ON_COLUMN_COUNT_MISMATCH = false
+      SKIP_HEADER = {skipCount} 
+      FIELD_OPTIONALLY_ENCLOSED_BY = '{sl_get_option(metadata, 'FIELD_OPTIONALLY_ENCLOSED_BY', 'quote')}' 
+      FIELD_DELIMITER = '{sl_get_option(metadata, 'FIELD_DELIMITER', 'separator')}' 
+      ESCAPE_UNENCLOSED_FIELD = '{sl_get_option(metadata, 'ESCAPE_UNENCLOSED_FIELD', 'escape')}' 
+      ENCODING = '{sl_get_option(metadata, 'ENCODING', 'encoding')}'
+      {null_if}
+      {copy_extra_options}
+      {compression_format}
+    )
+  '''
+  return sql
 
 parameters = {}
 
@@ -681,7 +747,7 @@ try:
         run_sql(session, stmt)
       else:
           raise ValueError(f"Unsupported steps value: {task['steps']}")
-      # execute postSqls
+      # execute postsql
       postSqls: List[str] = schema.get('postsql', [])
       for sql in postSqls:
           stmt: str = bindParams(sql)
