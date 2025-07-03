@@ -19,7 +19,11 @@ Instead of writing imperative DAGs with fragile dependency chains, users define 
   * `retry_delay` - the delay between retries in seconds
   * `catchup` - whether to catch up on missed runs
 
+![dag configuration](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/scheduled_tasks_dag_configuration.png)
+
 Starlake reads these definitions and infers **execution order, dependencies, and orchestration logic**, generating production-ready DAGs without a single line of orchestration code.
+
+![dag generation](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/airflow_dags_generated.png)
 
 This declarative model shifts orchestration from code to config — and from ad hoc to **repeatable and governed**.
 
@@ -35,7 +39,13 @@ This graph is then used to:
 * **Determine task execution order** automatically while avoiding cycles or race conditions
 * **Define the required datasets that will trigger the non scheduled DAGs**
 
+![sql](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/starbake_customer_purchase_history_sql.png)
+
+![lineage graph](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/starbake_customer_purchase_history_lineage.png)
+
 No need to define upstream/downstream relationships manually — **Starlake infers them from the logic you've already written**.
+
+![handling dependencies](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/airflow_starbake_analytics_graph.png)
 
 ## **Pluggable Orchestration: Use the Tools You Already Know**
 
@@ -45,11 +55,15 @@ Whether your team is using **Apache Airflow, Google Cloud Composer, Dagster, or 
 * On **Dagster**, it generates jobs and graphs that follow your project structure and allow rich observability.
 * With **Snowflake**, it produces orchestration DAGs using native **Snowflake Tasks and Streams** — no external scheduler needed.
 
+![orchestrators](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/starlake_orchestrators.png)
+
 You retain control over how and where your workflows run, while benefitting from **automatic DAG generation** that is infrastructure-agnostic.
 
 ## **Customizable Templates: Declarative, Yet Flexible**
 
 Starlake comes with a rich set of **predefined orchestration templates**. These can be used as-is or extended with your own logic.
+
+![templates](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/starlake_templates.png)
 
 You can easily override or extend the default templates. This ensures you don’t sacrifice **flexibility for simplicity** — you get both.
 
@@ -57,7 +71,11 @@ You can easily override or extend the default templates. This ensures you don’
 
 In a modern data ecosystem, batch schedules aren't enough. That’s why **Starlake also supports event-driven orchestration out of the box** by publishing events based on dataset changes.
 
+![publish events](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/airflow_starbake_publish_events.png)
+
 This means that DAGs can be triggered not just by time schedules, but by the **availability of data**.
+
+![consume events](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/airflow_starbake_analytics_consuming_hourly.png)
 
 This allows for **asynchronous, reactive pipelines** that automatically respond to data availability — no need to guess fixed execution times.
 
