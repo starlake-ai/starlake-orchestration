@@ -18,7 +18,7 @@ setup(name='starlake-orchestration',
 #      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-orchestration',
       packages=find_packages(include=['ai', 'ai.*']),
       extras_require={
-        "airflow": ["starlake-airflow>=0.3.4"],
+        "airflow": ["starlake-airflow>=0.3.5"],
         "dagster": ["starlake-dagster>=0.3.2"],
         "snowflake": ["starlake-snowflake>=0.1.8"],
         "shell": [],
