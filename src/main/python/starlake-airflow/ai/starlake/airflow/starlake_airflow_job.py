@@ -443,12 +443,8 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         print(f"Dataset {dataset.uri} is optional, we skip it")
                         continue
                     elif scheduled:
-                        iter = croniter(cron, scheduled_date)
-                        curr = iter.get_current(datetime)
-                        previous = iter.get_prev(datetime)
-                        next = croniter(cron, previous).get_next(datetime)
-                        if curr == next :
-                            scheduled_date_to_check_max = curr
+                        if not cron in most_frequent or cron.startswith('0 0') or get_cron_frequency(cron).days == 0:
+                            dates_range = scheduled_dates_range(cron, scheduled_date)
                         else:
                             scheduled_date_to_check_max = previous
                         scheduled_date_to_check_min = croniter(cron, scheduled_date_to_check_max).get_prev(datetime)
