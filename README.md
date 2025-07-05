@@ -23,7 +23,7 @@ Instead of writing imperative DAGs with fragile dependency chains, users define 
 
 Starlake reads these definitions and infers **execution order, dependencies, and orchestration logic**, generating production-ready DAGs without a single line of orchestration code.
 
-![dag generation](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/airflow_dags_generated.png)
+![dag generation](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/airflow_dag_generated.png)
 
 This declarative model shifts orchestration from code to config — and from ad hoc to **repeatable and governed**.
 
@@ -62,8 +62,6 @@ You retain control over how and where your workflows run, while benefitting from
 ## **Customizable Templates: Declarative, Yet Flexible**
 
 Starlake comes with a rich set of **predefined orchestration templates**. These can be used as-is or extended with your own logic.
-
-![templates](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/starlake_templates.png)
 
 You can easily override or extend the default templates. This ensures you don’t sacrifice **flexibility for simplicity** — you get both.
 
