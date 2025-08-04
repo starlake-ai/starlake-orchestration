@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple, Union
 
-from ai.starlake.common import MissingEnvironmentVariable, StarlakeParameters
+from ai.starlake.common import MissingEnvironmentVariable
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, StarlakeExecutionEnvironment, TaskType
 
@@ -695,7 +695,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 raise ValueError(f"Invalid cron expression: {cron_expr}")
 
                         if sl_data_interval_start and sl_data_interval_end:
-                            safe_params.update({StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value: sl_data_interval_start.strftime(format), StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value: sl_data_interval_end.strftime(format)})
+                            safe_params.update({'sl_data_interval_start': sl_data_interval_start.strftime(format), 'sl_data_interval_end': sl_data_interval_end.strftime(format)})
 
                         if dry_run:
                             jobid = sink

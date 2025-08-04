@@ -87,6 +87,56 @@ This allows for **asynchronous, reactive pipelines** that automatically respond 
 | Event-driven task triggering          | More reactive pipelines, less idle time                  |
 | Multi-orchestrator support            | Plug into Airflow, Dagster, or Snowflake with one config |
 
+```mermaid
+flowchart TD
+    subgraph config["Declarative Configuration (YAML)"]
+      datasets[Datasets]
+      transforms[Transformations]
+      schedule[Scheduling]
+      dagconfig[DAG Generation Settings]
+    end
+    
+    config --> starlake[Starlake AI Core]
+
+    starlake -->|Infers| lineage["Data Lineage Graph & Dependency Management"]
+    lineage -->|Infers execution order| daggen["DAG Generation Engine"]
+    daggen -->|Produces| orchestrator["Orchestration Artifacts"]
+    
+    subgraph outputs["Multi-Orchestrator Support"]
+      airflow[Airflow DAGs]
+      dagster[Dagster Jobs]
+      snowflake[Snowflake Tasks/Streams]
+    end
+    orchestrator --> airflow
+    orchestrator --> dagster
+    orchestrator --> snowflake
+    
+    %% Event-driven logic
+    lineage -- Triggers --> eventsupport["Event-driven Workflows"]
+    eventsupport -- Publishes Events --> orchestrator
+
+    %% Templates & Customization
+    starlake -.-> templates["Customizable Templates"]
+    templates -.-> daggen
+
+    %% Benefits block
+    subgraph benefits["Benefits"]
+      fastship["Faster Shipping"]
+      lesscode["Less Code"]
+      reactive["Reactive Pipelines"]
+      errors["Fewer Errors"]
+    end
+    orchestrator -.-> benefits
+    eventsupport -.-> benefits
+
+    classDef accent fill:#f9f,stroke:#333,stroke-width:2px;
+    class config accent
+    class starlake accent
+    class lineage accent
+    class daggen accent
+    class orchestrator accent
+```
+
 ## **Conclusion: Orchestration Without the Overhead**
 
 With Starlake AI, orchestration is no longer a burden. By combining **declarative definitions**, **automatic dependency inference**, and **plug-and-play support** for leading orchestrators, it helps data teams:
