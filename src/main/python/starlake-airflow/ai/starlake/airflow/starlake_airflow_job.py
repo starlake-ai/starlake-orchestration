@@ -311,7 +311,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 return list(dataset_uris.values())
 
             @provide_session
-            def find_previous_dag_runs(scheduled_date: datetime, session: Session=None) -> List[DagRun]:
+            def find_previous_dag_runs(scheduled_date: datetime, session: Session=None, at_scheduled_date: bool = False) -> List[DagRun]:
                 # we look for the first non skipped dag run before the scheduled date 
                 from airflow.utils.state import State
 
@@ -325,28 +325,57 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
                 TI = aliased(TaskInstance)
 
-                base_query = (
-                    session.query(DagRun)
-                    .filter(
-                        DagRun.dag_id == dag_id,
-                        DagRun.state == State.SUCCESS,
-                        DagRun.data_interval_end < scheduled_date
+                if at_scheduled_date:
+                    # if we are at the scheduled date, we look for the last successful dag run before or at the scheduled date
+                    print(f"Finding previous dag runs for {dag_id} at scheduled date {scheduled_date.strftime(sl_timestamp_format)}")
+                    base_query = (
+                        session.query(DagRun)
+                        .filter(
+                            DagRun.dag_id == dag_id,
+                            DagRun.state == State.SUCCESS,
+                            DagRun.data_interval_end <= scheduled_date
+                        )
+                        .order_by(DagRun.data_interval_end.desc(), DagRun.start_date.desc())
                     )
-                    .order_by(DagRun.data_interval_end.desc(), DagRun.start_date.desc())
-                )
 
-                skipped_query = (
-                    session.query(DagRun.id)
-                    .join(TI, and_(
-                        DagRun.dag_id == TI.dag_id,
-                        DagRun.run_id == TI.run_id,
-                        DagRun.state == State.SUCCESS,
-                        DagRun.data_interval_end < scheduled_date,
-                        TI.task_id.in_(last_tasks_id),
-                        TI.state == State.SKIPPED
-                    ))
-                    .distinct()
-                )
+                    skipped_query = (
+                        session.query(DagRun.id)
+                        .join(TI, and_(
+                            DagRun.dag_id == TI.dag_id,
+                            DagRun.run_id == TI.run_id,
+                            DagRun.state == State.SUCCESS,
+                            DagRun.data_interval_end <= scheduled_date,
+                            TI.task_id.in_(last_tasks_id),
+                            TI.state == State.SKIPPED
+                        ))
+                        .distinct()
+                    )
+
+                else:
+                    # if we are not at the scheduled date, we look for the last successful dag run before the scheduled date
+                    print(f"Finding previous dag runs for {dag_id} before scheduled date {scheduled_date.strftime(sl_timestamp_format)}")
+                    base_query = (
+                        session.query(DagRun)
+                        .filter(
+                            DagRun.dag_id == dag_id,
+                            DagRun.state == State.SUCCESS,
+                            DagRun.data_interval_end < scheduled_date
+                        )
+                        .order_by(DagRun.data_interval_end.desc(), DagRun.start_date.desc())
+                    )
+
+                    skipped_query = (
+                        session.query(DagRun.id)
+                        .join(TI, and_(
+                            DagRun.dag_id == TI.dag_id,
+                            DagRun.run_id == TI.run_id,
+                            DagRun.state == State.SUCCESS,
+                            DagRun.data_interval_end < scheduled_date,
+                            TI.task_id.in_(last_tasks_id),
+                            TI.state == State.SKIPPED
+                        ))
+                        .distinct()
+                    )
 
                 filtered_query = (
                     base_query
@@ -386,17 +415,25 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 max_scheduled_date = scheduled_date
 
                 previous_dag_checked: Optional[datetime] = None
-                previous_dag_ts: Optional[datetime] = None
+                last_dag_checked: Optional[datetime] = None
+                last_dag_ts: Optional[datetime] = None
 
                 # we look for the first succeeded dag run before the scheduled date 
-                __dag_runs = find_previous_dag_runs(scheduled_date=scheduled_date, session=session)
+                __dag_runs = find_previous_dag_runs(scheduled_date=scheduled_date, session=session, at_scheduled_date=False)
 
                 if __dag_runs and len(__dag_runs) > 0:
                     # we take the first dag run before the scheduled date
                     __dag_run = __dag_runs[0]
                     previous_dag_checked = __dag_run.data_interval_end
-                    previous_dag_ts = __dag_run.start_date
-                    print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked} and start date {previous_dag_ts}")
+                    print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked} and start date {__dag_run.start_date}")
+
+                __dag_runs = find_previous_dag_runs(scheduled_date=scheduled_date, session=session, at_scheduled_date=True)
+                if __dag_runs and len(__dag_runs) > 0:
+                    # we take the first dag run before the scheduled date
+                    __dag_run = __dag_runs[0]
+                    last_dag_checked = __dag_run.data_interval_end
+                    last_dag_ts = __dag_run.start_date
+                    print(f"Found last succeeded dag run {__dag_run.dag_id} with scheduled date {last_dag_checked} and start date {last_dag_ts}")
 
                 if not previous_dag_checked:
                     # if the dag never run successfuly, 
@@ -404,12 +441,17 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     previous_dag_checked = context["dag"].start_date
                     print(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
 
-                if previous_dag_ts:
-                    diff: timedelta = ts - previous_dag_ts
-                    if diff.total_seconds() <= self.min_timedelta_between_runs:
-                        # we just run successfuly this dag, we should skip the current execution
-                        print(f"A previous succeeded dag run was found and started less than {self.min_timedelta_between_runs} seconds ago ({diff.total_seconds()} seconds)... The current DAG execution at {ts.strftime(sl_timestamp_format)} will be skipped")
-                        return False
+                if last_dag_ts and last_dag_checked:
+                    if last_dag_checked.strftime(sl_timestamp_format) == scheduled_date.strftime(sl_timestamp_format):
+                        diff: timedelta = ts - last_dag_ts
+                        if diff.total_seconds() <= self.min_timedelta_between_runs:
+                            # we just run successfuly this dag, we should skip the current execution
+                            print(f"The last succeeded dag run with scheduled date {last_dag_checked} started less than {self.min_timedelta_between_runs} seconds ago ({diff.seconds} seconds)... The current DAG execution at {ts.strftime(sl_timestamp_format)} will be skipped")
+                            return False
+                        else:
+                            print(f"The last succeeded dag run with scheduled date {last_dag_checked} started more than {self.min_timedelta_between_runs} seconds ago ({diff.seconds} seconds)...")
+                    else:
+                        print(f"The last succeeded dag run with scheduled date {last_dag_checked} started at {last_dag_ts.strftime(sl_timestamp_format)}...")
 
                 data_cycle_freshness = None
                 if self.data_cycle:
@@ -578,7 +620,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     checking_triggering_datasets = [dataset for dataset in triggering_datasets if dataset.uri in checking_uris]
                     checking_missing_datasets = [dataset for dataset in datasets if dataset.uri in list(set(checking_uris) - set(triggering_uris.keys()))]
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
-                    return check_datasets(greatest_triggering_dataset_datetime, checking_datasets, ts, context)
+                    return check_datasets(greatest_triggering_dataset_datetime or ts, checking_datasets, ts, context)
 
             inlets: list = kwargs.get("inlets", [])
             inlets += datasets
