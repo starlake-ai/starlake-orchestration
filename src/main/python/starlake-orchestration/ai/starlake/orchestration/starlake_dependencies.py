@@ -329,32 +329,32 @@ class StarlakeDependencies():
     def get_dependency(self, name: str) -> Optional[StarlakeDependency]:
         return self.__dependencies_map.get(name, None)
 
-    def graphs(self, load_dependencies: bool = False) -> Set[TreeNodeMixin]:
+    def graphs(self, run_dependencies: bool = False) -> Set[TreeNodeMixin]:
         """Return the graphs from the dependencies.
         Args:
-            load_dependencies (bool): whether to load all dependencies or not.
+            run_dependencies (bool): whether to run or not all upstream dependencies.
         """
         temp_graphs: Dict[str, TreeNodeMixin] = dict()
         parents: Set[str] = set()
         for node in filter(lambda node: node.id not in temp_graphs.keys() and (len(node.parents) > 0 or node.id in self.first_level_tasks), self.__all_nodes.values()):
-            if load_dependencies or node.id in self.first_level_tasks:
+            if run_dependencies or node.id in self.first_level_tasks:
                 temp_graphs[node.id] = node
                 __parents = []
                 for parent in node.parents:
-                    if load_dependencies or parent.id in self.first_level_tasks:
+                    if run_dependencies or parent.id in self.first_level_tasks:
                         __parents.append(parent)
                         parents.add(parent.id)
-                if not load_dependencies:
+                if not run_dependencies:
                     node.parents = __parents
         graphs: Set[TreeNodeMixin] = set()
         for graph in temp_graphs.values():
-            if load_dependencies and (graph.id not in parents or (len(graph.parents) > 0)):
+            if run_dependencies and (graph.id not in parents or (len(graph.parents) > 0)):
                 graphs.add(graph)
-            elif not load_dependencies and graph.id in self.first_level_tasks and (graph.id not in parents or (len(graph.parents) > 0)):
+            elif not run_dependencies and graph.id in self.first_level_tasks and (graph.id not in parents or (len(graph.parents) > 0)):
                 graphs.add(graph)
         return graphs
 
-    def get_schedule(self, cron: Optional[str], load_dependencies: bool, filtered_datasets: Optional[Set[str]] = None, sl_schedule_parameter_name: Optional[str] = None, sl_schedule_format: Optional[str] = None) -> Union[str, List[StarlakeDataset], None]:
+    def get_schedule(self, cron: Optional[str], run_dependencies: bool, filtered_datasets: Optional[Set[str]] = None, sl_schedule_parameter_name: Optional[str] = None, sl_schedule_format: Optional[str] = None) -> Union[str, List[StarlakeDataset], None]:
 
         cron_expr = cron
 
@@ -367,7 +367,7 @@ class StarlakeDependencies():
         if cron_expr is not None:
             return cron_expr # return the cron expression
 
-        elif not load_dependencies:
+        elif not run_dependencies:
             uris: Set[str] = set()
 
             datasets: List[StarlakeDataset] = []
