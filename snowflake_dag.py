@@ -13,12 +13,13 @@ access_control = None
 options={
     'sl_env_var':'{"SL_ROOT": ".", "SL_ENV": "SNOWFLAKE"}', 
     'tags':'starlake', 
-    'load_dependencies':'false', 
+    'run_dependencies':'false', 
     'retries':'1',
     'retry_delay':'30',
     'stage_location':'staging',
     'schema': 'starbake',
     'warehouse':'COMPUTE_WH',
+    'allow_overlapping_execution':'true',
 }
 
 from ai.starlake.job import StarlakeJobFactory
@@ -37,7 +38,7 @@ sl_job = StarlakeJobFactory.create_job(
     #eg jobs = {"task1 domain.task1 name": {"options": "task1 transform options"}, "task2 domain.task2 name": {"options": "task2 transform options"}}
 )
 
-cron = "None"
+cron = "0 0 * * *"  # Every day
 
 from ai.starlake.orchestration import StarlakeDependencies, StarlakeDependency, StarlakeDependencyType, OrchestrationFactory, AbstractTaskGroup, AbstractTask, TreeNodeMixin as TreeNode
 
@@ -47,9 +48,9 @@ dependencies=StarlakeDependencies(dependencies="""[ {
   "data" : {
     "name" : "kpi.order_items_analysis",
     "typ" : "task",
-    "parent" : "starbake.order_line",
+    "parent" : "starbake.order_lines",
     "parentTyp" : "table",
-    "parentRef" : "starbake.order_line",
+    "parentRef" : "starbake.order_lines",
     "writeStrategy" : {
       "type" : "OVERWRITE"
     },
@@ -58,7 +59,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
   },
   "children" : [ {
     "data" : {
-      "name" : "starbake.product",
+      "name" : "starbake.products",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -69,14 +70,13 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "task" : false
   }, {
     "data" : {
-      "name" : "starbake.order_line",
+      "name" : "starbake.order_lines",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
         "type" : "APPEND"
       },
-      "cron" : "None",
-      "stream": "starbake.order_line_stream"
+      "cron" : "None"
     },
     "task" : false
   } ],
@@ -120,7 +120,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "task" : false
     }, {
       "data" : {
-        "name" : "starbake.order_line",
+        "name" : "starbake.order_lines",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
@@ -135,9 +135,9 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "data" : {
       "name" : "kpi.product_summary",
       "typ" : "task",
-      "parent" : "starbake.product",
+      "parent" : "starbake.products",
       "parentTyp" : "table",
-      "parentRef" : "starbake.product",
+      "parentRef" : "starbake.products",
       "writeStrategy" : {
         "type" : "OVERWRITE"
       },
@@ -157,7 +157,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "task" : false
     }, {
       "data" : {
-        "name" : "starbake.order_line",
+        "name" : "starbake.order_lines",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
@@ -168,7 +168,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
       "task" : false
     }, {
       "data" : {
-        "name" : "starbake.product",
+        "name" : "starbake.products",
         "typ" : "table",
         "parentTyp" : "unknown",
         "writeStrategy" : {
@@ -185,9 +185,9 @@ dependencies=StarlakeDependencies(dependencies="""[ {
   "data" : {
     "name" : "kpi.product_summary",
     "typ" : "task",
-    "parent" : "starbake.product",
+    "parent" : "starbake.products",
     "parentTyp" : "table",
-    "parentRef" : "starbake.product",
+    "parentRef" : "starbake.products",
     "writeStrategy" : {
       "type" : "OVERWRITE"
     },
@@ -207,7 +207,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "task" : false
   }, {
     "data" : {
-      "name" : "starbake.order_line",
+      "name" : "starbake.order_lines",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -218,7 +218,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "task" : false
   }, {
     "data" : {
-      "name" : "starbake.product",
+      "name" : "starbake.products",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -255,7 +255,7 @@ dependencies=StarlakeDependencies(dependencies="""[ {
     "task" : false
   }, {
     "data" : {
-      "name" : "starbake.order_line",
+      "name" : "starbake.order_lines",
       "typ" : "table",
       "parentTyp" : "unknown",
       "writeStrategy" : {
@@ -272,8 +272,8 @@ statements = {
   "kpi.order_items_analysis" : {
     "preActions" : [ "USE SCHEMA kpi" ],
     "domain" : [ "kpi" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.order_items_analysis  AS WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, ARRAY_AGG( p.name || ' (' || ol.quantity || ')' ) AS purchased_items\n, Sum( ol.quantity * p.price ) AS total_order_value\nFROM starbake.orders o\nJOIN starbake.order_line ol\nON o.order_id=ol.order_id\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.order_items_analysis", "INSERT INTO kpi.order_items_analysis WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, ARRAY_AGG( p.name || ' (' || ol.quantity || ')' ) AS purchased_items\n, Sum( ol.quantity * p.price ) AS total_order_value\nFROM starbake.orders o\nJOIN starbake.order_line ol\nON o.order_id=ol.order_id\nJOIN starbake.product p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.order_items_analysis  AS WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, ARRAY_AGG( p.name || ' (' || ol.quantity || ')' ) AS purchased_items\n, Sum( ol.quantity * p.price ) AS total_order_value\nFROM starbake.orders o\nJOIN starbake.order_lines ol\nON o.order_id=ol.order_id\nJOIN starbake.products p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id;" ],
+    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.order_items_analysis", "INSERT INTO kpi.order_items_analysis WITH order_details AS (\nSELECT  o.order_id\n, o.customer_id\n, ARRAY_AGG( p.name || ' (' || ol.quantity || ')' ) AS purchased_items\n, Sum( ol.quantity * p.price ) AS total_order_value\nFROM starbake.orders o\nJOIN starbake.order_lines ol\nON o.order_id=ol.order_id\nJOIN starbake.products p\nON o.product_id = p.product_id\nGROUP BY    o.order_id\n, o.customer_id )\nSELECT  order_id\n, customer_id\n, purchased_items\n, total_order_value\nFROM order_details\nORDER BY order_id" ],
     "table" : [ "order_items_analysis" ],
     "connectionType" : [ "JDBC" ]
   },
@@ -288,16 +288,16 @@ statements = {
   "kpi.product_summary" : {
     "preActions" : [ "USE SCHEMA kpi" ],
     "domain" : [ "kpi" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.product_summary  AS SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.order_date\nFROM\nstarbake.product p\nJOIN starbake.order_line ol ON p.product_id = ol.product_id\nJOIN starbake.orders o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.order_date;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.product_summary", "INSERT INTO kpi.product_summary SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.order_date\nFROM\nstarbake.product p\nJOIN starbake.order_line ol ON p.product_id = ol.product_id\nJOIN starbake.orders o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.order_date" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.product_summary  AS SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.order_date\nFROM\nstarbake.products p\nJOIN starbake.order_lines ol ON p.product_id = ol.product_id\nJOIN starbake.orders o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.order_date;" ],
+    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.product_summary", "INSERT INTO kpi.product_summary SELECT\np.product_id,\np.name AS product_name,\nSUM(ol.quantity) AS total_units_sold,\n(SUM(ol.sale_price) - Sum(ol.quantity * p.cost)) AS profit,\no.order_id,\no.order_date\nFROM\nstarbake.products p\nJOIN starbake.order_lines ol ON p.product_id = ol.product_id\nJOIN starbake.orders o ON ol.order_id = o.order_id\nGROUP BY\np.product_id,\no.order_id, p.name, o.order_date" ],
     "table" : [ "product_summary" ],
     "connectionType" : [ "JDBC" ]
   },
   "kpi.revenue_summary" : {
     "preActions" : [ "USE SCHEMA kpi" ],
     "domain" : [ "kpi" ],
-    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.revenue_summary  AS SELECT\no.order_id,\no.order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.orders o\nJOIN starbake.order_line ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.order_date;" ],
-    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.revenue_summary", "INSERT INTO kpi.revenue_summary SELECT\no.order_id,\no.order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.orders o\nJOIN starbake.order_line ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.order_date" ],
+    "mainSqlIfNotExists" : [ "CREATE TABLE kpi.revenue_summary  AS SELECT\no.order_id,\no.order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.orders o\nJOIN starbake.order_lines ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.order_date;" ],
+    "mainSqlIfExists" : [ "TRUNCATE TABLE kpi.revenue_summary", "INSERT INTO kpi.revenue_summary SELECT\no.order_id,\no.order_date,\nSUM(ol.quantity * ol.sale_price) AS total_revenue\nFROM\nstarbake.orders o\nJOIN starbake.order_lines ol ON o.order_id = ol.order_id\nGROUP BY\no.order_id, o.order_date" ],
     "table" : [ "revenue_summary" ],
     "connectionType" : [ "JDBC" ]
   }
@@ -354,7 +354,7 @@ audit = {
   "preActions" : [ "USE SCHEMA audit" ],
   "domain" : [ "audit" ],
   "createSchemaSql" : [ "CREATE SCHEMA IF NOT EXISTS audit", "CREATE TABLE IF NOT EXISTS audit.audit (\n                              JOBID VARCHAR NOT NULL,\n                              PATHS TEXT NOT NULL,\n                              DOMAIN VARCHAR NOT NULL,\n                              SCHEMA VARCHAR NOT NULL,\n                              SUCCESS BOOLEAN NOT NULL,\n                              COUNT BIGINT NOT NULL,\n                              COUNTACCEPTED BIGINT NOT NULL,\n                              COUNTREJECTED BIGINT NOT NULL,\n                              TIMESTAMP TIMESTAMP NOT NULL,\n                              DURATION BIGINT NOT NULL,\n                              MESSAGE VARCHAR NOT NULL,\n                              STEP VARCHAR NOT NULL,\n                              DATABASE VARCHAR,\n                              TENANT VARCHAR\n                             )\n    " ],
-  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{paths}' AS PATHS,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            {success} AS SUCCESS,\n            {count} AS COUNT,\n            {countAccepted} AS COUNTACCEPTED,\n            {countRejected} AS COUNTREJECTED,\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            {duration} AS DURATION,\n            '{message}' AS MESSAGE,\n            '{step}' AS STEP,\n            '{database}' AS DATABASE,\n            '{tenant}' AS TENANT\n        " ],
+  "mainSqlIfExists" : [ "\n          SELECT\n            '{jobid}' AS JOBID,\n            '{paths}' AS PATHS,\n            '{domain}' AS DOMAIN,\n            '{schema}' AS SCHEMA,\n            {success} AS SUCCESS,\n            {count} AS COUNT,\n            {countAccepted} AS COUNTACCEPTED,\n            {countRejected} AS COUNTREJECTED,\n            TO_TIMESTAMP('{timestamp}') AS TIMESTAMP,\n            {duration} AS DURATION,\n            '{message}' AS MESSAGE,\n            '{step}' AS STEP,\n            '{database}' AS DATABASE,\n            '{tenant}' AS TENANT,\n            TO_TIMESTAMP('{scheduledDate}') AS SCHEDULED_DATE\n        " ],
   "table" : [ "audit" ],
   "connectionType" : [ "JDBC" ]
 }
