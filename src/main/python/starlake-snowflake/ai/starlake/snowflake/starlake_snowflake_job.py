@@ -666,10 +666,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 import pytz
                 return parser.parse(value).astimezone(pytz.timezone('UTC'))
 
-            def get_start_end_dates(session: Session, cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
+            def get_start_end_dates(cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
                 """Get the start and end dates of the running dag.
                 Args:
-                    session (Session): The Snowflake session.
                     cron_expr (str): The cron expression.
                     current_date (datetime): The current date.
                 Returns:
@@ -734,7 +733,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     logical_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone('UTC'))
                     if cron_expr:
                         # if cron expression is provided, the logical date is the end date of the current cron expression
-                        (logical_date, _) = get_start_end_dates(session, cron_expr, logical_date)
+                        (logical_date, _) = get_start_end_dates(cron_expr, logical_date)
                 if isinstance(logical_date, str):
                     logical_date = as_datetime(logical_date)
                 return logical_date
@@ -775,7 +774,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                         if cron_expr and (not sl_data_interval_start or not sl_data_interval_end):
                             # if cron expression is provided, calculate the start and end dates
-                            (sl_data_interval_start, sl_data_interval_end) = get_start_end_dates(session, cron_expr, logical_date)
+                            (sl_data_interval_start, sl_data_interval_end) = get_start_end_dates(cron_expr, logical_date)
 
                         if sl_data_interval_start and sl_data_interval_end:
                             safe_params.update({'sl_data_interval_start': sl_data_interval_start.strftime(format), 'sl_data_interval_end': sl_data_interval_end.strftime(format)})
