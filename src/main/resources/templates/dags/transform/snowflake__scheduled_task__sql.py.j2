@@ -10,6 +10,12 @@
 # - tags: a list of tags to be applied to the dag [OPTIONAL]
 # - retries(1): the number of retries to attempt before failing the task [OPTIONAL]
 # - retry_delay(300): the delay between retries in seconds [OPTIONAL]
+# - start_date: the start date of the dag (eg. 2022-01-01) [OPTIONAL]
+# - optional_dataset_enabled(False): whether a dataset can be treated as optional [OPTIONAL]
+# - data_cycle_enabled(False): whether the data cycle feature is enabled or not [OPTIONAL]
+# - data_cycle: the data cycle to be used for the dag [OPTIONAL]
+# - beyond_data_cycle_enabled(True): whether the beyond data cycle feature is enabled or not [OPTIONAL]
+# - min_timedelta_between_runs(900): the minimum time delta in seconds between two consecutive runs [OPTIONAL], default to 15 minutes
 #
 {% include 'templates/dags/__starlake_snowflake_orchestrator.py' %}
 {% include 'templates/dags/__starlake_sql_execution.py' %}

@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple, Union
 
-from ai.starlake.common import MissingEnvironmentVariable
+from ai.starlake.common import is_valid_cron, MissingEnvironmentVariable
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, StarlakeExecutionEnvironment, TaskType
 
@@ -11,6 +11,7 @@ from snowflake.core.task.dagv1 import DAGTask
 
 from snowflake.snowpark import Session
 
+from datetime import datetime
 class SnowflakeEvent(AbstractEvent[StarlakeDataset]):
     @classmethod
     def to_event(cls, dataset: StarlakeDataset, source: Optional[str] = None) -> StarlakeDataset:
@@ -27,17 +28,38 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         packages = kwargs.get('packages', __class__.get_context_var(var_name='packages', default_value='croniter,python-dateutil', options=self.options)).split(',')
         packages = set([package.strip() for package in packages])
         packages.update(['croniter', 'python-dateutil', 'snowflake-snowpark-python'])
-        self._packages = list(packages)
+        self.__packages = list(packages)
         timezone = kwargs.get('timezone', __class__.get_context_var(var_name='timezone', default_value='UTC', options=self.options))
-        self._timezone = timezone
+        self.__timezone = timezone
         try:
-            self._sl_incoming_file_stage = kwargs.get('sl_incoming_file_stage', __class__.get_context_var(var_name='sl_incoming_file_stage', options=self.options))
+            self.__sl_incoming_file_stage = kwargs.get('sl_incoming_file_stage', __class__.get_context_var(var_name='sl_incoming_file_stage', options=self.options))
         except MissingEnvironmentVariable:
-            self._sl_incoming_file_stage = None
+            self.__sl_incoming_file_stage = None
         allow_overlapping_execution: bool = kwargs.get('allow_overlapping_execution', __class__.get_context_var(var_name='allow_overlapping_execution', default_value='False', options=self.options).lower() == 'true')
-        self._allow_overlapping_execution = allow_overlapping_execution
-        check_freshness: bool = kwargs.get('check_freshness', __class__.get_context_var(var_name='check_freshness', default_value='False', options=self.options).lower() == 'true')
-        self._check_freshness = check_freshness
+        self.__allow_overlapping_execution = allow_overlapping_execution
+        # set start_date
+        import sys
+        import pytz
+        module = sys.modules.get(module_name) if module_name else None
+        if module and hasattr(module, '__file__'):
+            import os
+            file_path = module.__file__
+            stat = os.stat(file_path)
+            default_start_date = datetime.fromtimestamp(stat.st_mtime, tz=pytz.timezone(self.timezone)).strftime('%Y-%m-%d')
+        else:
+            default_start_date = datetime.now().astimezone(pytz.timezone(self.timezone)).strftime('%Y-%m-%d')
+        sd = __class__.get_context_var(var_name='start_date', default_value=default_start_date, options=self.options)
+        import re
+        pattern = re.compile(r'\d{4}-\d{2}-\d{2}')
+        if pattern.fullmatch(sd):
+            self.__start_date = datetime.strptime(sd, '%Y-%m-%d').astimezone(pytz.timezone(self.timezone))
+        else:
+            self.__start_date = datetime.strptime(default_start_date, '%Y-%m-%d').astimezone(pytz.timezone(self.timezone))
+        self.__optional_dataset_enabled = str(__class__.get_context_var(var_name='optional_dataset_enabled', default_value="false", options=self.options)).strip().lower() == "true"
+        self.__data_cycle_enabled = str(__class__.get_context_var(var_name='data_cycle_enabled', default_value="false", options=self.options)).strip().lower() == "true"
+        self.__data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
+        self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
+        self.__min_timedelta_between_runs = int(__class__.get_context_var(var_name='min_timedelta_between_runs', default_value=15*60, options=self.options))
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -49,23 +71,78 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
     @property
     def packages(self) -> List[str]:
-        return self._packages
+        return self.__packages
 
     @property
     def timezone(self) -> str:
-        return self._timezone
+        return self.__timezone
 
     @property
     def allow_overlapping_execution(self) -> bool:
-        return self._allow_overlapping_execution
-
-    @property
-    def check_freshness(self) -> bool:
-        return self._check_freshness
+        return self.__allow_overlapping_execution
 
     @property
     def sl_incoming_file_stage(self) -> Optional[str]:
-        return self._sl_incoming_file_stage
+        return self.__sl_incoming_file_stage
+
+    @property
+    def start_date(self) -> datetime:
+        """Get the start date of the job"""
+        return self.__start_date
+
+    @property
+    def optional_dataset_enabled(self) -> bool:
+        """whether a dataset can be optional or not."""
+        return self.__optional_dataset_enabled
+
+    @property
+    def data_cycle_enabled(self) -> bool:
+        """Get whether data cycle is enabled or not"""
+        return self.__data_cycle_enabled
+
+    @property
+    def data_cycle(self) -> str:
+        """Get the data cycle of the job"""
+        return self.__data_cycle
+
+    @data_cycle.setter
+    def data_cycle(self, value: Optional[str]) -> None:
+        """Set the data cycle value."""
+        if self.data_cycle_enabled and value:
+            data_cycle = value.strip().lower()
+            if data_cycle == "none":
+                self.__data_cycle = None
+            elif data_cycle == "hourly":
+                self.__data_cycle = "0 * * * *"
+            elif data_cycle == "daily":
+                self.__data_cycle = "0 0 * * *"
+            elif data_cycle == "weekly":
+                self.__data_cycle = "0 0 * * 0"
+            elif data_cycle == "monthly":
+                self.__data_cycle = "0 0 1 * *"
+            elif data_cycle == "yearly":
+                self.__data_cycle = "0 0 1 1 *"
+            elif is_valid_cron(data_cycle):
+                self.__data_cycle = data_cycle
+            else:
+                raise ValueError(f"Invalid data cycle value: {data_cycle}")
+        else:
+            self.__data_cycle = None
+
+    @property
+    def optional_dataset_enabled(self) -> bool:
+        """whether a dataset can be optional or not."""
+        return self.__optional_dataset_enabled
+
+    @property
+    def beyond_data_cycle_enabled(self) -> bool:
+        """whether the beyond data cycle feature is enabled or not."""
+        return self.__beyond_data_cycle_enabled
+
+    @property
+    def min_timedelta_between_runs(self) -> int:
+        """Get minimum time delta in seconds between two consecutive runs"""
+        return self.__min_timedelta_between_runs
 
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
@@ -94,6 +171,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         """
         comment = kwargs.get('comment', f"dummy task for {task_id}")
         kwargs.update({'comment': comment})
+        kwargs.update({'condition': "SYSTEM$GET_PREDECESSOR_RETURN_VALUE()::BOOLEAN"})
         return super().start_op(task_id=task_id, scheduled=scheduled, not_scheduled_datasets=not_scheduled_datasets, least_frequent_datasets=least_frequent_datasets, most_frequent_datasets=most_frequent_datasets, **kwargs)
 
     def end_op(self, task_id: str, events: Optional[List[StarlakeDataset]] = None, **kwargs) -> Optional[DAGTask]:
@@ -284,6 +362,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         })
                     break
 
+            timezone = self.timezone
+            format = '%Y-%m-%d %H:%M:%S%z'
+
             def bindParams(stmt: str) -> str:
                 """Bind parameters to the SQL statement.
                 Args:
@@ -447,6 +528,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     audit_sqls = audit.get('mainSqlIfExists', None)
                     if audit_sqls:
                         try:
+                            import pytz
+                            ts = ts.astimezone(pytz.timezone(timezone))
                             audit_sql = audit_sqls[0]
                             formatted_sql = audit_sql.format(
                                 jobid = jobid or f'{domain}.{table}',
@@ -457,13 +540,13 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 count = str(count),
                                 countAccepted = str(countAccepted),
                                 countRejected = str(countRejected),
-                                timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                timestamp = ts.strftime(format),
                                 duration = str(duration),
                                 message = message,
                                 step = step or "TRANSFORM",
                                 database = "",
                                 tenant = "",
-                                scheduledDate = scheduled_date.strftime("%Y-%m-%d %H:%M:%S") if scheduled_date else ts.strftime("%Y-%m-%d %H:%M:%S")
+                                scheduledDate = scheduled_date.strftime(format) if scheduled_date else ts.strftime(format)
                             )
                             insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
                             execute_sql(session, insert_sql, "Insert audit record:", dry_run)
@@ -497,6 +580,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     expectation_sqls = expectations.get('mainSqlIfExists', None)
                     if expectation_sqls:
                         try:
+                            import pytz
+                            ts = ts.astimezone(pytz.timezone(timezone))
                             expectation_sql = expectation_sqls[0]
                             formatted_sql = expectation_sql.format(
                                 jobid = jobid or f'{domain}.{table}',
@@ -505,7 +590,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 schema = table,
                                 count = count,
                                 exception = exception,
-                                timestamp = ts.strftime("%Y-%m-%d %H:%M:%S"),
+                                timestamp = ts.strftime(format),
                                 success = str(success),
                                 name = name,
                                 params = params,
@@ -655,16 +740,19 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                 return True
 
-            def as_datetime(value: str) -> datetime:
+            def as_datetime(value: Union[str, datetime]) -> datetime:
                 """Convert a string to a datetime object.
                 Args:
                     value (str): The string to convert.
                 Returns:
                     datetime: The datetime object.
                 """
-                from dateutil import parser
-                import pytz
-                return parser.parse(value).astimezone(pytz.timezone('UTC'))
+                if isinstance(value, str):
+                    from dateutil import parser
+                    import pytz
+                    value = parser.parse(value).astimezone(pytz.timezone('UTC'))
+                return value
+
 
             def get_start_end_dates(cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
                 """Get the start and end dates of the running dag.
@@ -691,60 +779,53 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                 except CroniterBadCronError:
                     raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-            def get_logical_date(session: Session, allow_overlapping_execution: bool = False, cron_expr: Optional[str] = None, dry_run: bool = False) -> datetime:
+            def get_logical_date(session: Session, backfill: bool = False, cron_expr: Optional[str] = None, dry_run: bool = False) -> datetime:
                 """Get the logical date of the running dag.
                 Args:
                     session (Session): The Snowflake session.
-                    allow_overlapping_execution (bool, optional): Whether to allow overlapping execution. Defaults to False.
+                    backfill (bool, optional): Whether the current Dag run is a backfill. Defaults to False.
                     cron_expr (Optional[str], optional): The optional cron expression. Defaults to None.
                     dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
                 Returns:
                     datetime: The logical date of the running dag.
                 """
-                if dry_run:
-                    config = None
+                if not backfill:
+                    # the logical date is the optional one defined in the task graph config
+                    if dry_run:
+                        config = None
+                    else:
+                        config = session.call("system$get_task_graph_config")
+                    if config:
+                        import json
+                        config = json.loads(config)
+                    else:
+                        config = {}
+                    logical_date = config.get("logical_date", None)
                 else:
-                    config = session.call("system$get_task_graph_config")
-                if config:
-                    import json
-                    config = json.loads(config)
-                else:
-                    config = {}
-                logical_date = config.get("logical_date", None)
+                    # the logical date is the partition end date
+                    logical_date = session.call("system$task_runtime_info", "PARTITION_END")
                 if not logical_date:
-                    # check if the task is a backfill
-                    backfill: bool = False
-                    if allow_overlapping_execution and not dry_run:
-                        backfill = session.call("system$task_runtime_info", "IS_BACKFILL")
-                        if backfill:
-                            # the logical date is the partition end date
-                            logical_date = session.call("system$task_runtime_info", "PARTITION_END")
-                    if not logical_date:
-                        # the logical date is the original scheduled timestamp of the initial graph run in the current group
-                        query = "SELECT to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))"
-                        print(f"-- Get the original scheduled timestamp of the initial graph run:\n{query};")
-                        rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
-                        if rows.__len__() == 1:
-                            logical_date = rows[0][0]
-                        else:
-                            logical_date = None
-                if not logical_date:
-                    import pytz
-                    logical_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone('UTC'))
+                    # the current date is the original scheduled timestamp of the initial graph run in the current group
+                    query = "SELECT to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))"
+                    rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
+                    if rows.__len__() == 1:
+                        current_date = as_datetime(rows[0][0])
+                    else:
+                        # ... or the current system date
+                        import pytz
+                        current_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone('UTC'))
                     if cron_expr:
-                        # if cron expression is provided, the logical date is the end date of the current cron expression
-                        (logical_date, _) = get_start_end_dates(cron_expr, logical_date)
-                if isinstance(logical_date, str):
-                    logical_date = as_datetime(logical_date)
-                return logical_date
+                        # if a cron expression has been provided, the logical date corresponds to the end date determined by applying the cron expression to the current date
+                        (logical_date, _) = get_start_end_dates(cron_expr, current_date)
+                    else:
+                        logical_date = current_date
+                return as_datetime(logical_date)
 
             cron_expr = kwargs.get('cron_expr', None)
             kwargs.pop('cron_expr', None)
 
             if task_type == TaskType.TRANSFORM:
                 if statements:
-
-                    format = '%Y-%m-%d %H:%M:%S%z'
 
                     allow_overlapping_execution = self.allow_overlapping_execution
 
@@ -755,22 +836,23 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         if dry_run:
                             print(f"-- Executing transform for {sink} in dry run mode")
 
-                        logical_date = get_logical_date(session, allow_overlapping_execution, cron_expr, dry_run)
+                        backfill: bool = False
+                        if allow_overlapping_execution and not dry_run:
+                            backfill = bool(session.call("system$task_runtime_info", "IS_BACKFILL"))
+
+                        logical_date = get_logical_date(session, backfill, cron_expr, dry_run)
 
                         sl_data_interval_start = None
                         sl_data_interval_end = None
-                        # check if the task is a backfill
-                        backfill: bool = False
-                        if allow_overlapping_execution and not dry_run:
-                            backfill = session.call("system$task_runtime_info", "IS_BACKFILL")
-                            if backfill:
-                                partition_start = session.call("system$task_runtime_info", "PARTITION_START")
-                                if partition_start:
-                                    if isinstance(partition_start, str):
-                                        sl_data_interval_start = as_datetime(partition_start)
-                                    else:
-                                        sl_data_interval_start = partition_start
-                                sl_data_interval_end = logical_date
+
+                        if backfill:
+                            partition_start = session.call("system$task_runtime_info", "PARTITION_START")
+                            if partition_start:
+                                if isinstance(partition_start, str):
+                                    sl_data_interval_start = as_datetime(partition_start)
+                                else:
+                                    sl_data_interval_start = partition_start
+                            sl_data_interval_end = logical_date
 
                         if cron_expr and (not sl_data_interval_start or not sl_data_interval_end):
                             # if cron expression is provided, calculate the start and end dates
@@ -1052,7 +1134,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             else:
                                 jobid = str(session.call("system$current_user_task_name"))
 
-                            logical_date = get_logical_date(session, allow_overlapping_execution, cron_expr, dry_run)
+                            backfill: bool = False
+                            if allow_overlapping_execution and not dry_run:
+                                backfill = bool(session.call("system$task_runtime_info", "IS_BACKFILL"))
+
+                            logical_date = get_logical_date(session, backfill, cron_expr, dry_run)
 
                             start = datetime.now()
 
