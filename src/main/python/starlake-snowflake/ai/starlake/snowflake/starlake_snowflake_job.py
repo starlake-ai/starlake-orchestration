@@ -918,7 +918,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
                             if check_if_table_exists(session, domain, table):
                                 # enable change tracking
-                                enable_change_tracking(session, sink, dry_run)
+                                # enable_change_tracking(session, sink, dry_run)
                                 # update table schema
                                 update_table_schema(session, schema_string=",".join(statements.get("targetSchema", [])), sync_strategy=statements.get("syncStrategy", None), dry_run=dry_run)
                                 # execute addSCD2ColumnsSqls
@@ -929,7 +929,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 # execute mainSqlIfNotExists
                                 execute_sqls(session, statements.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
                                 # enable change tracking
-                                enable_change_tracking(session, sink, dry_run)
+                                # enable_change_tracking(session, sink, dry_run)
 
                             # execute postsql
                             execute_sqls(session, statements.get('postsql', []) , "Post sqls", dry_run)
@@ -1197,7 +1197,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     exists = check_if_table_exists(session, domain, table)
                                     if exists:
                                         # enable change tracking
-                                        enable_change_tracking(session, sink, dry_run)
+                                        # enable_change_tracking(session, sink, dry_run)
                                         # update table schema
                                         update_table_schema(session, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
@@ -1209,7 +1209,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     if not exists:
                                         # enable change tracking
-                                        enable_change_tracking(session, sink, dry_run)
+                                        # enable_change_tracking(session, sink, dry_run)
+                                        ...
                                 elif nbSteps == 2:
                                     # execute first step
                                     execute_sqls(session, statements.get('firstStep', []), "Execute first step", dry_run)
@@ -1227,7 +1228,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     execute_sqls(session, context_schema.get('presql', []), "Pre sqls", dry_run)
                                     if check_if_table_exists(session, domain, table):
                                         # enable change tracking
-                                        enable_change_tracking(session, sink, dry_run)
+                                        # enable_change_tracking(session, sink, dry_run)
                                         # execute addSCD2ColumnsSqls
                                         execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                         # update schema
@@ -1238,7 +1239,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         # execute mainSqlIfNotExists
                                         execute_sqls(session, second_step.get('mainSqlIfNotExists', []), "Main sql if not exists", dry_run)
                                         # enable change tracking
-                                        enable_change_tracking(session, sink, dry_run)
+                                        # enable_change_tracking(session, sink, dry_run)
                                     # execute dropFirstStep
                                     execute_sql(session, statements.get('dropFirstStep', None), "Drop first step", dry_run)
                                 else:
