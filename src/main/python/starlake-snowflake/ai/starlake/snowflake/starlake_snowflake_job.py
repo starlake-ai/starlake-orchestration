@@ -855,7 +855,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     allow_overlapping_execution = self.allow_overlapping_execution
 
                     # create the function that will execute the transform
-                    def fun(session: Session, dry_run: bool) -> None:
+                    def fun(session: Session, dry_run: bool, logical_date: Optional[Union[str, datetime]] = None) -> None:
                         from datetime import datetime
 
                         if dry_run:
@@ -868,7 +868,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             if rows.__len__() == 1:
                                 backfill = rows[0][0]
 
-                        logical_date = get_logical_date(session, backfill, cron_expr, dry_run)
+                        if not logical_date:
+                            logical_date = get_logical_date(session, backfill, cron_expr=computed_cron_expr, dry_run=dry_run)
+                        logical_date = as_datetime(logical_date)
 
                         sl_data_interval_start = None
                         sl_data_interval_end = None
@@ -1161,7 +1163,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 raise ValueError(f"Unsupported format {format}")
   
                         # create the function that will execute the load
-                        def fun(session: Session, dry_run: bool) -> None:
+                        def fun(session: Session, dry_run: bool, logical_date: Optional[Union[str, datetime]] = None) -> None:
                             from datetime import datetime
 
                             # get the current job id
@@ -1179,7 +1181,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 if rows.__len__() == 1:
                                     backfill = rows[0][0]
 
-                            logical_date = get_logical_date(session, backfill, cron_expr, dry_run)
+                            if not logical_date:
+                                logical_date = get_logical_date(session, backfill, cron_expr=computed_cron_expr, dry_run=dry_run)
+                            logical_date = as_datetime(logical_date)
+
 
                             start = datetime.now()
 
