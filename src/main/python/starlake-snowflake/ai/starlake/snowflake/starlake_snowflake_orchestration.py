@@ -188,12 +188,11 @@ class SnowflakeDag(DAG):
             except CroniterBadCronError:
                 raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-        def get_logical_date(session: Session, backfill: bool = False, cron_expr: Optional[str] = None, dry_run: bool = False) -> datetime:
+        def get_logical_date(session: Session, backfill: bool = False, dry_run: bool = False) -> datetime:
             """Get the logical date of the running dag.
             Args:
                 session (Session): The Snowflake session.
                 backfill (bool, optional): Whether the current Dag run is a backfill. Defaults to False.
-                cron_expr (Optional[str], optional): The optional cron expression. Defaults to None.
                 dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
             Returns:
                 datetime: The logical date of the running dag.
@@ -225,9 +224,6 @@ class SnowflakeDag(DAG):
                 else:
                     # ... or the current system date
                     logical_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(timezone))
-            if cron_expr:
-                # if a cron expression has been provided, the logical date corresponds to the end date determined by applying the cron expression to the current date
-                (_, logical_date) = get_start_end_dates(cron_expr, logical_date)
             return as_datetime(logical_date)
 
         def get_previous_dag_run(session: Session, logical_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
@@ -338,7 +334,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             scheduled_date_to_check_min = croniter(cron, scheduled_date_to_check_max).get_prev(datetime)
             return (scheduled_date_to_check_min, scheduled_date_to_check_max)
 
-        def fun(session: Session, dry_run: bool, logical_date: Optional[Union[str, datetime]] = None) -> None:
+        def fun(session: Session, dry_run: bool, logical_date: Optional[str] = None) -> None:
             query = "ALTER SESSION SET TIMESTAMP_TYPE_MAPPING = 'TIMESTAMP_LTZ'"
             execute_sql(session, query, "Set session timestamp type mapping", False)
 
@@ -350,11 +346,12 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                     backfill = rows[0][0]
 
             if not logical_date:
-                logical_date = get_logical_date(session, backfill, cron_expr=computed_cron_expr, dry_run=dry_run)
+                logical_date = get_logical_date(session, backfill, dry_run=dry_run)
             logical_date = as_datetime(logical_date)
 
             if computed_cron_expr:
-                (_, scheduled_date) = get_start_end_dates(computed_cron_expr, as_datetime(logical_date))
+                # if a cron expression has been provided, the scheduled date corresponds to the end date determined by applying the cron expression to the logical date
+                (_, scheduled_date) = get_start_end_dates(computed_cron_expr, logical_date)
             else:
                 scheduled_date = logical_date
 
@@ -474,7 +471,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
 
         definition = StoredProcedureCall(
             func = fun, 
-            args=[False],
+            args=[False, None],
             stage_location=stage_location,
             packages=packages
         )
