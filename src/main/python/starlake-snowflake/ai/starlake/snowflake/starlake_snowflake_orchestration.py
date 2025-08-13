@@ -473,10 +473,8 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
         )
 
         if not schedule:
-            if computed_cron:
-                schedule = computed_cron
-            else: 
-                schedule = timedelta(seconds=min_timedelta_between_runs)
+            # if no schedule is provided, we set the schedule to a timedelta based on the minimum time delta between runs
+            schedule = timedelta(seconds=min_timedelta_between_runs)
 
         super().__init__(
             name=name, 
