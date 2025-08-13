@@ -105,7 +105,7 @@ class SnowflakeDag(DAG):
         if computed_cron:
             computed_cron_expr = computed_cron.expr
 
-        format = '%Y-%m-%d %H:%M:%S%z'
+        datetime_format = '%Y-%m-%d %H:%M:%S %z'
 
         from collections import defaultdict
         safe_params = defaultdict(lambda: 'NULL', {})
@@ -163,7 +163,7 @@ class SnowflakeDag(DAG):
             if isinstance(value, str):
                 from dateutil import parser
                 value = parser.parse(value).astimezone(pytz.timezone(timezone))
-            return value
+            return value.astimezone(pytz.timezone(timezone))
 
         def get_start_end_dates(cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
             """Get the start and end dates by applying the cron expression to the current date.
@@ -212,19 +212,22 @@ class SnowflakeDag(DAG):
                 logical_date = config.get("logical_date", None)
             else:
                 # the logical date is the partition end date
-                logical_date = session.call("system$task_runtime_info", "PARTITION_END")
-            if not logical_date:
-                # the current date is the original scheduled timestamp of the initial graph run in the current group
-                query = "SELECT to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))"
+                query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
                 rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
                 if rows.__len__() == 1:
-                    current_date = as_datetime(rows[0][0])
+                    logical_date = rows[0][0]
+            if not logical_date:
+                # the current date is the original scheduled timestamp of the initial graph run in the current group
+                query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP')::timestamp_ltz"
+                rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
+                if rows.__len__() == 1:
+                    current_date = rows[0][0]
                 else:
                     # ... or the current system date
                     current_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(timezone))
                 if cron_expr:
                     # if a cron expression has been provided, the logical date corresponds to the end date determined by applying the cron expression to the current date
-                    (logical_date, _) = get_start_end_dates(cron_expr, current_date)
+                    (_, logical_date) = get_start_end_dates(cron_expr, current_date)
                 else:
                     logical_date = current_date
             return as_datetime(logical_date)
@@ -269,7 +272,6 @@ class SnowflakeDag(DAG):
             Returns:
                 Optional[tuple[datetime, datetime]]: The last event for the dataset as a tuple of (timestamp, scheduled_date) or None.
             """
-            logger.info(f'Finding dataset event for {dataset} with data_interval_end between {scheduled_date_to_check_min.strftime(format)} and {scheduled_date_to_check_max.strftime(format)}, and with timestamp <= {ts.strftime(format)}')
             # we look for the last event for the dataset in the audit table
             # the event is the last successful run of the dataset before the max scheduled date and after the min scheduled date
             domainAndSchema = dataset.split('.')
@@ -277,17 +279,16 @@ class SnowflakeDag(DAG):
                 raise ValueError(f"Invalid dataset name: {dataset}. It should be in the format 'domain.schema'.")
             domain = domainAndSchema[0]
             schema = domainAndSchema[-1]
-            query = f"""
-                SELECT TIMESTAMP, SCHEDULED_DATE FROM audit.audit 
-                WHERE DOMAIN ilike '{domain}'
-                AND SCHEMA ilike '{schema}'
-                AND SCHEDULED_DATE > TO_TIMESTAMP_LTZ('{scheduled_date_to_check_min.strftime(format)}')
-                AND SCHEDULED_DATE <= TO_TIMESTAMP_LTZ('{scheduled_date_to_check_max.strftime(format)}')
-                AND TIMESTAMP <= TO_TIMESTAMP_LTZ('{ts.strftime(format)}')
-                ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
-                LIMIT 1
-                """
-            rows = execute_sql(session, query, f"Find dataset event for {dataset}", dry_run)
+            query = f"""SELECT TIMESTAMP, SCHEDULED_DATE 
+FROM audit.audit 
+WHERE DOMAIN ilike '{domain}'
+    AND SCHEMA ilike '{schema}'
+    AND SUCCESS = true
+    AND SCHEDULED_DATE > TO_TIMESTAMP('{scheduled_date_to_check_min.strftime(datetime_format)}')
+    AND SCHEDULED_DATE <= TO_TIMESTAMP('{scheduled_date_to_check_max.strftime(datetime_format)}')
+ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
+"""
+            rows = execute_sql(session, query, f'Finding dataset event for {dataset} with scheduled date between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}', dry_run)
             if rows and rows.__len__() > 0:
                 return (as_datetime(rows[0][0]), as_datetime(rows[0][1]))
             return None
@@ -327,16 +328,16 @@ class SnowflakeDag(DAG):
             scheduled_date_to_check_min = croniter(cron, scheduled_date_to_check_max).get_prev(datetime)
             return (scheduled_date_to_check_min, scheduled_date_to_check_max)
 
-        def cancel_task_ongoing_execution(session: Session, dry_run: bool) -> None:
-            if not dry_run:
-                session.call("system$set_return_value", "false")
-            query = f"""SELECT system$USER_TASK_CANCEL_ONGOING_EXECUTIONS('{name.upper()}')"""
-            execute_sql(session, query, f"Cancel ongoing execution for {name.upper()}", dry_run)
-
         def fun(session: Session, dry_run: bool) -> None:
+            query = "ALTER SESSION SET TIMESTAMP_TYPE_MAPPING = 'TIMESTAMP_LTZ'"
+            execute_sql(session, query, "Set session timestamp type mapping", False)
+
             backfill: bool = False
-            if allow_overlapping_execution and not dry_run:
-                backfill = bool(session.call("system$task_runtime_info", "IS_BACKFILL"))
+            if allow_overlapping_execution:
+                query = "SELECT SYSTEM$TASK_RUNTIME_INFO('IS_BACKFILL')::boolean"
+                rows = execute_sql(session, query, "Check if the current running dag is a backfill", dry_run)
+                if rows.__len__() == 1:
+                    backfill = rows[0][0]
 
             logical_date = get_logical_date(session, backfill, cron_expr=computed_cron_expr, dry_run=dry_run)
 
@@ -345,7 +346,7 @@ class SnowflakeDag(DAG):
             previous_dag_checked: Optional[datetime] = None
             previous_dag_ts: Optional[datetime] = None
 
-            previous_dag_run = get_previous_dag_run(session, scheduled_date, dry_run, at_scheduled_date=False)
+            previous_dag_run = get_previous_dag_run(session, scheduled_date, False, at_scheduled_date=False)
 
             if previous_dag_run:
                 previous_dag_checked = previous_dag_run[0]
@@ -361,21 +362,22 @@ class SnowflakeDag(DAG):
             last_dag_checked: Optional[datetime] = None
             last_dag_ts: Optional[datetime] = None
             if not backfill:
-                last_dag_run = get_previous_dag_run(session, scheduled_date, dry_run, at_scheduled_date=True)
+                last_dag_run = get_previous_dag_run(session, scheduled_date, False, at_scheduled_date=True)
                 if last_dag_run:
                     last_dag_checked = last_dag_run[0]
                     last_dag_ts = last_dag_run[1]
                     logger.info(f"Found last succeeded dag run with scheduled date {last_dag_checked} and start date {last_dag_ts}")
 
-            canceled = False
+            skipped = False
 
             if last_dag_ts and last_dag_checked:
-                if not backfill and last_dag_checked.strftime(format) == scheduled_date.strftime(format):
+                if not backfill and last_dag_checked.strftime(datetime_format) == scheduled_date.strftime(datetime_format):
                     # we run successfuly this dag for the same scheduled date, we should skip the current execution
-                    logger.error(f"The last succeeded dag run has been executed at {last_dag_ts} with the same scheduled date {last_dag_checked}... The current DAG execution will be skipped")
-                    canceled = True
+                    logger.warning(f"The last succeeded dag run has been executed at {last_dag_ts} with the same scheduled date {last_dag_checked}... The current DAG execution will be skipped")
+                    if not dry_run:
+                        skipped = True
 
-            if not canceled:
+            if not skipped:
                 missing_datasets = []
 
                 data_cycle_freshness: Optional[timedelta] = None
@@ -386,8 +388,9 @@ class SnowflakeDag(DAG):
                 for dataset, (original_cron, freshness) in datasets.items():
                     if not check_if_dataset_exists(session, dataset):
                         logger.error(f"Dataset {dataset} does not exist")
-                        canceled = True
-                        break
+                        if not dry_run:
+                            skipped = True
+                            break
 
                     cron = original_cron or data_cycle
                     scheduled = cron and is_valid_cron(cron)
@@ -439,15 +442,16 @@ class SnowflakeDag(DAG):
                     logger.warning(f"The following datasets are missing: {', '.join(missing_datasets)}, the current DAG execution will be skipped")
                     skipped = True
                 else:
-                    logger.info(f"All datasets are present: {', '.join(datasets.keys())}")
-                    if not dry_run:
-                        session.call("system$set_return_value", "true")
-                    import json
-                    config = {"logical_date": logical_date.strftime(format)}
-                    execute_sql(session, f"ALTER TASK IF EXISTS {name} SET CONFIG = '{json.dumps(config)}'", f"Set the logical date in the task graph config: {json.dumps(config)}", dry_run)
+                    logger.info(f"All datasets are present: {', '.join(datasets.keys())}, the current DAG will continue its execution")
 
-            if canceled:
-                cancel_task_ongoing_execution(session, dry_run)
+            if not skipped:
+                # if the dag has to be run, we set the return value to the logical date of the running dag
+                query = f"SELECT SYSTEM$SET_RETURN_VALUE('{scheduled_date.strftime(datetime_format)}')"
+                execute_sql(session, query, f"Set return value to the logical date of the running DAG '{scheduled_date.strftime(datetime_format)}'", dry_run)
+            else:
+                # if the dag has to be skipped, we set the return value to an empty string
+                query = "SELECT SYSTEM$SET_RETURN_VALUE('')"
+                execute_sql(session, query, "Set return value to an empty string because the DAG has to be skipped", dry_run)
 
         definition = StoredProcedureCall(
             func = fun, 
