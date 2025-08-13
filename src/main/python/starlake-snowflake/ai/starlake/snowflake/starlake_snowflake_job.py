@@ -60,6 +60,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         self.__data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
         self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
         self.__min_timedelta_between_runs = int(__class__.get_context_var(var_name='min_timedelta_between_runs', default_value=15*60, options=self.options))
+        import logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -218,6 +221,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             Optional[DAGTask]: The optional Snowflake task.
         """
+        logger = self.logger
         comment = kwargs.get('comment', None)
         if not comment:
             comment = f"skip or start task {task_id}"
@@ -228,10 +232,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             context = TaskContext(session)
             return_value: str = context.get_predecessor_return_value(upstream_task_id)
             if return_value is None:
-                print(f"upstream task {upstream_task_id} did not return any value")
+                logger.warning(f"upstream task {upstream_task_id} did not return any value")
                 failed = True
             else:
-                print(f"upstream task {upstream_task_id} returned {return_value}")
+                logger.info(f"upstream task {upstream_task_id} returned {return_value}")
                 try:
                     import ast
                     parsed_return_value = ast.literal_eval(return_value)
@@ -243,10 +247,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         failed = int(parsed_return_value.strip())
                     else:
                         failed = True
-                        print(f"Parsed return value {parsed_return_value}[{type(parsed_return_value)}] is not a valid bool, integer or is empty.")
+                        logger.error(f"Parsed return value {parsed_return_value}[{type(parsed_return_value)}] is not a valid bool, integer or is empty.")
                 except (ValueError, SyntaxError) as e:
                     failed = True
-                    print(f"Error parsing return value: {e}")
+                    logger.error(f"Error parsing return value: {e}")
             if failed:
                 raise ValueError(f"upstream task {upstream_task_id} failed")
 
@@ -333,6 +337,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
+        logger = self.logger
         sink = kwargs.get('sink', None)
         if not task_type and len(arguments) > 0:
             task_type = TaskType.from_str(arguments[0])
@@ -472,7 +477,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         else:
                             return True
                     except Exception as e:
-                        print(f"Error creating audit table: {str(e)}")
+                        logger.error(f"Error creating audit table: {str(e)}")
                         return False
                 else:
                     return False
@@ -498,7 +503,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         else:
                             return True
                     except Exception as e:
-                        print(f"Error creating expectations table: {str(e)}")
+                        logger.error(f"Error creating expectations table: {str(e)}")
                         return False
                 else:
                     return False
@@ -552,7 +557,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             execute_sql(session, insert_sql, "Insert audit record:", dry_run)
                             return True
                         except Exception as e:
-                            print(f"Error inserting audit record: {str(e)}")
+                            logger.error(f"Error inserting audit record: {str(e)}")
                             return False
                     else:
                         return False
@@ -600,7 +605,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             execute_sql(session, insert_sql, "Insert expectations record:", dry_run)
                             return True
                         except Exception as e:
-                            print(f"Error inserting expectations record: {str(e)}")
+                            logger.error(f"Error inserting expectations record: {str(e)}")
                             return False
                     else:
                         return False
@@ -634,7 +639,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     else:
                         raise Exception(f'Expectation failed for {sink}: {name}. Query not found')
                 except Exception as e:
-                    print(f"Error running expectation {name}: {str(e)}")
+                    logger.error(f"Error running expectation {name}: {str(e)}")
                     log_expectation(session, False, name, params, query, count, str(e), datetime.now(), jobid, dry_run)
                     if failOnError and not dry_run:
                         raise e
@@ -906,17 +911,17 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             commit_transaction(session, dry_run)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
-                            print(f"-- Duration in seconds: {duration}")
+                            logger.info(f"-- Duration in seconds: {duration}")
                             log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run, logical_date)
                             
                         except Exception as e:
                             # ROLLBACK transaction
                             error_message = str(e)
-                            print(f"-- Error executing transform for {sink}: {error_message}")
+                            logger.error(f"-- Error executing transform for {sink}: {error_message}")
                             rollback_transaction(session, dry_run)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
-                            print(f"-- Duration in seconds: {duration}")
+                            logger.info(f"-- Duration in seconds: {duration}")
                             log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run, logical_date)
                             raise e
 
@@ -1213,7 +1218,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 commit_transaction(session, dry_run)
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
-                                print(f"-- Duration in seconds: {duration}")
+                                logger.info(f"-- Duration in seconds: {duration}")
                                 files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
                                 message = first_error_line + '\n' + first_error_column_name
                                 success = errors_seen == 0
@@ -1222,11 +1227,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             except Exception as e:
                                 # ROLLBACK transaction
                                 error_message = str(e)
-                                print(f"-- Error executing load for {sink}: {error_message}")
+                                logger.error(f"-- Error executing load for {sink}: {error_message}")
                                 rollback_transaction(session, dry_run)
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
-                                print(f"-- Duration in seconds: {duration}")
+                                logger.info(f"-- Duration in seconds: {duration}")
                                 log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run, logical_date)
                                 raise e
 

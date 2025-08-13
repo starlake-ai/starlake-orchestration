@@ -130,11 +130,12 @@ class SnowflakeDag(DAG):
                 List[Row]: The rows.
             """
             if query:
-                if dry_run and message:
+                if message:
                     print(f"-- {message}")
                 stmt: str = bindParams(query)
+                print(f"{stmt};")
                 if dry_run:
-                    print(f"{stmt};")
+                    print(f"-- Dry run mode, not executing the statement")
                     return []
                 else:
                     return session.sql(stmt).collect()
@@ -298,7 +299,7 @@ class SnowflakeDag(DAG):
                 return True
             except (CroniterBadCronError, ValueError, AttributeError) as e:
                 # Handle the exception if the cron expression is invalid
-                print(f"Invalid cron expression: {cron_expr}. Error: {e}")
+                logger.error(f"Invalid cron expression: {cron_expr}. Error: {e}")
                 # Return False if the cron expression is invalid
                 return False
 
@@ -419,24 +420,24 @@ class SnowflakeDag(DAG):
                         if beyond_data_cycle_allowed:
                             scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
                             scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
-                        if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, dry_run):
-                            logger.info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(format)} and {scheduled_date_to_check_max.strftime(format)}")
+                        if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, False):
+                            logger.info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
                         else:
-                            logger.error(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(format)} and {scheduled_date_to_check_max.strftime(format)}")
+                            logger.warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
                             missing_datasets.append(dataset)
                     else:
                         # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
                         scheduled_date_to_check_min = previous_dag_checked - timedelta(seconds=freshness)
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
-                        if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, dry_run):
-                            logger.info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(format)} and {scheduled_date_to_check_max.strftime(format)}")
+                        if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, False):
+                            logger.info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
                         else:
-                            logger.error(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(format)} and {scheduled_date_to_check_max.strftime(format)}")
+                            logger.warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
                             missing_datasets.append(dataset)
 
                 if missing_datasets:
-                    logger.error(f"The following datasets are missing: {', '.join(missing_datasets)}")
-                    canceled = True
+                    logger.warning(f"The following datasets are missing: {', '.join(missing_datasets)}, the current DAG execution will be skipped")
+                    skipped = True
                 else:
                     logger.info(f"All datasets are present: {', '.join(datasets.keys())}")
                     if not dry_run:
