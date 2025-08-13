@@ -499,6 +499,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
         self._datasets = datasets
         self._streams = streams
         self._not_scheduled_streams = not_scheduled_streams
+        self._timezone = timezone
 
     def _to_low_level_task(self) -> Task:
         return Task(
@@ -537,6 +538,10 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
     @property
     def not_scheduled_streams(self) -> set[str]:
         return self._not_scheduled_streams
+
+    @property
+    def timezone(self) -> str:
+        return self._timezone
 
     def has_datasets(self) -> bool:
         """Check if the DAG has datasets.
@@ -699,12 +704,12 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             dag_runs = op.get_current_dag_runs(self.dag)
             start = datetime.now()
             def check_started(dag_runs: List[DAGRun]) -> bool:
-                import time
                 if not dag_runs:
                     raise StarlakeSnowflakeError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} failed to run")
                 else:
                     while True:
-                        dag_runs_sorted: List[DAGRun] = sorted(dag_runs, key=lambda run: run.scheduled_time, reverse=True)
+                        import time
+                        dag_runs_sorted: List[DAGRun] = sorted(dag_runs, key=lambda run: run.query_start_time, reverse=True)
                         last_run: DAGRun = dag_runs_sorted[0]
                         state = last_run.state
                         print(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} is {state.lower()}")
@@ -716,18 +721,24 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                             time.sleep(5)
                             return check_started(op.get_current_dag_runs(self.dag))
             check_started(dag_runs)
+            datetime_format = '%Y-%m-%d %H:%M:%S %z'
+            start_as_timestamp = start.astimezone(pytz.timezone(self.dag.timezone)).strftime(datetime_format)
+            print(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} started at {start_as_timestamp}")
             def check_status(result: SnowflakeDagResult) -> SnowflakeDagResult:
                 import time
                 while True:
                     rows: List[Row] = session.sql(
                         f"""SELECT NAME, STATE, GRAPH_RUN_GROUP_ID 
-                            FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
-                            WHERE GRAPH_RUN_GROUP_ID IN (
-                                SELECT GRAPH_RUN_GROUP_ID FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
-                            WHERE NAME ilike '{self.pipeline_id}%' AND COMPLETED_TIME is not null
-                                ORDER BY COMPLETED_TIME DESC
-                                LIMIT 1
-                            )""").collect()
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+WHERE GRAPH_RUN_GROUP_ID IN (
+    SELECT GRAPH_RUN_GROUP_ID FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+    WHERE 
+        NAME ilike '{self.pipeline_id}%' 
+        AND COMPLETED_TIME is not null
+        AND COMPLETED_TIME >= '{start_as_timestamp}'
+    ORDER BY COMPLETED_TIME DESC
+    LIMIT 1
+)""").collect()
                     if rows:
                         for row in rows:
                             d = row.as_dict()
@@ -736,9 +747,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                             graph_run_group_id = d.get('GRAPH_RUN_GROUP_ID', None)
                             if name and state and graph_run_group_id:
                                 result.update_task_result(name, state, graph_run_group_id)
-                        if result.has_failed:
-                            return result
-                        elif result.is_succeeded:
+                        if result.has_failed or result.is_succeeded or result.is_skipped:
                             return result
                         elif datetime.now() - start > timedelta(seconds=int(timeout)):
                             raise TimeoutError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} timed out")
@@ -752,12 +761,14 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                     elif datetime.now() - start > timedelta(seconds=int(timeout)):
                         raise TimeoutError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} timed out")
                     else:
-                        print(f"No task history found for {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} yet")
+                        print(f"No task history found for {self.pipeline_id} {f' and with logical date {logical_date}' if logical_date else ''} yet")
                         time.sleep(5)
                         return check_status(result)
             status = check_status(SnowflakeDagResult(tasks = list(map(lambda task: SnowflakeTaskResult(name = task.full_name), self.dag.tasks))))
             if status.has_failed:
                 raise StarlakeSnowflakeError(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} failed -> {status}")
+            elif status.is_skipped:
+                print(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} skipped -> {status}")
             elif status.is_succeeded:
                 print(f"Pipeline {self.pipeline_id} {f'with logical date {logical_date}' if logical_date else ''} succeeded -> {status}")
             else:
@@ -831,8 +842,8 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             if backfill_job_id is None:
                 raise StarlakeSnowflakeError(f"Pipeline {self.pipeline_id} backfill failed")
 
-            format = '%Y-%m-%d %H:%M:%S%z'
-            print(f" Pipeline {self.pipeline_id} is executing backfill job '{backfill_job_id}' with {partition_count} partition(s) from '{start_time.strftime(format)}' to '{end_time.strftime(format)}' using {interval} minutes interval")
+            datetime_format = '%Y-%m-%d %H:%M:%S %z'
+            print(f" Pipeline {self.pipeline_id} is executing backfill job '{backfill_job_id}' with {partition_count} partition(s) from '{start_time.strftime(datetime_format)}' to '{end_time.strftime(datetime_format)}' using {interval} minutes interval")
 
             # check the backfill job status
             def check_status():
@@ -894,14 +905,18 @@ class SnowflakeTaskResult:
         return self.state == 'FAILED'
 
     @property
+    def is_skipped(self) -> bool:
+        return self.state == 'SKIPPED'
+
+    @property
     def is_succeeded(self) -> bool:
-        return self.state == 'SUCCEEDED'
+        return self.state == 'SUCCEEDED' 
 
     @property
     def state_as_str(self) -> str:
         if self.is_executing:
             return "is executing"
-        return self.state.lower()
+        return self.state.lower().replace('_', ' ')
 
     def __repr__(self) -> str:
         return f"Task {self.name} within graph_run_group_id {self.graph_run_group_id} {(self.state_as_str)}"
@@ -924,6 +939,10 @@ class SnowflakeDagResult:
     @property
     def is_executing(self) -> bool:
         return any([task.is_executing for task in self.tasks])
+
+    @property
+    def is_skipped(self) -> bool:
+        return any([task.is_skipped for task in self.tasks])
 
     @property
     def is_succeeded(self) -> bool:
