@@ -13,7 +13,7 @@ access_control = None
 options={
     'sl_env_var':'{"SL_ROOT": ".", "SL_ENV": "SNOWFLAKE"}', 
     'tags':'starlake', 
-    'run_dependencies':'true', 
+    'run_dependencies_first':'true', 
     'retries':'1',
     'retry_delay':'30',
     'stage_location':'staging',

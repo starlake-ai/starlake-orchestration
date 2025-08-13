@@ -292,7 +292,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
         cron: Optional[str] = None
 
-        run_dependencies: Optional[bool] = None
+        run_dependencies_first: Optional[bool] = None
  
         datasets: Optional[List[StarlakeDataset]] = None
 
@@ -314,13 +314,13 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
             catchup = cron is not None and self.get_context_var(var_name='catchup', default_value='False').lower() == 'true'
 
-            run_dependencies = self.get_context_var(var_name='run_dependencies', default_value='False').lower() == 'true'
+            run_dependencies_first = self.get_context_var(var_name='run_dependencies_first', default_value='False').lower() == 'true'
 
             filtered_datasets: Set[str] = set(job.caller_globals.get('filtered_datasets', []))
 
             computed_schedule = dependencies.get_schedule(
                 cron=cron, 
-                run_dependencies=run_dependencies,
+                run_dependencies_first=run_dependencies_first,
                 filtered_datasets=filtered_datasets,
                 sl_schedule_parameter_name=self.sl_schedule_parameter_name,
                 sl_schedule_format=self.sl_schedule_format
@@ -332,7 +332,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 else:
                     datasets = computed_schedule
 
-            graphs = dependencies.graphs(run_dependencies=run_dependencies)
+            graphs = dependencies.graphs(run_dependencies_first=run_dependencies_first)
 
         self.__tags = tags
 
@@ -340,7 +340,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
         self.__catchup = catchup
 
-        self.__run_dependencies = run_dependencies
+        self.__run_dependencies_first = run_dependencies_first
 
         self.__graphs = graphs
 
@@ -579,8 +579,8 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
     @final
     @property
-    def run_dependencies(self) -> Optional[bool]:
-        return self.__run_dependencies
+    def run_dependencies_first(self) -> Optional[bool]:
+        return self.__run_dependencies_first
 
     @final
     @property
