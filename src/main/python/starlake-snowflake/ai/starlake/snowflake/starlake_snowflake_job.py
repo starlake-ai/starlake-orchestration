@@ -834,8 +834,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         logical_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone('UTC'))
                 return as_datetime(logical_date)
 
-            cron_expr = kwargs.get('cron_expr', None)
-            kwargs.pop('cron_expr', None)
+            params = kwargs.get('params', {})
+            cron_expr = params.get('cron_expr', None)
+            kwargs.pop('params', None)
 
             if task_type == TaskType.TRANSFORM:
                 if statements:
@@ -858,7 +859,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             logical_date = get_logical_date(session, backfill, dry_run=dry_run)
                         logical_date = as_datetime(logical_date)
 
-                        if not backfill and cron_expr:
+                        if cron_expr and not backfill:
                             # if a cron expression has been provided, the scheduled date corresponds to the end date determined by applying the cron expression to the logical date
                             (_, scheduled_date) = get_start_end_dates(cron_expr, logical_date)
                         else:
