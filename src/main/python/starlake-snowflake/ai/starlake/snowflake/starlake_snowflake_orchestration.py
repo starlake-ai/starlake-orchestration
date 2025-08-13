@@ -246,15 +246,27 @@ class SnowflakeDag(DAG):
             # if we are not at the scheduled date, we look for the last successful dag run before the scheduled date
             comparison_operator = "<=" if at_scheduled_date else "<"
             query = f"""SELECT SCHEDULED_TIME, QUERY_START_TIME 
-                    FROM TABLE(
-                        INFORMATION_SCHEMA.COMPLETE_TASK_GRAPHS(
-                            ERROR_ONLY => false, 
-                            ROOT_TASK_NAME => upper('{name}'), 
-                            RESULT_LIMIT => 1
-                        )
-                    )
-                    WHERE SCHEDULED_TIME {comparison_operator} TO_TIMESTAMP_LTZ('{scheduled_date.strftime(format)}')
-                    ORDER BY SCHEDULED_TIME DESC"""
+FROM TABLE(
+    INFORMATION_SCHEMA.TASK_HISTORY(
+        ERROR_ONLY => false
+    )
+)
+WHERE GRAPH_RUN_GROUP_ID IN (
+    SELECT GRAPH_RUN_GROUP_ID 
+    FROM TABLE(
+        INFORMATION_SCHEMA.TASK_HISTORY(
+            ERROR_ONLY => false
+        )
+    )
+    WHERE 
+        NAME ilike '{name}$end' 
+        AND STATE = 'SUCCEEDED'
+        AND COMPLETED_TIME IS NOT NULL
+        AND COMPLETED_TIME <= '{scheduled_date.strftime(datetime_format)}'
+    ORDER BY COMPLETED_TIME DESC
+    LIMIT 1
+)
+ORDER BY SCHEDULED_TIME DESC"""
             rows = execute_sql(session, query, f"Get the previous successful DAG run for {name}", dry_run)
             if rows and rows.__len__() > 0:
                 return (as_datetime(rows[0][0]), as_datetime(rows[0][1]))
