@@ -221,22 +221,20 @@ class SnowflakeDag(DAG):
                 query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP')::timestamp_ltz"
                 rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
                 if rows.__len__() == 1:
-                    current_date = rows[0][0]
+                    logical_date = rows[0][0]
                 else:
                     # ... or the current system date
-                    current_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(timezone))
-                if cron_expr:
-                    # if a cron expression has been provided, the logical date corresponds to the end date determined by applying the cron expression to the current date
-                    (_, logical_date) = get_start_end_dates(cron_expr, current_date)
-                else:
-                    logical_date = current_date
+                    logical_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(timezone))
+            if cron_expr:
+                # if a cron expression has been provided, the logical date corresponds to the end date determined by applying the cron expression to the current date
+                (_, logical_date) = get_start_end_dates(cron_expr, logical_date)
             return as_datetime(logical_date)
 
-        def get_previous_dag_run(session: Session, scheduled_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
+        def get_previous_dag_run(session: Session, logical_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
             """Get the previous DAG run.
             Args:
                 session (Session): The Snowflake session.
-                scheduled_date (datetime): The scheduled date.
+                logical_date (datetime): The logical date.
                 dry_run (bool): Whether to run in dry run mode.
                 at_scheduled_date (bool): Whether to get the DAG run at the scheduled date.
             Returns:
@@ -262,12 +260,12 @@ WHERE GRAPH_RUN_GROUP_ID IN (
         NAME ilike '{name}$end' 
         AND STATE = 'SUCCEEDED'
         AND COMPLETED_TIME IS NOT NULL
-        AND COMPLETED_TIME <= '{scheduled_date.strftime(datetime_format)}'
+        AND COMPLETED_TIME {comparison_operator} '{logical_date.strftime(datetime_format)}'
     ORDER BY COMPLETED_TIME DESC
     LIMIT 1
 )
 ORDER BY SCHEDULED_TIME DESC"""
-            rows = execute_sql(session, query, f"Get the previous successful DAG run for {name}", dry_run)
+            rows = execute_sql(session, query, f"Get the previous successful DAG run for {name} {comparison_operator} {logical_date.strftime(datetime_format)}", dry_run)
             if rows and rows.__len__() > 0:
                 return (as_datetime(rows[0][0]), as_datetime(rows[0][1]))
             return None
@@ -340,7 +338,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             scheduled_date_to_check_min = croniter(cron, scheduled_date_to_check_max).get_prev(datetime)
             return (scheduled_date_to_check_min, scheduled_date_to_check_max)
 
-        def fun(session: Session, dry_run: bool) -> None:
+        def fun(session: Session, dry_run: bool, logical_date: Optional[Union[str, datetime]] = None) -> None:
             query = "ALTER SESSION SET TIMESTAMP_TYPE_MAPPING = 'TIMESTAMP_LTZ'"
             execute_sql(session, query, "Set session timestamp type mapping", False)
 
@@ -351,14 +349,19 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                 if rows.__len__() == 1:
                     backfill = rows[0][0]
 
-            logical_date = get_logical_date(session, backfill, cron_expr=computed_cron_expr, dry_run=dry_run)
+            if not logical_date:
+                logical_date = get_logical_date(session, backfill, cron_expr=computed_cron_expr, dry_run=dry_run)
+            logical_date = as_datetime(logical_date)
 
-            scheduled_date = logical_date
+            if computed_cron_expr:
+                (_, scheduled_date) = get_start_end_dates(computed_cron_expr, as_datetime(logical_date))
+            else:
+                scheduled_date = logical_date
 
             previous_dag_checked: Optional[datetime] = None
             previous_dag_ts: Optional[datetime] = None
 
-            previous_dag_run = get_previous_dag_run(session, scheduled_date, False, at_scheduled_date=False)
+            previous_dag_run = get_previous_dag_run(session, logical_date, False, at_scheduled_date=False)
 
             if previous_dag_run:
                 previous_dag_checked = previous_dag_run[0]
@@ -374,7 +377,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             last_dag_checked: Optional[datetime] = None
             last_dag_ts: Optional[datetime] = None
             if not backfill:
-                last_dag_run = get_previous_dag_run(session, scheduled_date, False, at_scheduled_date=True)
+                last_dag_run = get_previous_dag_run(session, logical_date, False, at_scheduled_date=True)
                 if last_dag_run:
                     last_dag_checked = last_dag_run[0]
                     last_dag_ts = last_dag_run[1]
@@ -383,6 +386,10 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             skipped = False
 
             if last_dag_ts and last_dag_checked:
+                if computed_cron_expr:
+                    # Compute the scheduled date for the last DAG run if a computed cron expression has been provided for the DAG
+                    (_, last_dag_checked) = get_start_end_dates(computed_cron_expr, last_dag_checked)
+                    logger.info(f"Computed scheduled date for last DAG run: {last_dag_checked}")
                 if not backfill and last_dag_checked.strftime(datetime_format) == scheduled_date.strftime(datetime_format):
                     # we run successfuly this dag for the same scheduled date, we should skip the current execution
                     logger.warning(f"The last succeeded dag run has been executed at {last_dag_ts} with the same scheduled date {last_dag_checked}... The current DAG execution will be skipped")
@@ -678,7 +685,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
                 if isinstance(definition, StoredProcedureCall):
                     func = definition.func
                     if isinstance(func, Callable):
-                        func.__call__(session = session, dry_run = True)
+                        func.__call__(session = session, dry_run = True, logical_date = logical_date)
             dag = self.dag
             dry_run(dag.definition)
             tasks = dag.tasks
