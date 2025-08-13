@@ -174,7 +174,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         """
         comment = kwargs.get('comment', f"dummy task for {task_id}")
         kwargs.update({'comment': comment})
-        kwargs.update({'condition': "SYSTEM$GET_PREDECESSOR_RETURN_VALUE()::BOOLEAN"})
+        # this condition will be used to check if all the datasets are present or not
+        # its value will be set by the upstream task to the logical date of the running dag
+        kwargs.update({'condition': "SYSTEM$GET_PREDECESSOR_RETURN_VALUE() <> ''"})
         return super().start_op(task_id=task_id, scheduled=scheduled, not_scheduled_datasets=not_scheduled_datasets, least_frequent_datasets=least_frequent_datasets, most_frequent_datasets=most_frequent_datasets, **kwargs)
 
     def end_op(self, task_id: str, events: Optional[List[StarlakeDataset]] = None, **kwargs) -> Optional[DAGTask]:
@@ -368,7 +370,8 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     break
 
             timezone = self.timezone
-            format = '%Y-%m-%d %H:%M:%S%z'
+            datetime_format = '%Y-%m-%d %H:%M:%S %z'
+            pipeline_id = self.caller_filename.replace(".py", "").replace(".pyc", "").upper()
 
             def bindParams(stmt: str) -> str:
                 """Bind parameters to the SQL statement.
@@ -535,6 +538,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         try:
                             import pytz
                             ts = ts.astimezone(pytz.timezone(timezone))
+                            scheduled_date = scheduled_date.astimezone(pytz.timezone(timezone)) if scheduled_date else ts
                             audit_sql = audit_sqls[0]
                             formatted_sql = audit_sql.format(
                                 jobid = jobid or f'{domain}.{table}',
@@ -545,13 +549,13 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 count = str(count),
                                 countAccepted = str(countAccepted),
                                 countRejected = str(countRejected),
-                                timestamp = ts.strftime(format),
+                                timestamp = ts.strftime(datetime_format),
                                 duration = str(duration),
                                 message = message,
                                 step = step or "TRANSFORM",
                                 database = "",
                                 tenant = "",
-                                scheduledDate = scheduled_date.strftime(format) if scheduled_date else ts.strftime(format)
+                                scheduledDate = scheduled_date.strftime(datetime_format) if scheduled_date else ts.strftime(datetime_format)
                             )
                             insert_sql = f"INSERT INTO {audit_domain}.audit {formatted_sql}"
                             execute_sql(session, insert_sql, "Insert audit record:", dry_run)
@@ -595,7 +599,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 schema = table,
                                 count = count,
                                 exception = exception,
-                                timestamp = ts.strftime(format),
+                                timestamp = ts.strftime(datetime_format),
                                 success = str(success),
                                 name = name,
                                 params = params,
@@ -806,22 +810,38 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     else:
                         config = {}
                     logical_date = config.get("logical_date", None)
+                    if not logical_date:
+                        # the logical date is the return value of the current root task
+                        query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_ROOT_TASK_NAME')"
+                        rows = execute_sql(session, query, "Get the current root task name", dry_run)
+                        if rows.__len__() == 1:
+                            current_root_task_name = rows[0][0]
+                        else:
+                            current_root_task_name = pipeline_id
+                        query = f"SELECT SYSTEM$GET_PREDECESSOR_RETURN_VALUE('{current_root_task_name.split('.')[-1]}')"
+                        rows = execute_sql(session, query, "Get the predecessor return value", dry_run)
+                        if rows.__len__() == 1:
+                            logical_date = rows[0][0]
+
                 else:
                     # the logical date is the partition end date
-                    logical_date = session.call("system$task_runtime_info", "PARTITION_END")
-                if not logical_date:
-                    # the current date is the original scheduled timestamp of the initial graph run in the current group
-                    query = "SELECT to_timestamp(system$task_runtime_info('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP'))"
+                    query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
                     rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
                     if rows.__len__() == 1:
-                        current_date = as_datetime(rows[0][0])
+                        logical_date = rows[0][0]
+                if not logical_date:
+                    # the current date is the original scheduled timestamp of the initial graph run in the current group
+                    query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP')::timestamp_ltz"
+                    rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
+                    if rows.__len__() == 1:
+                        current_date = rows[0][0]
                     else:
                         # ... or the current system date
                         import pytz
                         current_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone('UTC'))
                     if cron_expr:
                         # if a cron expression has been provided, the logical date corresponds to the end date determined by applying the cron expression to the current date
-                        (logical_date, _) = get_start_end_dates(cron_expr, current_date)
+                        (_, logical_date) = get_start_end_dates(cron_expr, current_date)
                     else:
                         logical_date = current_date
                 return as_datetime(logical_date)
@@ -842,8 +862,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             print(f"-- Executing transform for {sink} in dry run mode")
 
                         backfill: bool = False
-                        if allow_overlapping_execution and not dry_run:
-                            backfill = bool(session.call("system$task_runtime_info", "IS_BACKFILL"))
+                        if allow_overlapping_execution:
+                            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('IS_BACKFILL')::boolean"
+                            rows = execute_sql(session, query, "Check if the current running dag is a backfill", dry_run)
+                            if rows.__len__() == 1:
+                                backfill = rows[0][0]
 
                         logical_date = get_logical_date(session, backfill, cron_expr, dry_run)
 
@@ -851,7 +874,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         sl_data_interval_end = None
 
                         if backfill:
-                            partition_start = session.call("system$task_runtime_info", "PARTITION_START")
+                            # if backfill, the data interval start and end are the partition start and end dates
+                            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_START')::timestamp_ltz"
+                            rows = execute_sql(session, query, "Get the partition start date", dry_run)
+                            if rows.__len__() == 1:
+                                partition_start = rows[0][0]
                             if partition_start:
                                 if isinstance(partition_start, str):
                                     sl_data_interval_start = as_datetime(partition_start)
@@ -864,12 +891,15 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             (sl_data_interval_start, sl_data_interval_end) = get_start_end_dates(cron_expr, logical_date)
 
                         if sl_data_interval_start and sl_data_interval_end:
-                            safe_params.update({'sl_data_interval_start': sl_data_interval_start.strftime(format), 'sl_data_interval_end': sl_data_interval_end.strftime(format)})
+                            safe_params.update({'sl_data_interval_start': sl_data_interval_start.strftime(datetime_format), 'sl_data_interval_end': sl_data_interval_end.strftime(datetime_format)})
 
-                        if dry_run:
-                            jobid = sink
+                        # get the current job id
+                        query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID')::string"
+                        rows = execute_sql(session, query, "Get the current task graph run group id", dry_run)
+                        if rows.__len__() == 1:
+                            jobid = rows[0][0]
                         else:
-                            jobid = str(session.call("system$current_user_task_name"))
+                            jobid = sink
 
                         start = datetime.now()
 
@@ -1134,14 +1164,20 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         def fun(session: Session, dry_run: bool) -> None:
                             from datetime import datetime
 
-                            if dry_run:
-                                jobid = sink
+                            # get the current job id
+                            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID')::string"
+                            rows = execute_sql(session, query, "Get the current task graph run group id", dry_run)
+                            if rows.__len__() == 1:
+                                jobid = rows[0][0]
                             else:
-                                jobid = str(session.call("system$current_user_task_name"))
+                                jobid = sink
 
                             backfill: bool = False
-                            if allow_overlapping_execution and not dry_run:
-                                backfill = bool(session.call("system$task_runtime_info", "IS_BACKFILL"))
+                            if allow_overlapping_execution:
+                                query = "SELECT SYSTEM$TASK_RUNTIME_INFO('IS_BACKFILL')::boolean"
+                                rows = execute_sql(session, query, "Check if the current running dag is a backfill", dry_run)
+                                if rows.__len__() == 1:
+                                    backfill = rows[0][0]
 
                             logical_date = get_logical_date(session, backfill, cron_expr, dry_run)
 
