@@ -935,7 +935,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             end_date (Optional[str]): the end date.
         """
         from datetime import datetime
-        cron = self.cron
+        cron = self.computed_cron_expr
         if not cron or cron.strip().lower() == 'none':
             raise ValueError("The pipeline must have a cron expression to backfill")
         if not start_date or start_date.strip().lower() == 'none':
@@ -943,8 +943,9 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         if not end_date or end_date.strip().lower() == 'none':
             end_date = datetime.fromtimestamp(datetime.now().timestamp()).isoformat()
         from croniter import croniter
-        start_time = datetime.fromisoformat(start_date)
-        end_time = datetime.fromisoformat(end_date)
+        import pytz
+        start_time = datetime.fromisoformat(start_date).astimezone(pytz.UTC)
+        end_time = datetime.fromisoformat(end_date).astimezone(pytz.UTC)
         if start_time > end_time:
             raise ValueError("The start date must be before the end date")
         iter = croniter(cron, start_time)
