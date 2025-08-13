@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ai.starlake.common import sanitize_id, is_valid_cron
+from ai.starlake.common import sanitize_id, is_valid_cron, most_frequent_crons
 
 from ai.starlake.dataset import StarlakeDataset
 
@@ -221,6 +221,26 @@ class StarlakeDependency(DependencyMixin):
         return self._cron
 
     @property
+    def computed_cron(self) -> Optional[str]:
+        """Compute the cron expression based on the dataset dependencies or freshness."""
+        if self.cron is not None:
+            return self.cron
+        elif self.dependencies:
+            crons = [dep.computed_cron for dep in self.dependencies if dep.computed_cron is not None]
+            if crons and len(crons) == len(self.dependencies):
+                # If all dependencies have a cron, return the most frequent one
+                most_frequents = most_frequent_crons(crons)
+                if most_frequents and len(most_frequents) > 0:
+                    # If there are multiple most frequent crons, return the first one
+                    return most_frequents[0]
+        if self.freshness > 0:
+            from datetime import datetime, timedelta
+            next_run = datetime.now() + timedelta(seconds=self.freshness)
+            return f"{next_run.minute} {next_run.hour} * * *"
+        else:
+            return None
+
+    @property
     def dependencies(self) -> List[StarlakeDependency]:
         return self._dependencies
 
@@ -329,32 +349,32 @@ class StarlakeDependencies():
     def get_dependency(self, name: str) -> Optional[StarlakeDependency]:
         return self.__dependencies_map.get(name, None)
 
-    def graphs(self, run_dependencies: bool = False) -> Set[TreeNodeMixin]:
+    def graphs(self, run_dependencies_first: bool = False) -> Set[TreeNodeMixin]:
         """Return the graphs from the dependencies.
         Args:
-            run_dependencies (bool): whether to run or not all upstream dependencies.
+            run_dependencies_first (bool): whether to run or not all upstream dependencies.
         """
         temp_graphs: Dict[str, TreeNodeMixin] = dict()
         parents: Set[str] = set()
         for node in filter(lambda node: node.id not in temp_graphs.keys() and (len(node.parents) > 0 or node.id in self.first_level_tasks), self.__all_nodes.values()):
-            if run_dependencies or node.id in self.first_level_tasks:
+            if run_dependencies_first or node.id in self.first_level_tasks:
                 temp_graphs[node.id] = node
                 __parents = []
                 for parent in node.parents:
-                    if run_dependencies or parent.id in self.first_level_tasks:
+                    if run_dependencies_first or parent.id in self.first_level_tasks:
                         __parents.append(parent)
                         parents.add(parent.id)
-                if not run_dependencies:
+                if not run_dependencies_first:
                     node.parents = __parents
         graphs: Set[TreeNodeMixin] = set()
         for graph in temp_graphs.values():
-            if run_dependencies and (graph.id not in parents or (len(graph.parents) > 0)):
+            if run_dependencies_first and (graph.id not in parents or (len(graph.parents) > 0)):
                 graphs.add(graph)
-            elif not run_dependencies and graph.id in self.first_level_tasks and (graph.id not in parents or (len(graph.parents) > 0)):
+            elif not run_dependencies_first and graph.id in self.first_level_tasks and (graph.id not in parents or (len(graph.parents) > 0)):
                 graphs.add(graph)
         return graphs
 
-    def get_schedule(self, cron: Optional[str], run_dependencies: bool, filtered_datasets: Optional[Set[str]] = None, sl_schedule_parameter_name: Optional[str] = None, sl_schedule_format: Optional[str] = None) -> Union[str, List[StarlakeDataset], None]:
+    def get_schedule(self, cron: Optional[str], run_dependencies_first: bool, filtered_datasets: Optional[Set[str]] = None, sl_schedule_parameter_name: Optional[str] = None, sl_schedule_format: Optional[str] = None) -> Union[str, List[StarlakeDataset], None]:
 
         cron_expr = cron
 
@@ -367,7 +387,7 @@ class StarlakeDependencies():
         if cron_expr is not None:
             return cron_expr # return the cron expression
 
-        elif not run_dependencies:
+        elif not run_dependencies_first:
             uris: Set[str] = set()
 
             datasets: List[StarlakeDataset] = []
@@ -388,8 +408,8 @@ class StarlakeDependencies():
                         if uri not in uris and uri not in temp_filtered_datasets:
                             kw = dict()
                             kw['freshness'] = freshness
-                            if dependency.cron is not None:
-                                kw['cron'] = dependency.cron
+                            if dependency.computed_cron is not None:
+                                kw['cron'] = dependency.computed_cron
                             if sl_schedule_parameter_name is not None:
                                 kw['sl_schedule_parameter_name'] = sl_schedule_parameter_name
                             if sl_schedule_format is not None:
