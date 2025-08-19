@@ -60,6 +60,40 @@ class SnowflakeDag(DAG):
         import logging
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger(__name__)
+
+        def info(message: str, dry_run: bool = False) -> None:
+            """Print an info message.
+            Args:
+                message (str): The message to print.
+                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+            """
+            if dry_run:
+                print(f"-- {message}")
+            else:
+                logger.info(message)
+
+        def warning(message: str, dry_run: bool = False) -> None:
+            """Print a warning message.
+            Args:
+                message (str): The message to print.
+                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+            """
+            if dry_run:
+                print(f"-- WARNING: {message}")
+            else:
+                logger.warning(message)
+
+        def error(message: str, dry_run: bool = False) -> None:
+            """Print an error message.
+            Args:
+                message (str): The message to print.
+                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+            """
+            if dry_run:
+                print(f"-- ERROR: {message}")
+            else:
+                logger.error(message)
+
         condition = None
 
         datasets = dict() # tracks the datasets whose changes have to be checked
@@ -71,12 +105,12 @@ class SnowflakeDag(DAG):
         most_frequent = set()
 
         if not schedule and least_frequent_datasets:
-            logger.info(f"least frequent datasets: {','.join(list(map(lambda x: x.sink, least_frequent_datasets)))}")
+            info(f"Least frequent datasets: {','.join(list(map(lambda x: x.sink, least_frequent_datasets)))}", dry_run=False)
             for dataset in least_frequent_datasets:
                 datasets.update({dataset.sink: (dataset.cron, dataset.freshness)})
 
         if not_scheduled_datasets:
-            logger.info(f"not scheduled datasets: {','.join(list(map(lambda x: x.sink, not_scheduled_datasets)))}")
+            info(f"Not scheduled datasets: {','.join(list(map(lambda x: x.sink, not_scheduled_datasets)))}", dry_run=False)
             for dataset in not_scheduled_datasets:
                 if dataset.stream:
                     not_scheduled_streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
@@ -84,7 +118,7 @@ class SnowflakeDag(DAG):
                     datasets.update({dataset.sink: (None, dataset.freshness)})
 
         if most_frequent_datasets:
-            logger.info(f"most frequent datasets: {','.join(list(map(lambda x: x.sink, most_frequent_datasets)))}")
+            info(f"Most frequent datasets: {','.join(list(map(lambda x: x.sink, most_frequent_datasets)))}", dry_run=False)
             most_frequent = set(most_frequent_crons(list(map(lambda x: x.cron, most_frequent_datasets))))
             for dataset in most_frequent_datasets:
                 if dataset.stream:
@@ -209,21 +243,26 @@ class SnowflakeDag(DAG):
                 else:
                     config = {}
                 logical_date = config.get("logical_date", None)
+                if logical_date:
+                    info(f"Logical date set to the one defined in the task graph config: {logical_date}", dry_run=dry_run)
             else:
                 # the logical date is the partition end date
                 query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
                 rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
                 if rows.__len__() == 1:
                     logical_date = rows[0][0]
+                    info(f"Logical date set to the partition end date: {logical_date}", dry_run=dry_run)
             if not logical_date:
                 # the current date is the original scheduled timestamp of the initial graph run in the current group
                 query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP')::timestamp_ltz"
                 rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
                 if rows.__len__() == 1:
                     logical_date = rows[0][0]
+                    info(f"Logical date set to the original scheduled timestamp of the initial graph run: {logical_date}", dry_run=dry_run)
                 else:
                     # ... or the current system date
                     logical_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(timezone))
+                    info(f"Logical date set to the current system date: {logical_date}", dry_run=dry_run)
             return as_datetime(logical_date)
 
         def get_previous_dag_run(session: Session, logical_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
@@ -299,14 +338,14 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                 return (as_datetime(rows[0][0]), as_datetime(rows[0][1]))
             return None
 
-        def is_valid_cron(cron_expr: str) -> bool:
+        def is_valid_cron(cron_expr: str, dry_run: bool) -> bool:
             try:
                 # Attempt to instantiate a croniter object
                 croniter(cron_expr)
                 return True
             except (CroniterBadCronError, ValueError, AttributeError) as e:
                 # Handle the exception if the cron expression is invalid
-                logger.error(f"Invalid cron expression: {cron_expr}. Error: {e}")
+                error(f"Invalid cron expression: {cron_expr}. Error: {e}", dry_run=dry_run)
                 # Return False if the cron expression is invalid
                 return False
 
@@ -349,7 +388,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                 logical_date = get_logical_date(session, backfill, dry_run=dry_run)
             logical_date = as_datetime(logical_date)
 
-            if computed_cron_expr:
+            if computed_cron_expr and not backfill:
                 # if a cron expression has been provided, the scheduled date corresponds to the end date determined by applying the cron expression to the logical date
                 (_, scheduled_date) = get_start_end_dates(computed_cron_expr, logical_date)
             else:
@@ -363,13 +402,13 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             if previous_dag_run:
                 previous_dag_checked = previous_dag_run[0]
                 previous_dag_ts = previous_dag_run[1]
-                logger.info(f"Found previous succeeded dag run with scheduled date {previous_dag_checked} and start date {previous_dag_ts}")
+                info(f"Found previous succeeded dag run with scheduled date {previous_dag_checked} and start date {previous_dag_ts}", dry_run=dry_run)
 
             if not previous_dag_checked:
                 # if the dag never run successfuly, 
                 # we set the previous dag checked to the start date of the dag
                 previous_dag_checked = start_date
-                logger.info(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
+                info(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}", dry_run=dry_run)
 
             last_dag_checked: Optional[datetime] = None
             last_dag_ts: Optional[datetime] = None
@@ -378,7 +417,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                 if last_dag_run:
                     last_dag_checked = last_dag_run[0]
                     last_dag_ts = last_dag_run[1]
-                    logger.info(f"Found last succeeded dag run with scheduled date {last_dag_checked} and start date {last_dag_ts}")
+                    info(f"Found last succeeded dag run with scheduled date {last_dag_checked} and start date {last_dag_ts}", dry_run=dry_run)
 
             skipped = False
 
@@ -386,10 +425,10 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                 if computed_cron_expr:
                     # Compute the scheduled date for the last DAG run if a computed cron expression has been provided for the DAG
                     (_, last_dag_checked) = get_start_end_dates(computed_cron_expr, last_dag_checked)
-                    logger.info(f"Computed scheduled date for last DAG run: {last_dag_checked}")
+                    info(f"Computed scheduled date for last DAG run: {last_dag_checked}", dry_run=dry_run)
                 if not backfill and last_dag_checked.strftime(datetime_format) == scheduled_date.strftime(datetime_format):
                     # we run successfuly this dag for the same scheduled date, we should skip the current execution
-                    logger.warning(f"The last succeeded dag run has been executed at {last_dag_ts} with the same scheduled date {last_dag_checked}... The current DAG execution will be skipped")
+                    warning(f"The last succeeded dag run has been executed at {last_dag_ts} with the same scheduled date {last_dag_checked}... The current DAG execution will be skipped", dry_run=dry_run)
                     if not dry_run:
                         skipped = True
 
@@ -403,18 +442,18 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
 
                 for dataset, (original_cron, freshness) in datasets.items():
                     if not check_if_dataset_exists(session, dataset):
-                        logger.error(f"Dataset {dataset} does not exist")
+                        error(f"Dataset {dataset} does not exist", dry_run=dry_run)
                         if not dry_run:
                             skipped = True
                             break
 
                     cron = original_cron or data_cycle
-                    scheduled = cron and is_valid_cron(cron)
+                    scheduled = cron and is_valid_cron(cron, dry_run=dry_run)
                     optional = False
                     beyond_data_cycle_allowed = False
 
                     if data_cycle_freshness:
-                        original_scheduled = original_cron and is_valid_cron(original_cron)
+                        original_scheduled = original_cron and is_valid_cron(original_cron, dry_run=dry_run)
                         if optional_dataset_enabled:
                             # we check if the dataset is optional by comparing its freshness with that of the data cycle
                             # the freshness of a scheduled dataset is the time delta between 2 iterations of its schedule
@@ -425,7 +464,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                             beyond_data_cycle_allowed = (original_scheduled and abs(data_cycle_freshness.total_seconds()) < abs(get_cron_frequency(original_cron).total_seconds() + freshness)) or (not original_scheduled and abs(data_cycle_freshness.total_seconds()) < freshness)
 
                     if optional:
-                        logger.info(f"Dataset {dataset.uri} is optional, we skip it")
+                        info(f"Dataset {dataset.uri} is optional, we skip it", dry_run=dry_run)
                         continue
                     elif scheduled:
                         if not cron in most_frequent or cron.startswith('0 0') or get_cron_frequency(cron).days == 0:
@@ -440,25 +479,25 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                             scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
                             scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
                         if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, False):
-                            logger.info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
+                            info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
                         else:
-                            logger.warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
+                            warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
                             missing_datasets.append(dataset)
                     else:
                         # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
                         scheduled_date_to_check_min = previous_dag_checked - timedelta(seconds=freshness)
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
                         if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, False):
-                            logger.info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
+                            info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
                         else:
-                            logger.warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}")
+                            warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
                             missing_datasets.append(dataset)
 
                 if missing_datasets:
-                    logger.warning(f"The following datasets are missing: {', '.join(missing_datasets)}, the current DAG execution will be skipped")
+                    warning(f"The following datasets are missing: {', '.join(missing_datasets)}, the current DAG execution will be skipped", dry_run=dry_run)
                     skipped = True
                 else:
-                    logger.info(f"All datasets are present: {', '.join(datasets.keys())}, the current DAG will continue its execution")
+                    info(f"All datasets are present: {', '.join(datasets.keys())}, the current DAG will continue its execution", dry_run=dry_run)
 
             if not skipped:
                 # if the dag has to be run, we set the return value to the logical date of the running dag
