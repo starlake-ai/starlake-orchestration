@@ -472,7 +472,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                         else:
                             dates_range = scheduled_dates_range(cron, croniter(cron, scheduled_date.replace(hour=0, minute=0, second=0, microsecond=0)).get_next(datetime))
                         scheduled_date_to_check_min = dates_range[0]
-                        scheduled_date_to_check_max = dates_range[1]
+                        scheduled_date_to_check_max = max(scheduled_date, dates_range[1]) # we check the dataset events around the scheduled date
                         if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
                             scheduled_date_to_check_min = previous_dag_checked
                         if beyond_data_cycle_allowed:
