@@ -374,6 +374,39 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             datetime_format = '%Y-%m-%d %H:%M:%S %z'
             pipeline_id = self.caller_filename.replace(".py", "").replace(".pyc", "").upper()
 
+            def info(message: str, dry_run: bool = False) -> None:
+                """Print an info message.
+                Args:
+                    message (str): The message to print.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+                """
+                if dry_run:
+                    print(f"-- {message}")
+                else:
+                    logger.info(message)
+
+            def warning(message: str, dry_run: bool = False) -> None:
+                """Print a warning message.
+                Args:
+                    message (str): The message to print.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+                """
+                if dry_run:
+                    print(f"-- WARNING: {message}")
+                else:
+                    logger.warning(message)
+
+            def error(message: str, dry_run: bool = False) -> None:
+                """Print an error message.
+                Args:
+                    message (str): The message to print.
+                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+                """
+                if dry_run:
+                    print(f"-- ERROR: {message}")
+                else:
+                    logger.error(message)
+
             def bindParams(stmt: str) -> str:
                 """Bind parameters to the SQL statement.
                 Args:
@@ -481,7 +514,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         else:
                             return True
                     except Exception as e:
-                        logger.error(f"Error creating audit table: {str(e)}")
+                        error(f"Error creating audit table: {str(e)}", dry_run=dry_run)
                         return False
                 else:
                     return False
@@ -936,17 +969,17 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             commit_transaction(session, dry_run)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
-                            logger.info(f"-- Duration in seconds: {duration}")
+                            info(f"Duration in seconds: {duration}", dry_run=dry_run)
                             log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run, scheduled_date)
                             
                         except Exception as e:
                             # ROLLBACK transaction
                             error_message = str(e)
-                            logger.error(f"-- Error executing transform for {sink}: {error_message}")
+                            error(f"Error executing transform for {sink}: {error_message}", dry_run=dry_run)
                             rollback_transaction(session, dry_run)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
-                            logger.info(f"-- Duration in seconds: {duration}")
+                            info(f"Duration in seconds: {duration}", dry_run=dry_run)
                             log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run, scheduled_date)
                             raise e
 
@@ -1256,7 +1289,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 commit_transaction(session, dry_run)
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
-                                logger.info(f"-- Duration in seconds: {duration}")
+                                info(f"Duration in seconds: {duration}", dry_run=dry_run)
                                 files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
                                 message = first_error_line + '\n' + first_error_column_name
                                 success = errors_seen == 0
@@ -1265,11 +1298,11 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             except Exception as e:
                                 # ROLLBACK transaction
                                 error_message = str(e)
-                                logger.error(f"-- Error executing load for {sink}: {error_message}")
+                                error(f"Error executing load for {sink}: {error_message}", dry_run=dry_run)
                                 rollback_transaction(session, dry_run)
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
-                                logger.info(f"-- Duration in seconds: {duration}")
+                                info(f"Duration in seconds: {duration}", dry_run=dry_run)
                                 log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run, scheduled_date)
                                 raise e
 
