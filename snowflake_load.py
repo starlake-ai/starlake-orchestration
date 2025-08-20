@@ -141,7 +141,7 @@ json_context = '''{
   "config" : {
     "template" : "load/airflow__scheduled_table__shell.py.j2",
     "options" : [ {
-      "name" : "load_dependencies",
+      "name" : "run_dependencies_first",
       "value" : "true"
     }, {
       "name" : "SL_TIMEZONE",
