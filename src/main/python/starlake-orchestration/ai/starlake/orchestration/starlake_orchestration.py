@@ -562,7 +562,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         self.__crons_by_frequency = crons_by_frequency
         sorted_crons = sorted_crons_by_frequency[1]
         if self.cron:
-            cron_expr = cron
+            cron_expr = self.cron
         elif len(uris) == len(self.scheduled_datasets) and len(crons_by_frequency.keys()) > 0:
             cron_expr = sorted_crons[0]
         else:
