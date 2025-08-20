@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ai.starlake.common import sanitize_id, is_valid_cron, most_frequent_crons
 
-from ai.starlake.dataset import StarlakeDataset
+from ai.starlake.dataset import StarlakeDataset, StarlakeDatasetType
 
 from collections import defaultdict
 
@@ -256,6 +256,31 @@ class StarlakeDependency(DependencyMixin):
     def freshness(self) -> int:
         return self._freshness
 
+    def to_dataset(self, sl_schedule_parameter_name: Optional[str] = None, sl_schedule_format: Optional[str] = None) -> StarlakeDataset:
+        """Return the StarlakeDataset associated with this dependency."""
+        name = self.name
+        sink = self.sink
+        uri = self.uri
+        stream = self.stream
+        freshness = self.freshness
+        kw = dict()
+        kw['freshness'] = freshness
+        if self.computed_cron is not None:
+            kw['cron'] = self.computed_cron
+        if sl_schedule_parameter_name is not None:
+            kw['sl_schedule_parameter_name'] = sl_schedule_parameter_name
+        if sl_schedule_format is not None:
+            kw['sl_schedule_format'] = sl_schedule_format
+        if sink is not None:
+            kw['sink'] = sink
+        if stream is not None:
+            kw['stream'] = stream
+        if self.dependency_type == StarlakeDependencyType.TASK:
+            kw['datasetType'] = StarlakeDatasetType.TRANSFORM
+        else:
+            kw['datasetType'] = StarlakeDatasetType.LOAD
+        return StarlakeDataset(name=name, **kw)
+
     def __repr__(self) -> str:
         return f"StarlakeDependency(name={self.name}, dependency_type={self.dependency_type}, cron={self.cron}, dependencies={self.dependencies}, sink={self.sink}, stream={self.stream}, freshness={self.freshness}, upstreams=[{','.join([dep.id for dep in self.upstreams])}], downstreams=[{','.join([dep.id for dep in self.downstreams])}], node={self.node})"
 
@@ -314,19 +339,15 @@ class StarlakeDependencies():
                         all_dependencies[dependency.name] = dependency
                         load_task_dependencies(dependency)
 
-        def load_nodes(task: StarlakeDependency):
+        for dependency in self.dependencies:
+            first_level_tasks.add(dependency.name)
+            filtered_datasets.add(dependency.uri)
+            load_task_dependencies(dependency)
             node = dependency.node
             all_nodes[dependency.id] = node
             for parent in node.parents:
                 if parent.id not in all_nodes.keys():
                     all_nodes[parent.id] = parent
-                    load_nodes(parent)
-
-        for dependency in self.dependencies:
-            first_level_tasks.add(dependency.name)
-            filtered_datasets.add(dependency.uri)
-            load_task_dependencies(dependency)
-            load_nodes(dependency)
 
         self.__all_dependencies = all_dependencies
         self.__first_level_tasks = first_level_tasks
@@ -378,6 +399,14 @@ class StarlakeDependencies():
 
         cron_expr = cron
 
+        datasets = self.retrieve_datasets(
+            filtered_datasets=filtered_datasets,
+            sl_schedule_parameter_name=sl_schedule_parameter_name,
+            sl_schedule_format=sl_schedule_format,
+            recursive=False,
+            datasetType=None
+        )
+
         if cron_expr is not None:
             if cron_expr.lower().strip() == 'none':
                 cron_expr = None
@@ -388,47 +417,43 @@ class StarlakeDependencies():
             return cron_expr # return the cron expression
 
         elif not run_dependencies_first:
-            uris: Set[str] = set()
-
-            datasets: List[StarlakeDataset] = []
-
-            temp_filtered_datasets: Set[str] = self.filtered_datasets.copy()
-
-            if filtered_datasets:
-                temp_filtered_datasets.update(filtered_datasets)
-
-            def load_datasets(task: StarlakeDependency):
-                if len(task.dependencies) > 0:
-                    for dependency in task.dependencies:
-                        name = dependency.name
-                        sink = dependency.sink
-                        uri = dependency.uri
-                        stream = dependency.stream
-                        freshness = dependency.freshness
-                        if uri not in uris and uri not in temp_filtered_datasets:
-                            kw = dict()
-                            kw['freshness'] = freshness
-                            if dependency.computed_cron is not None:
-                                kw['cron'] = dependency.computed_cron
-                            if sl_schedule_parameter_name is not None:
-                                kw['sl_schedule_parameter_name'] = sl_schedule_parameter_name
-                            if sl_schedule_format is not None:
-                                kw['sl_schedule_format'] = sl_schedule_format
-                            if sink is not None:
-                                kw['sink'] = sink
-                            if stream is not None:
-                                kw['stream'] = stream
-                            dataset = StarlakeDataset(name=name, **kw)
-                            uris.add(uri)
-                            datasets.append(dataset)
-
-            for task in self.dependencies:
-                load_datasets(task)
-
-            return datasets # return the datasets
+            return datasets
 
         else:
             return None # return None
+
+    def retrieve_datasets(self, filtered_datasets: Optional[Set[str]] = None, sl_schedule_parameter_name: Optional[str] = None, sl_schedule_format: Optional[str] = None, recursive: bool = False, datasetType: Optional[StarlakeDatasetType] = None) -> List[StarlakeDataset]:
+        """Return the StarlakeDatasets associated with the dependencies."""
+        uris: Set[str] = set()
+
+        datasets: List[StarlakeDataset] = []
+
+        temp_filtered_datasets: Set[str] = self.filtered_datasets.copy()
+
+        if filtered_datasets:
+            temp_filtered_datasets.update(filtered_datasets)
+
+        def load_datasets(task: StarlakeDependency):
+            if len(task.dependencies) > 0:
+                for dependency in task.dependencies:
+                    uri = dependency.uri
+                    if uri not in uris and uri not in temp_filtered_datasets:
+                        uris.add(uri)
+                        dataset = dependency.to_dataset(
+                            sl_schedule_parameter_name=sl_schedule_parameter_name,
+                            sl_schedule_format=sl_schedule_format
+                        )
+                        if datasetType is None or dataset.datasetType == datasetType:
+                            datasets.append(dataset)
+                    if recursive:
+                        load_datasets(dependency)
+
+        for task in self.dependencies:
+            load_datasets(task)
+
+        # print(f"Found {len(datasets)} datasets with dataset type {datasetType} and recursive = {recursive}: {', '.join([dataset.sink for dataset in datasets])}")
+
+        return datasets # return the datasets
 
     def __repr__(self) -> str:
         return f"StarlakeDependencies(dependencies={self.dependencies})"

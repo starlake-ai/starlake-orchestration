@@ -31,36 +31,14 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         packages = set([package.strip() for package in packages])
         packages.update(['croniter', 'python-dateutil', 'snowflake-snowpark-python'])
         self.__packages = list(packages)
-        timezone = kwargs.get('timezone', __class__.get_context_var(var_name='timezone', default_value='UTC', options=self.options))
-        self.__timezone = timezone
         try:
             self.__sl_incoming_file_stage = kwargs.get('sl_incoming_file_stage', __class__.get_context_var(var_name='sl_incoming_file_stage', options=self.options))
         except MissingEnvironmentVariable:
             self.__sl_incoming_file_stage = None
         allow_overlapping_execution: bool = kwargs.get('allow_overlapping_execution', __class__.get_context_var(var_name='allow_overlapping_execution', default_value='False', options=self.options).lower() == 'true')
         self.__allow_overlapping_execution = allow_overlapping_execution
-        # set start_date
-        import sys
-        module = sys.modules.get(module_name) if module_name else None
-        if module and hasattr(module, '__file__'):
-            import os
-            file_path = module.__file__
-            stat = os.stat(file_path)
-            default_start_date = datetime.fromtimestamp(stat.st_mtime, tz=pytz.timezone(self.timezone)).strftime('%Y-%m-%d')
-        else:
-            default_start_date = datetime.now().astimezone(pytz.timezone(self.timezone)).strftime('%Y-%m-%d')
-        sd = __class__.get_context_var(var_name='start_date', default_value=default_start_date, options=self.options)
-        import re
-        pattern = re.compile(r'\d{4}-\d{2}-\d{2}')
-        if pattern.fullmatch(sd):
-            self.__start_date = datetime.strptime(sd, '%Y-%m-%d').astimezone(pytz.timezone(self.timezone))
-        else:
-            self.__start_date = datetime.strptime(default_start_date, '%Y-%m-%d').astimezone(pytz.timezone(self.timezone))
-        self.__optional_dataset_enabled = str(__class__.get_context_var(var_name='optional_dataset_enabled', default_value="false", options=self.options)).strip().lower() == "true"
-        self.__data_cycle_enabled = str(__class__.get_context_var(var_name='data_cycle_enabled', default_value="false", options=self.options)).strip().lower() == "true"
-        self.__data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
-        self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
-        self.__min_timedelta_between_runs = int(__class__.get_context_var(var_name='min_timedelta_between_runs', default_value=15*60, options=self.options))
+
+        # set logger
         import logging
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
@@ -78,75 +56,12 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         return self.__packages
 
     @property
-    def timezone(self) -> str:
-        return self.__timezone
-
-    @property
     def allow_overlapping_execution(self) -> bool:
         return self.__allow_overlapping_execution
 
     @property
     def sl_incoming_file_stage(self) -> Optional[str]:
         return self.__sl_incoming_file_stage
-
-    @property
-    def start_date(self) -> datetime:
-        """Get the start date of the job"""
-        return self.__start_date
-
-    @property
-    def optional_dataset_enabled(self) -> bool:
-        """whether a dataset can be optional or not."""
-        return self.__optional_dataset_enabled
-
-    @property
-    def data_cycle_enabled(self) -> bool:
-        """Get whether data cycle is enabled or not"""
-        return self.__data_cycle_enabled
-
-    @property
-    def data_cycle(self) -> str:
-        """Get the data cycle of the job"""
-        return self.__data_cycle
-
-    @data_cycle.setter
-    def data_cycle(self, value: Optional[str]) -> None:
-        """Set the data cycle value."""
-        if self.data_cycle_enabled and value:
-            data_cycle = value.strip().lower()
-            if data_cycle == "none":
-                self.__data_cycle = None
-            elif data_cycle == "hourly":
-                self.__data_cycle = "0 * * * *"
-            elif data_cycle == "daily":
-                self.__data_cycle = "0 0 * * *"
-            elif data_cycle == "weekly":
-                self.__data_cycle = "0 0 * * 0"
-            elif data_cycle == "monthly":
-                self.__data_cycle = "0 0 1 * *"
-            elif data_cycle == "yearly":
-                self.__data_cycle = "0 0 1 1 *"
-            elif is_valid_cron(data_cycle):
-                self.__data_cycle = data_cycle
-            else:
-                raise ValueError(f"Invalid data cycle value: {data_cycle}")
-        else:
-            self.__data_cycle = None
-
-    @property
-    def optional_dataset_enabled(self) -> bool:
-        """whether a dataset can be optional or not."""
-        return self.__optional_dataset_enabled
-
-    @property
-    def beyond_data_cycle_enabled(self) -> bool:
-        """whether the beyond data cycle feature is enabled or not."""
-        return self.__beyond_data_cycle_enabled
-
-    @property
-    def min_timedelta_between_runs(self) -> int:
-        """Get minimum time delta in seconds between two consecutive runs"""
-        return self.__min_timedelta_between_runs
 
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
@@ -283,6 +198,16 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
+        comment = kwargs.get('comment', None)
+        if not comment:
+            comment = f"Starlake load {domain}.{table}"
+        kwargs.update({'comment': comment})
+        if self.run_dependencies_first:
+            # if we run dependencies first, we will not load the dataset but just return a dummy task
+            task_id = kwargs.get("task_id", f"load_{domain}_{table}") if not task_id else task_id
+            kwargs.pop("task_id", None)
+            kwargs.pop("params", None)
+            return self.dummy_op(task_id=task_id, **kwargs)
         if dataset:
             if isinstance(dataset, str):
                 sink = dataset
@@ -291,10 +216,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         else:
             sink = f"{domain}.{table}"
         kwargs.update({'sink': sink})
-        comment = kwargs.get('comment', None)
-        if not comment:
-            comment = f"Starlake load {sink}"
-        kwargs.update({'comment': comment})
         return super().sl_load(task_id=task_id, domain=domain, table=table, spark_config=spark_config, dataset=dataset, **kwargs)
 
     def sl_transform(self, task_id: str, transform_name: str, transform_options: str = None, spark_config: StarlakeSparkConfig = None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> DAGTask:

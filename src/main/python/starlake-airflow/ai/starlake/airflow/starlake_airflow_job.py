@@ -99,45 +99,17 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         super().__init__(filename, module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
         self.pool = str(__class__.get_context_var(var_name='default_pool', default_value=DEFAULT_POOL, options=self.options))
         self.outlets: List[Dataset] = kwargs.get('outlets', [])
-        import sys
-        module = sys.modules.get(module_name) if module_name else None
-        if module and hasattr(module, '__file__'):
-            import os
-            file_path = module.__file__
-            stat = os.stat(file_path)
-            default_start_date = datetime.fromtimestamp(stat.st_mtime, tz=pytz.timezone('UTC')).strftime('%Y-%m-%d')
-        else:
-            default_start_date = datetime.now().strftime('%Y-%m-%d')
-        sd = __class__.get_context_var(var_name='start_date', default_value=default_start_date, options=self.options)
-        import re
-        pattern = re.compile(r'\d{4}-\d{2}-\d{2}')
-        if pattern.fullmatch(sd):
-            from airflow.utils import timezone
-            self.__start_date = timezone.make_aware(datetime.strptime(sd, "%Y-%m-%d"))
-        else:
-            from airflow.utils.dates import days_ago
-            self.__start_date = days_ago(1)
+        # set end_date
         try:
             ed = __class__.get_context_var(var_name='end_date', options=self.options)
         except MissingEnvironmentVariable:
             ed = ""
         if pattern.fullmatch(ed):
-            from airflow.utils import timezone
-            self.__end_date = timezone.make_aware(datetime.strptime(ed, "%Y-%m-%d"))
+            self.__end_date = datetime.strptime(ed, '%Y-%m-%d').astimezone(pytz.timezone(self.timezone))
         else:
             self.__end_date = None
-        self.__optional_dataset_enabled = str(__class__.get_context_var(var_name='optional_dataset_enabled', default_value="false", options=self.options)).strip().lower() == "true"
-        self.__data_cycle_enabled = str(__class__.get_context_var(var_name='data_cycle_enabled', default_value="false", options=self.options)).strip().lower() == "true"
-        self.data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
-        self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
+        # set max_active_runs
         self.__max_active_runs = int(__class__.get_context_var(var_name='max_active_runs', default_value="3", options=self.options))
-        min_timedelta_between_runs = int(__class__.get_context_var(var_name='min_timedelta_between_runs', default_value=15*60, options=self.options))
-        self.__min_timedelta_between_runs = min_timedelta_between_runs
-
-    @property
-    def start_date(self) -> datetime:
-        """Get the start date value."""
-        return self.__start_date
 
     @property
     def end_date(self) -> Optional[datetime]:
@@ -145,58 +117,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         return self.__end_date
 
     @property
-    def data_cycle_enabled(self) -> bool:
-        """whether the data cycle is enabled or not."""
-        return self.__data_cycle_enabled
-
-    @property
-    def data_cycle(self) -> Optional[str]:
-        """Get the data cycle value."""
-        return self.__data_cycle
-
-    @data_cycle.setter
-    def data_cycle(self, value: Optional[str]) -> None:
-        """Set the data cycle value."""
-        if self.data_cycle_enabled and value:
-            data_cycle = value.strip().lower()
-            if data_cycle == "none":
-                self.__data_cycle = None
-            elif data_cycle == "hourly":
-                self.__data_cycle = "0 * * * *"
-            elif data_cycle == "daily":
-                self.__data_cycle = "0 0 * * *"
-            elif data_cycle == "weekly":
-                self.__data_cycle = "0 0 * * 0"
-            elif data_cycle == "monthly":
-                self.__data_cycle = "0 0 1 * *"
-            elif data_cycle == "yearly":
-                self.__data_cycle = "0 0 1 1 *"
-            elif is_valid_cron(data_cycle):
-                self.__data_cycle = data_cycle
-            else:
-                raise ValueError(f"Invalid data cycle value: {data_cycle}")
-        else:
-            self.__data_cycle = None
-
-    @property
-    def optional_dataset_enabled(self) -> bool:
-        """whether a dataset can be optional or not."""
-        return self.__optional_dataset_enabled
-
-    @property
-    def beyond_data_cycle_enabled(self) -> bool:
-        """whether the beyond data cycle feature is enabled or not."""
-        return self.__beyond_data_cycle_enabled
-
-    @property
     def max_active_runs(self) -> int:
         """Get maximum active DAG execution runs"""
         return self.__max_active_runs
-
-    @property
-    def min_timedelta_between_runs(self) -> int:
-        """Get minimum time delta in seconds between two consecutive runs"""
-        return self.__min_timedelta_between_runs
 
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
@@ -810,6 +733,7 @@ class StarlakeDatasetMixin:
                  ) -> None:
         self.task_id = task_id
         params: dict = kwargs.get("params", dict())
+        # cron: Optional[str] = params.get('cron', None)
         outlets: list = kwargs.get("outlets", [])
         extra = dict()
         extra.update({"source": source})
@@ -817,7 +741,7 @@ class StarlakeDatasetMixin:
             if isinstance(dataset, StarlakeDataset):
                 params.update({
                     'uri': dataset.uri,
-                    'cron': dataset.cron,
+                    'cron': dataset.cron, # cron or dataset.cron
                     'sl_schedule_parameter_name': dataset.sl_schedule_parameter_name, 
                     'sl_schedule_format': dataset.sl_schedule_format,
                     'previous': previous
@@ -826,7 +750,7 @@ class StarlakeDatasetMixin:
                 extra.update({
                     StarlakeParameters.URI_PARAMETER.value: dataset.uri,
                     StarlakeParameters.SINK_PARAMETER.value: dataset.sink,
-                    StarlakeParameters.CRON_PARAMETER.value: dataset.cron,
+                    StarlakeParameters.CRON_PARAMETER.value: dataset.cron, # cron or dataset.cron
                     StarlakeParameters.FRESHNESS_PARAMETER.value: dataset.freshness,
                 })
                 if dataset.cron: # if the dataset is scheduled

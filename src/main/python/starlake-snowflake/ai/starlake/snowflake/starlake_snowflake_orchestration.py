@@ -3,7 +3,7 @@ from __future__ import annotations
 from ai.starlake.common import most_frequent_crons
 from ai.starlake.job import StarlakeOrchestrator, StarlakeExecutionMode
 
-from ai.starlake.dataset import StarlakeDataset
+from ai.starlake.dataset import StarlakeDataset, StarlakeDatasetType
 from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, StarlakeDependencies, AbstractPipeline, AbstractTaskGroup, AbstractTask
 
 from ai.starlake.snowflake.starlake_snowflake_job import StarlakeSnowflakeJob 
@@ -611,6 +611,10 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
 
         super().__init__(job, orchestration_cls=SnowflakeOrchestration, dag=None, schedule=schedule, dependencies=dependencies, orchestration=orchestration, add_dag_dependency=fun, **kwargs)
 
+        if self.run_dependencies_first and dependencies:
+            datasets = dependencies.retrieve_datasets(self.filtered_datasets, job.sl_schedule_parameter_name, job.sl_schedule_format, recursive=True, datasetType=StarlakeDatasetType.LOAD)
+            self.set_cron_expr(datasets)
+
         snowflake_schedule: Union[Cron, None] = None
         if self.cron is not None:
             snowflake_schedule = Cron(self.cron, job.timezone)
@@ -618,8 +622,6 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         computed_cron: Union[Cron, None] = None
         if self.computed_cron_expr is not None:
             computed_cron = Cron(self.computed_cron_expr, job.timezone)
-            if job.data_cycle_enabled and not job.data_cycle:
-                job.data_cycle = self.computed_cron_expr
 
         self._stage_location = job.stage_location
         self._warehouse = job.warehouse
