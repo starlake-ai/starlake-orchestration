@@ -296,6 +296,8 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
  
         datasets: Optional[List[StarlakeDataset]] = None
 
+        filtered_datasets: Set[str] = set()
+
         graphs: Optional[Set[TreeNodeMixin]] = None
 
         if schedule is not None:
@@ -314,9 +316,9 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
             catchup = cron is not None and self.get_context_var(var_name='catchup', default_value='False').lower() == 'true'
 
-            run_dependencies_first = self.get_context_var(var_name='run_dependencies_first', default_value='False').lower() == 'true'
+            run_dependencies_first = job.run_dependencies_first
 
-            filtered_datasets: Set[str] = set(job.caller_globals.get('filtered_datasets', []))
+            filtered_datasets = set(job.caller_globals.get('filtered_datasets', []))
 
             computed_schedule = dependencies.get_schedule(
                 cron=cron, 
@@ -344,8 +346,6 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
 
         self.__graphs = graphs
 
-        self.__datasets = datasets
-
         self.__assets: List[StarlakeDataset] = []
 
         if add_dag_dependency:
@@ -354,19 +354,9 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         else:
             self.__add_dag_dependency = None
 
-        uris: Set[str] = set(map(lambda dataset: dataset.uri, datasets or []))
-        sorted_crons_by_frequency: Tuple[Dict[int, List[str]], List[str]] = sort_crons_by_frequency(set(self.scheduled_datasets.values()))
-        crons_by_frequency = sorted_crons_by_frequency[0]
-        self.__crons_by_frequency = crons_by_frequency
-        sorted_crons = sorted_crons_by_frequency[1]
-        if cron:
-            cron_expr = cron
-        elif len(uris) == len(self.scheduled_datasets) and len(crons_by_frequency.keys()) > 0:
-            cron_expr = sorted_crons[0]
-        else:
-            cron_expr = None
+        self.__filtered_datasets = filtered_datasets
 
-        self.__cron_expr = cron_expr
+        self.set_cron_expr(datasets)
 
         self.__inner_tasks: Dict[str, AbstractTask] = dict()
 
@@ -558,6 +548,28 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     @property
     def computed_cron_expr(self) -> Optional[str]:
         return self.__cron_expr
+
+    @property
+    def filtered_datasets(self) -> Set[str]:
+        return self.__filtered_datasets
+
+    def set_cron_expr(self, datasets: List[StarlakeDataset] = []):
+        # Set the cron expression based on the datasets and their frequencies.
+        self.__datasets = datasets
+        uris: Set[str] = set(map(lambda dataset: dataset.uri, datasets or []))
+        sorted_crons_by_frequency: Tuple[Dict[int, List[str]], List[str]] = sort_crons_by_frequency(set(self.scheduled_datasets.values()))
+        crons_by_frequency = sorted_crons_by_frequency[0]
+        self.__crons_by_frequency = crons_by_frequency
+        sorted_crons = sorted_crons_by_frequency[1]
+        if self.cron:
+            cron_expr = cron
+        elif len(uris) == len(self.scheduled_datasets) and len(crons_by_frequency.keys()) > 0:
+            cron_expr = sorted_crons[0]
+        else:
+            cron_expr = None
+        self.__cron_expr = cron_expr
+        if cron_expr and self.job.data_cycle_enabled and not self.job.data_cycle:
+            self.job.data_cycle = cron_expr
 
     @property
     def catchup(self) -> bool:
@@ -856,7 +868,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             self.__assets.append(asset)
         return self.orchestration.sl_create_task(
             task_id, 
-                self.job.sl_transform(
+            self.job.sl_transform(
                 task_id=task_id, 
                 transform_name=transform_name, 
                 transform_options=self.sl_transform_options(self.computed_cron_expr), 
