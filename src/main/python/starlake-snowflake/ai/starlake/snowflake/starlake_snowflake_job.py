@@ -955,7 +955,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 return default
                             return value.lower() == "true"
 
-                        def get_audit_info(rows: List[Row]) -> Tuple[str, str, str, int, int, int]:
+                        def get_audit_info(rows: List[Row], dry_run: bool) -> Tuple[str, str, str, int, int, int]:
                             if rows.__len__() == 0:
                                 return '', '', '', -1, -1, -1
                             else:
@@ -966,6 +966,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 rows_loaded = 0
                                 errors_seen = 0
                                 for row in rows:
+                                    info(f"Row: {row}", dry_run=dry_run)
                                     row_dict = row.as_dict()
                                     file = row_dict.get('file', None)
                                     if file:
@@ -991,7 +992,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                             extra_options += f"{newKey} = {v}\n"
                             return extra_options
 
-                        compression = is_true(get_option("compression"), True)
+                        compression = is_true(get_option("compression"), False)
                         if compression:
                             compression_format = "COMPRESSION = GZIP" 
                         else:
@@ -1204,7 +1205,7 @@ FILE_FORMAT = (
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
                                 info(f"Duration in seconds: {duration}", dry_run=dry_run)
-                                files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results)
+                                files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results, dry_run=dry_run)
                                 message = first_error_line + '\n' + first_error_column_name
                                 success = errors_seen == 0
                                 log_audit(session, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run, scheduled_date)
