@@ -315,6 +315,34 @@ ORDER BY SCHEDULED_TIME DESC"""
                 return (as_datetime(rows[0][0]), as_datetime(rows[0][1]))
             return None
 
+        def get_current_graph_run_group_id(session: Session, dry_run: bool) -> Optional[str]:
+            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID')"
+            rows = execute_sql(session, query, "Get the current graph run group id", dry_run)
+            if rows.__len__() == 1:
+                return rows[0][0]
+            return None
+
+        def is_current_graph_scheduled(session: Session, dry_run: bool) -> bool:
+            """Check if the current graph is scheduled.
+            Args:
+                session (Session): The Snowflake session.
+                dry_run (bool): Whether to run in dry run mode.
+            Returns:
+                bool: True if the current graph is scheduled, False otherwise.
+            """
+            current_graph_run_group_id = get_current_graph_run_group_id(session, dry_run)
+            if current_graph_run_group_id:
+                # we check if the current graph run group id is scheduled
+                query = f"SELECT SCHEDULED_FROM FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) WHERE GRAPH_RUN_GROUP_ID = '{current_graph_run_group_id}'"
+                rows = execute_sql(session, query, f"Check if the current graph run group id {current_graph_run_group_id} is scheduled", dry_run)
+                if rows.__len__() == 1:
+                    scheduled_from = rows[0][0]
+                    scheduled = scheduled_from is not None and scheduled_from == 'SCHEDULE'
+                    info(f"Current graph run group id {current_graph_run_group_id} has been {'scheduled' if scheduled else 'launched manually'}", dry_run=dry_run)
+                    return scheduled
+            info(f"By default, the current graph run is considered scheduled", dry_run=dry_run)
+            return True
+
         def find_dataset_event(session: Session, dataset: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, dry_run: bool) -> Optional[tuple[datetime, datetime]]:
             """Find the events for a dataset.
             Args:
@@ -396,6 +424,8 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                 if rows.__len__() == 1:
                     backfill = rows[0][0]
 
+            manual: bool = not is_current_graph_scheduled(session, dry_run)
+
             if not logical_date:
                 logical_date = get_logical_date(session, ts, backfill, dry_run=dry_run)
             logical_date = as_datetime(logical_date)
@@ -441,7 +471,12 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
                 if not backfill and last_dag_checked.strftime(datetime_format) == scheduled_date.strftime(datetime_format):
                     # if the last DAG run has the same scheduled date as the current one, we check if it was run less than min_timedelta_between_runs seconds ago
                     diff: timedelta = ts - last_dag_ts
-                    if diff.total_seconds() <= min_timedelta_between_runs:
+                    if not manual:
+                        # we run successfuly this dag for the same scheduled date, we should skip the current execution
+                        warning(f"The last succeeded dag run has been executed at {last_dag_ts} with the same scheduled date {last_dag_checked}... The current DAG execution will be skipped", dry_run=dry_run)
+                        if not dry_run:
+                            skipped = True
+                    elif diff.total_seconds() <= min_timedelta_between_runs:
                         # we run successfuly this dag for the same scheduled date, we should skip the current execution
                         warning(f"The last succeeded dag run has been executed at {last_dag_ts} with the same scheduled date {last_dag_checked} less than {min_timedelta_between_runs} seconds ago ({diff.seconds} seconds)... The current DAG execution will be skipped", dry_run=dry_run)
                         if not dry_run:
