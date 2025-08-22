@@ -6,6 +6,8 @@ from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSpark
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
+from ai.starlake.helper import zip_selected_packages
+
 from snowflake.core.task import StoredProcedureCall
 from snowflake.core.task.dagv1 import DAGTask
 
@@ -37,6 +39,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             raise ValueError("sl_incoming_file_stage is required, please set it in the options or as an environment variable.")
         allow_overlapping_execution: bool = kwargs.get('allow_overlapping_execution', __class__.get_context_var(var_name='allow_overlapping_execution', default_value='False', options=self.options).lower() == 'true')
         self.__allow_overlapping_execution = allow_overlapping_execution
+        self.__ai_zip = zip_selected_packages()
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -57,6 +60,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
     @property
     def sl_incoming_file_stage(self) -> Optional[str]:
         return self.__sl_incoming_file_stage
+
+    @property
+    def ai_zip(self) -> str:
+        return self.__ai_zip
 
     @classmethod
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
@@ -256,7 +263,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
-        from ai.starlake.helper import datetime_format, SnowflakeHelper, zip_selected_packages
+        from ai.starlake.helper import datetime_format, SnowflakeHelper
 
         pipeline_id = self.caller_filename.replace(".py", "").replace(".pyc", "").upper()
         timezone = self.timezone
@@ -518,6 +525,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             func = fun,
                             args=[False, None], 
                             stage_location=self.stage_location,
+                            imports=[(self.ai_zip, 'ai')],
                             packages=self.packages,
                         ), 
                         comment=comment, 
@@ -808,6 +816,7 @@ FILE_FORMAT = (
                                 func = fun,
                                 args=[False, None], 
                                 stage_location=self.stage_location,
+                                imports=[(self.ai_zip, 'ai')],
                                 packages=self.packages,
                             ), 
                             comment=comment, 
