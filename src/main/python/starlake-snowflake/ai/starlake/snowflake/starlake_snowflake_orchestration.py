@@ -55,9 +55,10 @@ class SnowflakeDag(DAG):
         data_cycle: Optional[str] = None,
         optional_dataset_enabled: bool = False,
         beyond_data_cycle_enabled: bool = False,
+        ai_zip: str = None
     ) -> None:
         from ai.starlake.common import is_valid_cron, get_cron_frequency, scheduled_dates_range
-        from ai.starlake.helper import datetime_format, SnowflakeHelper, zip_selected_packages
+        from ai.starlake.helper import datetime_format, SnowflakeHelper
 
 
         helper = SnowflakeHelper(name=name, timezone=timezone)
@@ -275,7 +276,7 @@ class SnowflakeDag(DAG):
             func = fun, 
             args=[False, None],
             stage_location=stage_location,
-            imports=[(zip_selected_packages(), 'ai')],
+            imports=[(ai_zip, 'ai')],
             packages=packages
         )
 
@@ -412,6 +413,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             data_cycle=job.data_cycle,
             optional_dataset_enabled=job.optional_dataset_enabled,
             beyond_data_cycle_enabled=job.beyond_data_cycle_enabled,
+            ai_zip=job.ai_zip,
         )
 
     def __enter__(self):
