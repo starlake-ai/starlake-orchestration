@@ -15,14 +15,13 @@ from snowflake.core.task import Cron, StoredProcedureCall, Task
 from snowflake.core.task.dagv1 import DAG, DAGTask, DAGOperation, DAGRun, _dag_context_stack
 from snowflake.snowpark import Row, Session
 
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Union
 
 from types import ModuleType
 
 from datetime import datetime, timedelta
 
 from croniter import croniter
-from croniter.croniter import CroniterBadCronError
 
 import pytz
 
@@ -57,42 +56,26 @@ class SnowflakeDag(DAG):
         optional_dataset_enabled: bool = False,
         beyond_data_cycle_enabled: bool = False,
     ) -> None:
-        import logging
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger(__name__)
+        from ai.starlake.common import is_valid_cron, get_cron_frequency, scheduled_dates_range
+        from ai.starlake.helper import datetime_format, SnowflakeHelper, zip_selected_packages
 
-        def info(message: str, dry_run: bool = False) -> None:
-            """Print an info message.
-            Args:
-                message (str): The message to print.
-                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-            """
-            if dry_run:
-                print(f"-- {message}")
-            else:
-                logger.info(message)
 
-        def warning(message: str, dry_run: bool = False) -> None:
-            """Print a warning message.
-            Args:
-                message (str): The message to print.
-                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-            """
-            if dry_run:
-                print(f"-- WARNING: {message}")
-            else:
-                logger.warning(message)
+        helper = SnowflakeHelper(name=name, timezone=timezone)
 
-        def error(message: str, dry_run: bool = False) -> None:
-            """Print an error message.
-            Args:
-                message (str): The message to print.
-                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-            """
-            if dry_run:
-                print(f"-- ERROR: {message}")
-            else:
-                logger.error(message)
+        info = helper.info
+        warning = helper.warning
+        error = helper.error
+        # debug = helper.debug
+
+        execute_sql = helper.execute_sql
+        get_execution_date = helper.get_execution_date
+        as_datetime = helper.as_datetime
+        is_current_graph_scheduled = helper.is_current_graph_scheduled
+        get_logical_date = helper.get_logical_date
+        get_start_end_dates = helper.get_start_end_dates
+        get_previous_dag_run = helper.get_previous_dag_run
+        check_if_dataset_exists = helper.check_if_dataset_exists
+        find_dataset_event = helper.find_dataset_event
 
         condition = None
 
@@ -138,278 +121,6 @@ class SnowflakeDag(DAG):
         computed_cron_expr = None
         if computed_cron:
             computed_cron_expr = computed_cron.expr
-
-        datetime_format = '%Y-%m-%d %H:%M:%S %z'
-
-        from collections import defaultdict
-        safe_params = defaultdict(lambda: 'NULL', {})
-
-        def bindParams(stmt: str) -> str:
-            """Bind parameters to the SQL statement.
-            Args:
-                stmt (str): The SQL statement.
-            Returns:
-                str: The SQL statement with the parameters bound
-            """
-            return stmt.format_map(safe_params)
-
-        def execute_sql(session: Session, query: Optional[str], message: Optional[str] = None, dry_run: bool = False) -> List[Row]:
-            """Execute the SQL.
-            Args:
-                session (Session): The Snowflake session.
-                query (str): The SQL query to execute.
-                message (Optional[str], optional): The optional message. Defaults to None.
-                mode (Optional[StarlakeExecutionMode], optional): The optional execution mode. Defaults to None.
-            Returns:
-                List[Row]: The rows.
-            """
-            if query:
-                if message:
-                    print(f"-- {message}")
-                stmt: str = bindParams(query)
-                print(f"{stmt};")
-                if dry_run:
-                    print(f"-- Dry run mode, not executing the statement")
-                    return []
-                else:
-                    return session.sql(stmt).collect()
-            else:
-                return []
-
-        def check_if_dataset_exists(session: Session, dataset: str) -> bool:
-            """Check if the dataset exists.
-            Args:
-                session (Session): The Snowflake session.
-                dataset (str): The dataset.
-                Returns:
-                bool: True if the dataset exists, False otherwise.
-            """
-            query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'"
-            return execute_sql(session, query, f"Check if dataset {dataset} exists:", False).__len__() > 0
-
-        def as_datetime(value: Union[str, datetime]) -> datetime:
-            """Convert a string to a datetime object.
-            Args:
-                value (str): The string to convert.
-            Returns:
-                datetime: The datetime object.
-            """
-            if isinstance(value, str):
-                from dateutil import parser
-                value = parser.parse(value).astimezone(pytz.timezone(timezone))
-            return value.astimezone(pytz.timezone(timezone))
-
-        def get_start_end_dates(cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
-            """Get the start and end dates by applying the cron expression to the current date.
-            Args:
-                cron_expr (str): The cron expression.
-                current_date (datetime): The current date.
-            Returns:
-                tuple[datetime, datetime]: The start and end dates.
-            """
-            try:
-                croniter(cron_expr)
-                iter = croniter(cron_expr, current_date)
-                curr = iter.get_current(datetime)
-                previous = iter.get_prev(datetime)
-                next = croniter(cron_expr, previous).get_next(datetime)
-                if curr == next:
-                    end_date = curr
-                else:
-                    end_date = previous
-                start_date = croniter(cron_expr, end_date).get_prev(datetime)
-                return start_date, end_date
-            except CroniterBadCronError:
-                raise ValueError(f"Invalid cron expression: {cron_expr}")
-
-        def get_execution_date(session: Session, dry_run: bool = False) -> datetime:
-            """Get the execution date of the current DAG run.
-            Args:
-                session (Session): The Snowflake session.
-                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-            Returns:
-                datetime: The execution date.
-            """
-            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP')::timestamp_ltz"
-            rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
-            if rows.__len__() == 1:
-                execution_date = as_datetime(rows[0][0])
-                info(f"Execution date set to the original scheduled timestamp of the initial graph run: {execution_date}", dry_run=dry_run)
-            else:
-                execution_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(timezone))
-                info(f"Execution date set to the current system date: {execution_date}", dry_run=dry_run)
-            return execution_date
-
-        def get_logical_date(session: Session, ts: datetime, backfill: bool = False, dry_run: bool = False) -> datetime:
-            """Get the logical date of the running dag.
-            Args:
-                session (Session): The Snowflake session.
-                ts (datetime): The timestamp of the current DAG run.
-                backfill (bool, optional): Whether the current Dag run is a backfill. Defaults to False.
-                dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-            Returns:
-                datetime: The logical date of the running dag.
-            """
-            if not backfill:
-                # the logical date is the optional one defined in the task graph config
-                if dry_run:
-                    config = None
-                else:
-                    config = session.call("system$get_task_graph_config")
-                if config:
-                    import json
-                    config = json.loads(config)
-                else:
-                    config = {}
-                logical_date = config.get("logical_date", None)
-                if logical_date:
-                    info(f"Logical date set to the one defined in the task graph config: {logical_date}", dry_run=dry_run)
-            else:
-                # the logical date is the partition end date
-                query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
-                rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
-                if rows.__len__() == 1:
-                    logical_date = rows[0][0]
-                    info(f"Logical date set to the partition end date: {logical_date}", dry_run=dry_run)
-            if not logical_date:
-                return ts
-            return as_datetime(logical_date)
-
-        def get_previous_dag_run(session: Session, logical_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
-            """Get the previous DAG run.
-            Args:
-                session (Session): The Snowflake session.
-                logical_date (datetime): The logical date.
-                dry_run (bool): Whether to run in dry run mode.
-                at_scheduled_date (bool): Whether to get the DAG run at the scheduled date.
-            Returns:
-                Optional[tuple[datetime, datetime]]: The previous DAG Run as a tuple of (scheduled_time, query_start_time) or None.
-            """
-            # if we are at the scheduled date, we look for the last successful dag run before or at the scheduled date
-            # if we are not at the scheduled date, we look for the last successful dag run before the scheduled date
-            comparison_operator = "<=" if at_scheduled_date else "<"
-            query = f"""SELECT SCHEDULED_TIME, QUERY_START_TIME 
-FROM TABLE(
-    INFORMATION_SCHEMA.TASK_HISTORY(
-        ERROR_ONLY => false
-    )
-)
-WHERE GRAPH_RUN_GROUP_ID IN (
-    SELECT GRAPH_RUN_GROUP_ID 
-    FROM TABLE(
-        INFORMATION_SCHEMA.TASK_HISTORY(
-            ERROR_ONLY => false
-        )
-    )
-    WHERE 
-        NAME ilike '{name}$end' 
-        AND STATE = 'SUCCEEDED'
-        AND COMPLETED_TIME IS NOT NULL
-        AND COMPLETED_TIME {comparison_operator} '{logical_date.strftime(datetime_format)}'
-    ORDER BY COMPLETED_TIME DESC
-    LIMIT 1
-)
-ORDER BY SCHEDULED_TIME DESC"""
-            rows = execute_sql(session, query, f"Get the previous successful DAG run for {name} {comparison_operator} {logical_date.strftime(datetime_format)}", dry_run)
-            if rows and rows.__len__() > 0:
-                return (as_datetime(rows[0][0]), as_datetime(rows[0][1]))
-            return None
-
-        def get_current_graph_run_group_id(session: Session, dry_run: bool) -> Optional[str]:
-            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID')"
-            rows = execute_sql(session, query, "Get the current graph run group id", dry_run)
-            if rows.__len__() == 1:
-                return rows[0][0]
-            return None
-
-        def is_current_graph_scheduled(session: Session, dry_run: bool) -> bool:
-            """Check if the current graph is scheduled.
-            Args:
-                session (Session): The Snowflake session.
-                dry_run (bool): Whether to run in dry run mode.
-            Returns:
-                bool: True if the current graph is scheduled, False otherwise.
-            """
-            current_graph_run_group_id = get_current_graph_run_group_id(session, dry_run)
-            if current_graph_run_group_id:
-                # we check if the current graph run group id is scheduled
-                query = f"SELECT SCHEDULED_FROM FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) WHERE GRAPH_RUN_GROUP_ID = '{current_graph_run_group_id}'"
-                rows = execute_sql(session, query, f"Check if the current graph run group id {current_graph_run_group_id} is scheduled", dry_run)
-                if rows.__len__() == 1:
-                    scheduled_from = rows[0][0]
-                    scheduled = scheduled_from is not None and scheduled_from == 'SCHEDULE'
-                    info(f"Current graph run group id {current_graph_run_group_id} has been {'scheduled' if scheduled else 'launched manually'}", dry_run=dry_run)
-                    return scheduled
-            info(f"By default, the current graph run is considered scheduled", dry_run=dry_run)
-            return True
-
-        def find_dataset_event(session: Session, dataset: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, dry_run: bool) -> Optional[tuple[datetime, datetime]]:
-            """Find the events for a dataset.
-            Args:
-                session (Session): The Snowflake session.
-                dataset (str): The dataset.
-                scheduled_date_to_check_min (datetime): The minimum scheduled date to check.
-                scheduled_date_to_check_max (datetime): The maximum scheduled date to check.
-                ts (datetime): The timestamp.
-                dry_run (bool): Whether to run in dry run mode.
-            Returns:
-                Optional[tuple[datetime, datetime]]: The last event for the dataset as a tuple of (timestamp, scheduled_date) or None.
-            """
-            # we look for the last event for the dataset in the audit table
-            # the event is the last successful run of the dataset before the max scheduled date and after the min scheduled date
-            domainAndSchema = dataset.split('.')
-            if len(domainAndSchema) != 2:
-                raise ValueError(f"Invalid dataset name: {dataset}. It should be in the format 'domain.schema'.")
-            domain = domainAndSchema[0]
-            schema = domainAndSchema[-1]
-            query = f"""SELECT TIMESTAMP, SCHEDULED_DATE 
-FROM audit.audit 
-WHERE DOMAIN ilike '{domain}'
-    AND SCHEMA ilike '{schema}'
-    AND SUCCESS = true
-    AND SCHEDULED_DATE > TO_TIMESTAMP('{scheduled_date_to_check_min.strftime(datetime_format)}')
-    AND SCHEDULED_DATE <= TO_TIMESTAMP('{scheduled_date_to_check_max.strftime(datetime_format)}')
-ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
-"""
-            rows = execute_sql(session, query, f'Finding dataset event for {dataset} with scheduled date between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}', dry_run)
-            if rows and rows.__len__() > 0:
-                return (as_datetime(rows[0][0]), as_datetime(rows[0][1]))
-            return None
-
-        def is_valid_cron(cron_expr: str, dry_run: bool) -> bool:
-            try:
-                # Attempt to instantiate a croniter object
-                croniter(cron_expr)
-                return True
-            except (CroniterBadCronError, ValueError, AttributeError) as e:
-                # Handle the exception if the cron expression is invalid
-                error(f"Invalid cron expression: {cron_expr}. Error: {e}", dry_run=dry_run)
-                # Return False if the cron expression is invalid
-                return False
-
-        def get_cron_frequency(cron_expression) -> timedelta:
-            """
-            Calculate the timedelta between 2 executions of a cron expression.
-            :param cron_expression: A string representing the cron expression.
-            :raise ValueError: If the cron expression is invalid.
-            :return: The timedelta between 2 executions of the cron expression.
-            """
-            iter = croniter(cron_expression)
-            next_run = iter.get_next(datetime)
-            next_run_2 = iter.get_next(datetime)
-            return next_run_2 - next_run
-
-        def scheduled_dates_range(cron: str, scheduled_date: datetime) -> Tuple[datetime, datetime]:
-            iter = croniter(cron, scheduled_date)
-            curr = iter.get_current(datetime)
-            previous = iter.get_prev(datetime)
-            next = croniter(cron, previous).get_next(datetime)
-            if curr == next :
-                scheduled_date_to_check_max = curr
-            else:
-                scheduled_date_to_check_max = previous
-            scheduled_date_to_check_min = croniter(cron, scheduled_date_to_check_max).get_prev(datetime)
-            return (scheduled_date_to_check_min, scheduled_date_to_check_max)
 
         def fun(session: Session, dry_run: bool, logical_date: Optional[str] = None) -> None:
             query = "ALTER SESSION SET TIMESTAMP_TYPE_MAPPING = 'TIMESTAMP_LTZ'"
@@ -564,6 +275,7 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             func = fun, 
             args=[False, None],
             stage_location=stage_location,
+            imports=[(zip_selected_packages(), 'ai')],
             packages=packages
         )
 
