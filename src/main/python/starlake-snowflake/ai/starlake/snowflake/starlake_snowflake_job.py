@@ -298,7 +298,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
 
             if task_type == TaskType.TRANSFORM:
                 from ai.starlake.helper import datetime_format, SnowflakeTaskHelper
-                helper = SnowflakeTaskHelper(sink=sink, domain=domain, table=table, name=self.pipeline_id, timezone=self.timezone)
+                helper = SnowflakeTaskHelper(sink=sink, domain=domain, table=table, audit=audit, expectations=expectations, expectation_items=expectation_items, name=self.pipeline_id, timezone=self.timezone)
 
                 safe_params = helper.safe_params
 
@@ -415,14 +415,14 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             execute_sqls(session, statements.get('postsql', []) , "Post sqls", dry_run)
 
                             # run expectations
-                            run_expectations(session, expectations, expectation_items, jobid, dry_run)
+                            run_expectations(session, jobid, dry_run)
 
                             # COMMIT transaction
                             commit_transaction(session, dry_run)
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             info(f"Duration in seconds: {duration}", dry_run=dry_run)
-                            log_audit(session, audit, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run, scheduled_date)
+                            log_audit(session, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run, scheduled_date)
                             
                         except Exception as e:
                             # ROLLBACK transaction
@@ -432,7 +432,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             info(f"Duration in seconds: {duration}", dry_run=dry_run)
-                            log_audit(session, audit, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run, scheduled_date)
+                            log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run, scheduled_date)
                             raise e
 
                     kwargs.pop('params', None)
@@ -471,7 +471,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         metadata: dict = context_schema.get('metadata', dict())
 
                         from ai.starlake.helper import SnowflakeLoadTaskHelper
-                        helper = SnowflakeLoadTaskHelper(sl_incoming_file_stage=sl_incoming_file_stage, pattern=pattern, table_name=table_name, metadata=metadata, variant=variant, sink=sink, domain=domain, table=table, name=self.pipeline_id, timezone=self.timezone)
+                        helper = SnowflakeLoadTaskHelper(sl_incoming_file_stage=sl_incoming_file_stage, pattern=pattern, table_name=table_name, metadata=metadata, variant=variant, sink=sink, domain=domain, table=table, audit=audit, expectations=expectations, expectation_items=expectation_items, name=self.pipeline_id, timezone=self.timezone)
 
                         info = helper.info
                         error = helper.error
@@ -590,7 +590,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 execute_sqls(session, context_schema.get('postsql', []), "Post sqls", dry_run)
 
                                 # run expectations
-                                run_expectations(session, expectations, expectation_items, jobid, dry_run)
+                                run_expectations(session, jobid, dry_run)
 
                                 # COMMIT transaction
                                 commit_transaction(session, dry_run)
@@ -600,7 +600,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results, dry_run=dry_run)
                                 message = first_error_line + '\n' + first_error_column_name
                                 success = errors_seen == 0
-                                log_audit(session, audit, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run, scheduled_date)
+                                log_audit(session, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run, scheduled_date)
                                 
                             except Exception as e:
                                 # ROLLBACK transaction
@@ -610,7 +610,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
                                 info(f"Duration in seconds: {duration}", dry_run=dry_run)
-                                log_audit(session, audit, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run, scheduled_date)
+                                log_audit(session, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run, scheduled_date)
                                 raise e
 
                         kwargs.pop('params', None)
