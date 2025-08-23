@@ -35,7 +35,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         try:
             self.__sl_incoming_file_stage = kwargs.get('sl_incoming_file_stage', __class__.get_context_var(var_name='sl_incoming_file_stage', options=self.options))
         except MissingEnvironmentVariable:
-            raise ValueError("sl_incoming_file_stage is required, please set it in the options or as an environment variable.")
+            self.__sl_incoming_file_stage = None
         allow_overlapping_execution: bool = kwargs.get('allow_overlapping_execution', __class__.get_context_var(var_name='allow_overlapping_execution', default_value='False', options=self.options).lower() == 'true')
         self.__allow_overlapping_execution = allow_overlapping_execution
         self.__ai_zip = zip_selected_packages()
