@@ -390,11 +390,14 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
         return None
 
 class SnowflakeTaskHelper(SnowflakeHelper):
-    def __init__(self, sink: str, domain: str, table: str, name: str, timezone: Optional[str] = None) -> None:
+    def __init__(self, sink: str, domain: str, table: str, audit: dict, expectations: dict, expectation_items: list, name: str, timezone: Optional[str] = None) -> None:
         super().__init__(name, timezone)
         self.sink = sink
         self.domain = domain
         self.table = table
+        self.audit = audit
+        self.expectations = expectations
+        self.expectation_items = expectation_items
 
     def get_task_logical_date(self, session: Session, backfill: bool = False, dry_run: bool = False) -> datetime:
         """Get the logical date of the running dag.
@@ -522,26 +525,25 @@ class SnowflakeTaskHelper(SnowflakeHelper):
         return True
 
     # Audit
-    def check_if_audit_table_exists(self, session: Session, audit: dict, dry_run: bool = False) -> bool:
+    def check_if_audit_table_exists(self, session: Session, dry_run: bool = False) -> bool:
         """Check if the audit table exists.
         Args:
             session (Session): The Snowflake session.
-            audit (dict): The audit configuration.
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         Returns:
             bool: True if the audit table exists, False otherwise.
         """
-        if audit:
+        if self.audit:
             try:
                 # create SQL domain
-                domain = audit.get('domain', ['audit'])[0]
+                domain = self.audit.get('domain', ['audit'])[0]
                 self.create_domain_if_not_exists(session, domain, dry_run)
                 # execute SQL preActions
-                self.execute_sqls(session, audit.get('preActions', []), "Execute audit pre action:", dry_run)
+                self.execute_sqls(session, self.audit.get('preActions', []), "Execute audit pre action:", dry_run)
                 # check if the audit table exists
                 if not self.check_if_dataset_exists(session, f"{domain}.audit"):
                     # execute SQL createSchemaSql
-                    sqls: List[str] = audit.get('createSchemaSql', [])
+                    sqls: List[str] = self.audit.get('createSchemaSql', [])
                     if sqls:
                         self.execute_sqls(session, sqls, "Create audit table", dry_run)
                     return True
@@ -553,11 +555,11 @@ class SnowflakeTaskHelper(SnowflakeHelper):
         else:
             return False
 
-    def log_audit(self, session: Session, audit: dict, paths: Optional[str], count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None, dry_run: bool = False, scheduled_date: Optional[datetime] = None) -> bool :
+    def log_audit(self, session: Session, paths: Optional[str], count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None, dry_run: bool = False, scheduled_date: Optional[datetime] = None) -> bool :
         """Log the audit record.
         Args:
             session (Session): The Snowflake session.
-            audit (dict): The audit configuration.
+            paths (Optional[str]): The optional paths. Defaults to None.
             count (int): The count.
             countAccepted (int): The count accepted.
             countRejected (int): The count rejected.
@@ -572,9 +574,9 @@ class SnowflakeTaskHelper(SnowflakeHelper):
         Returns:
             bool: True if the audit record was logged, False otherwise.
         """
-        if audit and self.check_if_audit_table_exists(session, audit, dry_run):
-            audit_domain = audit.get('domain', ['audit'])[0]
-            audit_sqls = audit.get('mainSqlIfExists', None)
+        if self.audit and self.check_if_audit_table_exists(session, dry_run):
+            audit_domain = self.audit.get('domain', ['audit'])[0]
+            audit_sqls = self.audit.get('mainSqlIfExists', None)
             if audit_sqls:
                 try:
                     ts = ts.astimezone(pytz.timezone(self.timezone))
@@ -636,24 +638,23 @@ class SnowflakeTaskHelper(SnowflakeHelper):
             return ','.join(files), ','.join(first_error_lines), ','.join(first_error_column_names), rows_parsed, rows_loaded, errors_seen
 
     # Expectations
-    def check_if_expectations_table_exists(session: Session, expectations: dict, dry_run: bool = False) -> bool:
+    def check_if_expectations_table_exists(session: Session, dry_run: bool = False) -> bool:
         """Check if the expectations table exists.
         Args:
             session (Session): The Snowflake session.
-            expectations (dict): The expectations configuration.
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
             Returns:
             bool: True if the expectations table exists, False otherwise.
         """
-        if expectations:
+        if self.expectations:
             try:
                 # create SQL domain
-                domain = expectations.get('domain', ['audit'])[0]
+                domain = self.expectations.get('domain', ['audit'])[0]
                 self.create_domain_if_not_exists(session, domain, dry_run)
                 # check if the expectations table exists
                 if not self.check_if_dataset_exists(session, f"{domain}.expectations"):
                     # execute SQL createSchemaSql
-                    self.execute_sqls(session, expectations.get('createSchemaSql', []), "Create expectations table", dry_run)
+                    self.execute_sqls(session, self.expectations.get('createSchemaSql', []), "Create expectations table", dry_run)
                     return True
                 else:
                     return True
@@ -663,11 +664,10 @@ class SnowflakeTaskHelper(SnowflakeHelper):
         else:
             return False
 
-    def log_expectation(self, session: Session, expectations: dict, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime, jobid: Optional[str] = None, dry_run: bool = False) -> bool :
+    def log_expectation(self, session: Session, success: bool, name: str, params: str, sql: str, count: int, exception: str, ts: datetime, jobid: Optional[str] = None, dry_run: bool = False) -> bool :
         """Log the expectation record.
         Args:
             session (Session): The Snowflake session.
-            expectations (dict): The expectations configuration.
             success (bool): whether the expectation has been successfully checked or not.
             name (str): The name of the expectation.
             params (str): The params for the expectation.
@@ -680,9 +680,9 @@ class SnowflakeTaskHelper(SnowflakeHelper):
         Returns:
             bool: True if the expectation record was logged, False otherwise.
         """
-        if expectations and self.check_if_expectations_table_exists(session, expectations, dry_run):
-            expectation_domain = expectations.get('domain', ['audit'])[0]
-            expectation_sqls = expectations.get('mainSqlIfExists', None)
+        if self.expectations and self.check_if_expectations_table_exists(session, dry_run):
+            expectation_domain = self.expectations.get('domain', ['audit'])[0]
+            expectation_sqls = self.expectations.get('mainSqlIfExists', None)
             if expectation_sqls:
                 try:
                     ts = ts.astimezone(pytz.timezone(timezone))
@@ -711,11 +711,10 @@ class SnowflakeTaskHelper(SnowflakeHelper):
         else:
             return False
 
-    def run_expectation(self, session: Session, expectations: dict, name: str, params: str, query: str, failOnError: bool = False, jobid: Optional[str] = None, dry_run: bool = False) -> None:
+    def run_expectation(self, session: Session, name: str, params: str, query: str, failOnError: bool = False, jobid: Optional[str] = None, dry_run: bool = False) -> None:
         """Run the expectation.
         Args:
             session (Session): The Snowflake session.
-            expectations (dict): The expectations configuration.
             name (str): The name of the expectation.
             params (str): The params for the expectation.
             query (str): The query.
@@ -726,7 +725,7 @@ class SnowflakeTaskHelper(SnowflakeHelper):
         count = 0
         try:
             if query:
-                rows = execute_sql(session, query, f"Run expectation {name}:", dry_run)
+                rows = self.execute_sql(session, query, f"Run expectation {name}:", dry_run)
                 if rows.__len__() != 1:
                     if not dry_run:
                         raise Exception(f'Expectation failed for {sink}: {query}. Expected 1 row but got {rows.__len__()}')
@@ -735,29 +734,29 @@ class SnowflakeTaskHelper(SnowflakeHelper):
                 #  log expectations as audit in expectation table here
                 if count != 0:
                     raise Exception(f'Expectation failed for {sink}: {query}. Expected count to be equal to 0 but got {count}')
-                self.log_expectation(session, expectations, True, name, params, query, count, "", datetime.now(), jobid, dry_run)
+                self.log_expectation(session, True, name, params, query, count, "", datetime.now(), jobid, dry_run)
             else:
                 raise Exception(f'Expectation failed for {sink}: {name}. Query not found')
         except Exception as e:
             self.error(f"Error running expectation {name}: {str(e)}")
-            self.log_expectation(session, expectations, False, name, params, query, count, str(e), datetime.now(), jobid, dry_run)
+            self.log_expectation(session, False, name, params, query, count, str(e), datetime.now(), jobid, dry_run)
             if failOnError and not dry_run:
                 raise e
 
-    def run_expectations(self, session: Session, expectations: dict, expectation_items: list, jobid: Optional[str] = None, dry_run: bool = False) -> None:
+    def run_expectations(self, session: Session, jobid: Optional[str] = None, dry_run: bool = False) -> None:
         """Run the expectations.
         Args:
             session (Session): The Snowflake session.
             jobid (Optional[str], optional): The optional job id. Defaults to None.
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
-        if expectation_items and self.check_if_expectations_table_exists(session, expectations, dry_run):
-            for expectation in expectation_items:
-                self.run_expectation(session, expectations, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), self.str_to_bool(expectation.get('failOnError', 'no')), jobid, dry_run)
+        if self.expectation_items and self.check_if_expectations_table_exists(session, dry_run):
+            for expectation in self.expectation_items:
+                self.run_expectation(session, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), self.str_to_bool(expectation.get('failOnError', 'no')), jobid, dry_run)
 
 class SnowflakeLoadTaskHelper(SnowflakeTaskHelper):
-    def __init__(self, sl_incoming_file_stage: str, pattern: str, table_name: str, metadata: dict, variant: str, sink: str, domain: str, table: str, name: str, timezone: Optional[str] = None) -> None:
-        super().__init__(sink, domain, table, name, timezone)
+    def __init__(self, sl_incoming_file_stage: str, pattern: str, table_name: str, metadata: dict, variant: str, sink: str, domain: str, table: str, audit: dict, expectations: dict, expectation_items: list, name: str, timezone: Optional[str] = None) -> None:
+        super().__init__(sink, domain, table, audit, expectations, expectation_items, name, timezone)
         self.sl_incoming_file_stage = sl_incoming_file_stage
         self.pattern = pattern
         self.table_name = table_name
@@ -907,3 +906,4 @@ FILE_FORMAT = (
             return self.build_copy_other()
         else:
             raise ValueError(f"Unsupported format {self.format}")
+
