@@ -58,10 +58,10 @@ class SnowflakeDag(DAG):
         ai_zip: str = None
     ) -> None:
         from ai.starlake.common import is_valid_cron, get_cron_frequency, scheduled_dates_range
-        from ai.starlake.helper import datetime_format, SnowflakeHelper
+        from ai.starlake.helper import datetime_format, SnowflakeDAGHelper
 
 
-        helper = SnowflakeHelper(name=name, timezone=timezone)
+        helper = SnowflakeDAGHelper(name=name, timezone=timezone)
 
         info = helper.info
         warning = helper.warning
@@ -72,7 +72,7 @@ class SnowflakeDag(DAG):
         get_execution_date = helper.get_execution_date
         as_datetime = helper.as_datetime
         is_current_graph_scheduled = helper.is_current_graph_scheduled
-        get_logical_date = helper.get_logical_date
+        get_dag_logical_date = helper.get_dag_logical_date
         get_start_end_dates = helper.get_start_end_dates
         get_previous_dag_run = helper.get_previous_dag_run
         check_if_dataset_exists = helper.check_if_dataset_exists
@@ -139,7 +139,7 @@ class SnowflakeDag(DAG):
             manual: bool = not is_current_graph_scheduled(session, dry_run)
 
             if not logical_date:
-                logical_date = get_logical_date(session, ts, backfill, dry_run=dry_run)
+                logical_date = get_dag_logical_date(session, ts, backfill, dry_run=dry_run)
             logical_date = as_datetime(logical_date)
 
             if computed_cron_expr and not backfill:
