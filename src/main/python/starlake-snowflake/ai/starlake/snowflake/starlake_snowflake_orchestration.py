@@ -210,12 +210,12 @@ class SnowflakeDag(DAG):
                             break
 
                     cron = original_cron or data_cycle
-                    scheduled = cron and is_valid_cron(cron, dry_run=dry_run)
+                    scheduled = cron and is_valid_cron(cron)
                     optional = False
                     beyond_data_cycle_allowed = False
 
                     if data_cycle_freshness:
-                        original_scheduled = original_cron and is_valid_cron(original_cron, dry_run=dry_run)
+                        original_scheduled = original_cron and is_valid_cron(original_cron)
                         if optional_dataset_enabled:
                             # we check if the dataset is optional by comparing its freshness with that of the data cycle
                             # the freshness of a scheduled dataset is the time delta between 2 iterations of its schedule

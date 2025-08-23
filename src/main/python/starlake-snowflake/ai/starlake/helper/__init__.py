@@ -757,6 +757,8 @@ class SnowflakeTaskHelper(SnowflakeHelper):
 class SnowflakeLoadTaskHelper(SnowflakeTaskHelper):
     def __init__(self, sl_incoming_file_stage: str, pattern: str, table_name: str, metadata: dict, variant: str, sink: str, domain: str, table: str, audit: dict, expectations: dict, expectation_items: list, name: str, timezone: Optional[str] = None) -> None:
         super().__init__(sink, domain, table, audit, expectations, expectation_items, name, timezone)
+        if not sl_incoming_file_stage:
+            raise ValueError("sl_incoming_file_stage option is required")
         self.sl_incoming_file_stage = sl_incoming_file_stage
         self.pattern = pattern
         self.table_name = table_name
