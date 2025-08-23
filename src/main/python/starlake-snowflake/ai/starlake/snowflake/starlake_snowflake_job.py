@@ -39,6 +39,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         allow_overlapping_execution: bool = kwargs.get('allow_overlapping_execution', __class__.get_context_var(var_name='allow_overlapping_execution', default_value='False', options=self.options).lower() == 'true')
         self.__allow_overlapping_execution = allow_overlapping_execution
         self.__ai_zip = zip_selected_packages()
+        self.pipeline_id = self.caller_filename.replace(".py", "").replace(".pyc", "").upper() #TODO add to generic starlake job
 
     @property
     def stage_location(self) -> Optional[str]:
@@ -262,37 +263,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
-        from ai.starlake.helper import datetime_format, SnowflakeHelper
-
-        pipeline_id = self.caller_filename.replace(".py", "").replace(".pyc", "").upper()
-        timezone = self.timezone
-
-        helper = SnowflakeHelper(name=pipeline_id, timezone=timezone)
-
-        safe_params = helper.safe_params
-
-        info = helper.info
-        # warning = helper.warning
-        error = helper.error
-        # debug = helper.debug
-
-        begin_transaction = helper.begin_transaction
-        commit_transaction = helper.commit_transaction
-        rollback_transaction = helper.rollback_transaction
-        execute_sql = helper.execute_sql
-        execute_sqls = helper.execute_sqls
-        get_execution_date = helper.get_execution_date
-        as_datetime = helper.as_datetime
-        # get_logical_date = helper.get_logical_date
-        get_start_end_dates = helper.get_start_end_dates
-        check_if_dataset_exists = helper.check_if_dataset_exists
-        create_domain_if_not_exists = helper.create_domain_if_not_exists
-        log_audit = helper.log_audit
-        get_audit_info = helper.get_audit_info
-        run_expectations = helper.run_expectations
-        update_table_schema = helper.update_table_schema
-        build_copy = helper.build_copy
-
         sink = kwargs.get('sink', None)
         if not task_type and len(arguments) > 0:
             task_type = TaskType.from_str(arguments[0])
@@ -320,50 +290,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         })
                     break
 
-            def get_logical_date(session: Session, backfill: bool = False, dry_run: bool = False) -> datetime:
-                """Get the logical date of the running dag.
-                Args:
-                    session (Session): The Snowflake session.
-                    backfill (bool, optional): Whether the current Dag run is a backfill. Defaults to False.
-                    dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-                Returns:
-                    datetime: The logical date of the running dag.
-                """
-                if not backfill:
-                    # the logical date is the optional one defined in the task graph config
-                    if dry_run:
-                        config = None
-                    else:
-                        config = session.call("system$get_task_graph_config")
-                    if config:
-                        import json
-                        config = json.loads(config)
-                    else:
-                        config = {}
-                    logical_date = config.get("logical_date", None)
-                    if not logical_date:
-                        # the logical date is the return value of the current root task
-                        query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_ROOT_TASK_NAME')"
-                        rows = execute_sql(session, query, "Get the current root task name", dry_run)
-                        if rows.__len__() == 1:
-                            current_root_task_name = rows[0][0]
-                        else:
-                            current_root_task_name = pipeline_id
-                        query = f"SELECT SYSTEM$GET_PREDECESSOR_RETURN_VALUE('{current_root_task_name.split('.')[-1]}')"
-                        rows = execute_sql(session, query, "Get the predecessor return value", dry_run)
-                        if rows.__len__() == 1:
-                            logical_date = rows[0][0]
-
-                else:
-                    # the logical date is the partition end date
-                    query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
-                    rows = execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
-                    if rows.__len__() == 1:
-                        logical_date = rows[0][0]
-                if not logical_date:
-                    return get_execution_date(session, dry_run)
-                return as_datetime(logical_date)
-
             params = kwargs.get('params', {})
             cron_expr = params.get('cron', params.get('cronExpr', None))
             kwargs.pop('params', None)
@@ -371,6 +297,35 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
             allow_overlapping_execution = self.allow_overlapping_execution
 
             if task_type == TaskType.TRANSFORM:
+                from ai.starlake.helper import datetime_format, SnowflakeTaskHelper
+                helper = SnowflakeTaskHelper(sink=sink, domain=domain, table=table, name=self.pipeline_id, timezone=self.timezone)
+
+                safe_params = helper.safe_params
+
+                info = helper.info
+                error = helper.error
+
+                begin_transaction = helper.begin_transaction
+                commit_transaction = helper.commit_transaction
+                rollback_transaction = helper.rollback_transaction
+
+                execute_sql = helper.execute_sql
+                execute_sqls = helper.execute_sqls
+
+                get_task_logical_date = helper.get_task_logical_date
+                as_datetime = helper.as_datetime
+                get_start_end_dates = helper.get_start_end_dates
+
+                check_if_dataset_exists = helper.check_if_dataset_exists
+                create_domain_if_not_exists = helper.create_domain_if_not_exists
+
+                log_audit = helper.log_audit
+                get_audit_info = helper.get_audit_info
+
+                run_expectations = helper.run_expectations
+
+                update_table_schema = helper.update_table_schema
+
                 if statements:
 
                     # create the function that will execute the transform
@@ -386,7 +341,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 backfill = rows[0][0]
 
                         if not logical_date:
-                            logical_date = get_logical_date(session, backfill, dry_run=dry_run)
+                            logical_date = get_task_logical_date(session, backfill, dry_run=dry_run)
                         logical_date = as_datetime(logical_date)
 
                         if cron_expr and not backfill:
@@ -445,7 +400,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 # enable change tracking
                                 # enable_change_tracking(session, sink, dry_run)
                                 # update table schema
-                                update_table_schema(session, domain, table, schema_string=",".join(statements.get("targetSchema", [])), sync_strategy=statements.get("syncStrategy", None), dry_run=dry_run)
+                                update_table_schema(session, schema_string=",".join(statements.get("targetSchema", [])), sync_strategy=statements.get("syncStrategy", None), dry_run=dry_run)
                                 # execute addSCD2ColumnsSqls
                                 execute_sqls(session, statements.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                 # execute mainSqlIfExists
@@ -467,7 +422,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             info(f"Duration in seconds: {duration}", dry_run=dry_run)
-                            log_audit(session, audit, domain, table, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run, scheduled_date)
+                            log_audit(session, audit, None, -1, -1, -1, True, duration, 'Success', end, jobid, "TRANSFORM", dry_run, scheduled_date)
                             
                         except Exception as e:
                             # ROLLBACK transaction
@@ -477,7 +432,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             end = datetime.now()
                             duration = (end - start).total_seconds()
                             info(f"Duration in seconds: {duration}", dry_run=dry_run)
-                            log_audit(session, audit, domain, table, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run, scheduled_date)
+                            log_audit(session, audit, None, -1, -1, -1, False, duration, error_message, end, jobid, "TRANSFORM", dry_run, scheduled_date)
                             raise e
 
                     kwargs.pop('params', None)
@@ -514,7 +469,35 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         if not pattern:
                             raise ValueError(f"Pattern for {sink} not found")
                         metadata: dict = context_schema.get('metadata', dict())
-                        metadata_options: dict = metadata.get("options", dict())
+
+                        from ai.starlake.helper import SnowflakeLoadTaskHelper
+                        helper = SnowflakeLoadTaskHelper(sl_incoming_file_stage=sl_incoming_file_stage, pattern=pattern, table_name=table_name, metadata=metadata, variant=variant, sink=sink, domain=domain, table=table, name=self.pipeline_id, timezone=self.timezone)
+
+                        info = helper.info
+                        error = helper.error
+
+                        begin_transaction = helper.begin_transaction
+                        commit_transaction = helper.commit_transaction
+                        rollback_transaction = helper.rollback_transaction
+
+                        execute_sql = helper.execute_sql
+                        execute_sqls = helper.execute_sqls
+
+                        get_task_logical_date = helper.get_task_logical_date
+                        as_datetime = helper.as_datetime
+                        get_start_end_dates = helper.get_start_end_dates
+
+                        check_if_dataset_exists = helper.check_if_dataset_exists
+                        create_domain_if_not_exists = helper.create_domain_if_not_exists
+
+                        log_audit = helper.log_audit
+                        get_audit_info = helper.get_audit_info
+
+                        run_expectations = helper.run_expectations
+
+                        update_table_schema = helper.update_table_schema
+
+                        build_copy = helper.build_copy
 
                         # create the function that will execute the load
                         def fun(session: Session, dry_run: bool, logical_date: Optional[str] = None) -> None:
@@ -534,7 +517,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                     backfill = rows[0][0]
 
                             if not logical_date:
-                                logical_date = get_logical_date(session, backfill, dry_run=dry_run)
+                                logical_date = get_task_logical_date(session, backfill, dry_run=dry_run)
                             logical_date = as_datetime(logical_date)
 
                             if cron_expr and not backfill:
@@ -561,12 +544,12 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         # enable change tracking
                                         # enable_change_tracking(session, sink, dry_run)
                                         # update table schema
-                                        update_table_schema(session, domain, table, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
+                                        update_table_schema(session, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
                                     # copy data
-                                    copy_results = execute_sql(session, build_copy(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, variant), "Copy data", dry_run)
+                                    copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     if not exists:
                                         # enable change tracking
                                         # enable_change_tracking(session, sink, dry_run)
@@ -578,7 +561,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
                                     # copy data
-                                    copy_results = execute_sql(session, build_copy(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, variant), "Copy data", dry_run)
+                                    copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     second_step = statements.get('secondStep', dict())
                                     # execute preActions
                                     execute_sqls(session, second_step.get('preActions', []), "Pre actions", dry_run)
@@ -590,7 +573,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         # execute addSCD2ColumnsSqls
                                         execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                         # update schema
-                                        update_table_schema(session, domain, table, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
+                                        update_table_schema(session, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
                                         # execute mainSqlIfExists
                                         execute_sqls(session, second_step.get('mainSqlIfExists', []), "Main sql if exists", dry_run)
                                     else:
@@ -617,7 +600,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 files, first_error_line, first_error_column_name, rows_parsed, rows_loaded, errors_seen = get_audit_info(copy_results, dry_run=dry_run)
                                 message = first_error_line + '\n' + first_error_column_name
                                 success = errors_seen == 0
-                                log_audit(session, audit, domain, table, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run, scheduled_date)
+                                log_audit(session, audit, files, rows_parsed, rows_loaded, errors_seen, success, duration, message, end, jobid, "LOAD", dry_run, scheduled_date)
                                 
                             except Exception as e:
                                 # ROLLBACK transaction
@@ -627,7 +610,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 end = datetime.now()
                                 duration = (end - start).total_seconds()
                                 info(f"Duration in seconds: {duration}", dry_run=dry_run)
-                                log_audit(session, audit, domain, table, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run, scheduled_date)
+                                log_audit(session, audit, None, -1, -1, -1, False, duration, error_message, end, jobid, "LOAD", dry_run, scheduled_date)
                                 raise e
 
                         kwargs.pop('params', None)
