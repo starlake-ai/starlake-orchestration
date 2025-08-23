@@ -19,7 +19,7 @@ import os
 import zipfile
 import tempfile
 
-def zip_selected_packages(package_root: str = site.getsitepackages()[0], package_name: str = "ai", include: list[str] = ["ai", "ai.starlake", "ai.starlake.common", "ai.starlake.dataset", "ai.starlake.helper", "ai.starlake.job"], exclude: list[str] = ["ai.starlake.airflow", "ai.starlake.aws", "ai.starlake.dagster", "ai.starlake.gcp", "ai.starlake.odbc", "ai.starlake.orchestration", "ai.starlake.snowflake", "ai.starlake.sql"]) -> str:
+def zip_selected_packages(package_root: str = site.getsitepackages()[0], package_name: str = "ai", include: list[str] = ["ai", "ai.starlake", "ai.starlake.common", "ai.starlake.helper"], exclude: list[str] = ["ai.starlake.airflow", "ai.starlake.aws", "ai.starlake.dagster", "ai.starlake.dataset", "ai.starlake.gcp", "ai.starlake.job", "ai.starlake.odbc", "ai.starlake.orchestration", "ai.starlake.snowflake", "ai.starlake.sql"]) -> str:
     """
     Create a ZIP containing only selected subpackages of a package.
     Args:
@@ -52,8 +52,8 @@ class SnowflakeHelper:
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         from collections import defaultdict
-        self.name = name
         self.safe_params = defaultdict(lambda: 'NULL', {})
+        self.name = name
         self.timezone = timezone if timezone else 'UTC'
 
     def str_to_bool(self, value: str) -> bool:
@@ -184,16 +184,6 @@ class SnowflakeHelper:
         query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'"
         return self.execute_sql(session, query, f"Check if dataset {dataset} exists:", False).__len__() > 0
 
-    # Domains
-    def create_domain_if_not_exists(self, session: Session, domain: str, dry_run: bool = False) -> None:
-        """Create the schema if it does not exist.
-        Args:
-            session (Session): The Snowflake session.
-            domain (str): The domain.
-            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-        """
-        self.execute_sql(session, f"CREATE SCHEMA IF NOT EXISTS {domain}", f"Create schema {domain} if not exists:", dry_run)
-
     # Change Tracking
     def enable_change_tracking(self, session: Session, sink: str, dry_run: bool = False) -> None:
         """Enable change tracking.
@@ -203,6 +193,262 @@ class SnowflakeHelper:
             dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
         """
         self.execute_sql(session, f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE", "Enable change tracking:", dry_run)
+
+    # Dates
+    def get_start_end_dates(self, cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
+        """Get the start and end dates by applying the cron expression to the current date.
+        Args:
+            cron_expr (str): The cron expression.
+            current_date (datetime): The current date.
+        Returns:
+            tuple[datetime, datetime]: The start and end dates.
+        """
+        try:
+            croniter(cron_expr)
+            iter = croniter(cron_expr, current_date)
+            curr = iter.get_current(datetime)
+            previous = iter.get_prev(datetime)
+            next = croniter(cron_expr, previous).get_next(datetime)
+            if curr == next:
+                end_date = curr
+            else:
+                end_date = previous
+            start_date = croniter(cron_expr, end_date).get_prev(datetime)
+            return start_date, end_date
+        except CroniterBadCronError:
+            raise ValueError(f"Invalid cron expression: {cron_expr}")
+
+    def get_execution_date(self, session: Session, dry_run: bool = False) -> datetime:
+        """Get the execution date of the current DAG run.
+        Args:
+            session (Session): The Snowflake session.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        Returns:
+            datetime: The execution date.
+        """
+        query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP')::timestamp_ltz"
+        rows = self.execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
+        if rows.__len__() == 1:
+            execution_date = self.as_datetime(rows[0][0])
+            self.info(f"Execution date set to the original scheduled timestamp of the initial graph run: {execution_date}", dry_run=dry_run)
+        else:
+            execution_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(self.timezone))
+            self.info(f"Execution date set to the current system date: {execution_date}", dry_run=dry_run)
+        return execution_date
+
+    def as_datetime(self, value: Union[str, datetime]) -> datetime:
+        """Convert a string to a datetime object.
+        Args:
+            value (str): The string to convert.
+        Returns:
+            datetime: The datetime object.
+        """
+        if isinstance(value, str):
+            from dateutil import parser
+            value = parser.parse(value).astimezone(pytz.timezone(self.timezone))
+        return value.astimezone(pytz.timezone(self.timezone))
+
+class SnowflakeDAGHelper(SnowflakeHelper):
+    def __init__(self, name: str, timezone: Optional[str] = None) -> None:
+        super().__init__(name, timezone)
+        self.name = name
+
+    def get_dag_logical_date(self, session: Session, ts: datetime, backfill: bool = False, dry_run: bool = False) -> datetime:
+        """Get the logical date of the running dag.
+        Args:
+            session (Session): The Snowflake session.
+            ts (datetime): The timestamp of the current DAG run.
+            backfill (bool, optional): Whether the current Dag run is a backfill. Defaults to False.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        Returns:
+            datetime: The logical date of the running dag.
+        """
+        if not backfill:
+            # the logical date is the optional one defined in the task graph config
+            if dry_run:
+                config = None
+            else:
+                config = session.call("system$get_task_graph_config")
+            if config:
+                import json
+                config = json.loads(config)
+            else:
+                config = {}
+            logical_date = config.get("logical_date", None)
+            if logical_date:
+                self.info(f"Logical date set to the one defined in the task graph config: {logical_date}", dry_run=dry_run)
+        else:
+            # the logical date is the partition end date
+            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
+            rows = self.execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
+            if rows.__len__() == 1:
+                logical_date = rows[0][0]
+                self.info(f"Logical date set to the partition end date: {logical_date}", dry_run=dry_run)
+        if not logical_date:
+            return ts
+        return self.as_datetime(logical_date)
+
+    def get_previous_dag_run(self, session: Session, logical_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
+        """Get the previous DAG run.
+        Args:
+            session (Session): The Snowflake session.
+            logical_date (datetime): The logical date.
+            dry_run (bool): Whether to run in dry run mode.
+            at_scheduled_date (bool): Whether to get the DAG run at the scheduled date.
+        Returns:
+            Optional[tuple[datetime, datetime]]: The previous DAG Run as a tuple of (scheduled_time, query_start_time) or None.
+        """
+        # if we are at the scheduled date, we look for the last successful dag run before or at the scheduled date
+        # if we are not at the scheduled date, we look for the last successful dag run before the scheduled date
+        comparison_operator = "<=" if at_scheduled_date else "<"
+        query = f"""SELECT SCHEDULED_TIME, QUERY_START_TIME 
+FROM TABLE(
+    INFORMATION_SCHEMA.TASK_HISTORY(
+        ERROR_ONLY => false
+    )
+)
+WHERE GRAPH_RUN_GROUP_ID IN (
+    SELECT GRAPH_RUN_GROUP_ID 
+    FROM TABLE(
+        INFORMATION_SCHEMA.TASK_HISTORY(
+            ERROR_ONLY => false
+        )
+    )
+    WHERE 
+        NAME ilike '{self.name}$end' 
+        AND STATE = 'SUCCEEDED'
+        AND COMPLETED_TIME IS NOT NULL
+        AND COMPLETED_TIME {comparison_operator} '{logical_date.strftime(datetime_format)}'
+    ORDER BY COMPLETED_TIME DESC
+    LIMIT 1
+)
+ORDER BY SCHEDULED_TIME DESC"""
+        rows = self.execute_sql(session, query, f"Get the previous successful DAG run for {self.name} {comparison_operator} {logical_date.strftime(datetime_format)}", dry_run)
+        if rows and rows.__len__() > 0:
+            return (self.as_datetime(rows[0][0]), self.as_datetime(rows[0][1]))
+        return None
+
+    def get_current_graph_run_group_id(self, session: Session, dry_run: bool) -> Optional[str]:
+        query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID')"
+        rows = self.execute_sql(session, query, "Get the current graph run group id", dry_run)
+        if rows.__len__() == 1:
+            return rows[0][0]
+        return None
+
+    def is_current_graph_scheduled(self, session: Session, dry_run: bool) -> bool:
+        """Check if the current graph is scheduled.
+        Args:
+            session (Session): The Snowflake session.
+            dry_run (bool): Whether to run in dry run mode.
+        Returns:
+            bool: True if the current graph is scheduled, False otherwise.
+        """
+        current_graph_run_group_id = self.get_current_graph_run_group_id(session, dry_run)
+        if current_graph_run_group_id:
+            # we check if the current graph run group id is scheduled
+            query = f"SELECT SCHEDULED_FROM FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) WHERE GRAPH_RUN_GROUP_ID = '{current_graph_run_group_id}'"
+            rows = self.execute_sql(session, query, f"Check if the current graph run group id {current_graph_run_group_id} is scheduled", dry_run)
+            if rows.__len__() == 1:
+                scheduled_from = rows[0][0]
+                scheduled = scheduled_from is not None and scheduled_from == 'SCHEDULE'
+                self.info(f"Current graph run group id {current_graph_run_group_id} has been {'scheduled' if scheduled else 'launched manually'}", dry_run=dry_run)
+                return scheduled
+        self.info(f"By default, the current graph run is considered scheduled", dry_run=dry_run)
+        return True
+
+    def find_dataset_event(self, session: Session, dataset: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, dry_run: bool) -> Optional[tuple[datetime, datetime]]:
+        """Find the events for a dataset.
+        Args:
+            session (Session): The Snowflake session.
+            dataset (str): The dataset.
+            scheduled_date_to_check_min (datetime): The minimum scheduled date to check.
+            scheduled_date_to_check_max (datetime): The maximum scheduled date to check.
+            ts (datetime): The timestamp.
+            dry_run (bool): Whether to run in dry run mode.
+        Returns:
+            Optional[tuple[datetime, datetime]]: The last event for the dataset as a tuple of (timestamp, scheduled_date) or None.
+        """
+        # we look for the last event for the dataset in the audit table
+        # the event is the last successful run of the dataset before the max scheduled date and after the min scheduled date
+        domainAndSchema = dataset.split('.')
+        if len(domainAndSchema) != 2:
+            raise ValueError(f"Invalid dataset name: {dataset}. It should be in the format 'domain.schema'.")
+        domain = domainAndSchema[0]
+        schema = domainAndSchema[-1]
+        query = f"""SELECT TIMESTAMP, SCHEDULED_DATE 
+FROM audit.audit 
+WHERE DOMAIN ilike '{domain}'
+    AND SCHEMA ilike '{schema}'
+    AND SUCCESS = true
+    AND SCHEDULED_DATE > TO_TIMESTAMP('{scheduled_date_to_check_min.strftime(datetime_format)}')
+    AND SCHEDULED_DATE <= TO_TIMESTAMP('{scheduled_date_to_check_max.strftime(datetime_format)}')
+ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
+"""
+        rows = self.execute_sql(session, query, f'Finding dataset event for {dataset} with scheduled date between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}', dry_run)
+        if rows and rows.__len__() > 0:
+            return (self.as_datetime(rows[0][0]), self.as_datetime(rows[0][1]))
+        return None
+
+class SnowflakeTaskHelper(SnowflakeHelper):
+    def __init__(self, sink: str, domain: str, table: str, name: str, timezone: Optional[str] = None) -> None:
+        super().__init__(name, timezone)
+        self.sink = sink
+        self.domain = domain
+        self.table = table
+
+    def get_task_logical_date(self, session: Session, backfill: bool = False, dry_run: bool = False) -> datetime:
+        """Get the logical date of the running dag.
+        Args:
+            session (Session): The Snowflake session.
+            backfill (bool, optional): Whether the current Dag run is a backfill. Defaults to False.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        Returns:
+            datetime: The logical date of the running dag.
+        """
+        if not backfill:
+            # the logical date is the optional one defined in the task graph config
+            if dry_run:
+                config = None
+            else:
+                config = session.call("system$get_task_graph_config")
+            if config:
+                import json
+                config = json.loads(config)
+            else:
+                config = {}
+            logical_date = config.get("logical_date", None)
+            if not logical_date:
+                # the logical date is the return value of the current root task
+                query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_ROOT_TASK_NAME')"
+                rows = self.execute_sql(session, query, "Get the current root task name", dry_run)
+                if rows.__len__() == 1:
+                    current_root_task_name = rows[0][0]
+                else:
+                    current_root_task_name = self.name
+                query = f"SELECT SYSTEM$GET_PREDECESSOR_RETURN_VALUE('{current_root_task_name.split('.')[-1]}')"
+                rows = self.execute_sql(session, query, "Get the predecessor return value", dry_run)
+                if rows.__len__() == 1:
+                    logical_date = rows[0][0]
+
+        else:
+            # the logical date is the partition end date
+            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
+            rows = self.execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
+            if rows.__len__() == 1:
+                logical_date = rows[0][0]
+        if not logical_date:
+            return self.get_execution_date(session, dry_run)
+        return self.as_datetime(logical_date)
+
+    # Domains
+    def create_domain_if_not_exists(self, session: Session, domain: str, dry_run: bool = False) -> None:
+        """Create the schema if it does not exist.
+        Args:
+            session (Session): The Snowflake session.
+            domain (str): The domain.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        """
+        self.execute_sql(session, f"CREATE SCHEMA IF NOT EXISTS {domain}", f"Create schema {domain} if not exists:", dry_run)
 
     # Transactions
     def begin_transaction(self, session: Session, dry_run: bool = False) -> None:
@@ -235,24 +481,24 @@ class SnowflakeHelper:
         tableSchemaDict = dict(map(lambda x: (x[0].lower(), x[1].lower()), tableNativeSchema))
         return tableSchemaDict
 
-    def add_columns_from_dict(self, domain: str, table: str, dictionary: dict):
-        return [f"ALTER TABLE IF EXISTS {domain}.{table} ADD COLUMN IF NOT EXISTS {k} {v} NULL;" for k, v in dictionary.items()]
+    def add_columns_from_dict(self, dictionary: dict):
+        return [f"ALTER TABLE IF EXISTS {self.domain}.{self.table} ADD COLUMN IF NOT EXISTS {k} {v} NULL;" for k, v in dictionary.items()]
 
-    def drop_columns_from_dict(self, domain: str, table: str, dictionary: dict):
-        return [f"ALTER TABLE IF EXISTS {domain}.{table} DROP COLUMN IF EXISTS {col};" for col in dictionary.keys()]
+    def drop_columns_from_dict(self, dictionary: dict):
+        return [f"ALTER TABLE IF EXISTS {self.domain}.{self.table} DROP COLUMN IF EXISTS {col};" for col in dictionary.keys()]
 
-    def update_table_schema(self, session: Session, domain: str, table: str, schema_string: str, sync_strategy: Optional[str], dry_run: bool) -> bool:
+    def update_table_schema(self, session: Session, schema_string: str, sync_strategy: Optional[str], dry_run: bool) -> bool:
         if not sync_strategy:
             sync_strategy = "NONE"
         sync_strategy = sync_strategy.upper()
-        existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{domain}' and table_name ilike '{table}';"
-        rows = self.execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {domain}.{table}", False)
+        existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{self.domain}' and table_name ilike '{self.table}';"
+        rows = self.execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {self.domain}.{self.table}", False)
         existing_columns = []
         for row in rows:
             existing_columns.append((str(row[0]).lower(), str(row[1]).lower()))
         existing_schema = dict(existing_columns)
         if dry_run:
-            print(f"-- Existing schema for {domain}.{table}: {existing_schema}") 
+            print(f"-- Existing schema for {self.domain}.{self.table}: {existing_schema}") 
         if schema_string.strip() == "":
             return False
         new_schema = self.schema_as_dict(schema_string)
@@ -263,14 +509,14 @@ class SnowflakeHelper:
         update_required = nb_new_columns + nb_old_columns > 0
         if not update_required:
             if dry_run:
-                print(f"-- No schema update required for {domain}.{table}")
+                print(f"-- No schema update required for {self.domain}.{self.table}")
             return False
         new_columns_dict = {key: new_schema[key] for key in new_columns}
-        alter_columns = self.add_columns_from_dict(domain, table, new_columns_dict)
+        alter_columns = self.add_columns_from_dict(new_columns_dict)
         if sync_strategy == "ALL" or sync_strategy == "ADD":
             self.execute_sqls(session, alter_columns, "Add columns", dry_run)
         old_columns_dict = {key: existing_schema[key] for key in old_columns}
-        drop_columns = self.drop_columns_from_dict(domain, table, old_columns_dict)
+        drop_columns = self.drop_columns_from_dict(old_columns_dict)
         if sync_strategy == "ALL":
             self.execute_sqls(session, drop_columns, "Drop columns", dry_run)
         return True
@@ -307,7 +553,7 @@ class SnowflakeHelper:
         else:
             return False
 
-    def log_audit(self, session: Session, audit: dict, domain: str, table: str, paths: Optional[str], count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None, dry_run: bool = False, scheduled_date: Optional[datetime] = None) -> bool :
+    def log_audit(self, session: Session, audit: dict, paths: Optional[str], count: int, countAccepted: int, countRejected: int, success: bool, duration: int, message: str, ts: datetime, jobid: Optional[str] = None, step: Optional[str] = None, dry_run: bool = False, scheduled_date: Optional[datetime] = None) -> bool :
         """Log the audit record.
         Args:
             session (Session): The Snowflake session.
@@ -335,10 +581,10 @@ class SnowflakeHelper:
                     scheduled_date = scheduled_date.astimezone(pytz.timezone(self.timezone)) if scheduled_date else ts
                     audit_sql = audit_sqls[0]
                     formatted_sql = audit_sql.format(
-                        jobid = jobid or f'{domain}.{table}',
-                        paths = paths or table,
-                        domain = domain,
-                        schema = table,
+                        jobid = jobid or f'{self.domain}.{self.table}',
+                        paths = paths or self.table,
+                        domain = self.domain,
+                        schema = self.table,
                         success = str(success),
                         count = str(count),
                         countAccepted = str(countAccepted),
@@ -509,218 +755,69 @@ class SnowflakeHelper:
             for expectation in expectation_items:
                 self.run_expectation(session, expectations, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), self.str_to_bool(expectation.get('failOnError', 'no')), jobid, dry_run)
 
-    # Dates
-    def get_start_end_dates(self, cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
-        """Get the start and end dates by applying the cron expression to the current date.
-        Args:
-            cron_expr (str): The cron expression.
-            current_date (datetime): The current date.
-        Returns:
-            tuple[datetime, datetime]: The start and end dates.
-        """
-        try:
-            croniter(cron_expr)
-            iter = croniter(cron_expr, current_date)
-            curr = iter.get_current(datetime)
-            previous = iter.get_prev(datetime)
-            next = croniter(cron_expr, previous).get_next(datetime)
-            if curr == next:
-                end_date = curr
-            else:
-                end_date = previous
-            start_date = croniter(cron_expr, end_date).get_prev(datetime)
-            return start_date, end_date
-        except CroniterBadCronError:
-            raise ValueError(f"Invalid cron expression: {cron_expr}")
+class SnowflakeLoadTaskHelper(SnowflakeTaskHelper):
+    def __init__(self, sl_incoming_file_stage: str, pattern: str, table_name: str, metadata: dict, variant: str, sink: str, domain: str, table: str, name: str, timezone: Optional[str] = None) -> None:
+        super().__init__(sink, domain, table, name, timezone)
+        self.sl_incoming_file_stage = sl_incoming_file_stage
+        self.pattern = pattern
+        self.table_name = table_name
+        self.metadata = metadata
+        self.metadata_options: dict = metadata.get("options", dict())
+        self.variant = variant
 
-    def get_execution_date(self, session: Session, dry_run: bool = False) -> datetime:
-        """Get the execution date of the current DAG run.
-        Args:
-            session (Session): The Snowflake session.
-            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-        Returns:
-            datetime: The execution date.
-        """
-        query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_ORIGINAL_SCHEDULED_TIMESTAMP')::timestamp_ltz"
-        rows = self.execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
-        if rows.__len__() == 1:
-            execution_date = self.as_datetime(rows[0][0])
-            self.info(f"Execution date set to the original scheduled timestamp of the initial graph run: {execution_date}", dry_run=dry_run)
+        format: str = metadata.get('format', None)
+        if not format:
+            raise ValueError(f"Format for {self.sink} not found")
         else:
-            execution_date = datetime.fromtimestamp(datetime.now().timestamp()).astimezone(pytz.timezone(self.timezone))
-            self.info(f"Execution date set to the current system date: {execution_date}", dry_run=dry_run)
-        return execution_date
+            format = format.upper()
+        self.format = format
 
-    def get_logical_date(self, session: Session, ts: datetime, backfill: bool = False, dry_run: bool = False) -> datetime:
-        """Get the logical date of the running dag.
-        Args:
-            session (Session): The Snowflake session.
-            ts (datetime): The timestamp of the current DAG run.
-            backfill (bool, optional): Whether the current Dag run is a backfill. Defaults to False.
-            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-        Returns:
-            datetime: The logical date of the running dag.
-        """
-        if not backfill:
-            # the logical date is the optional one defined in the task graph config
-            if dry_run:
-                config = None
-            else:
-                config = session.call("system$get_task_graph_config")
-            if config:
-                import json
-                config = json.loads(config)
-            else:
-                config = {}
-            logical_date = config.get("logical_date", None)
-            if logical_date:
-                self.info(f"Logical date set to the one defined in the task graph config: {logical_date}", dry_run=dry_run)
+        compression: bool = self.is_true(self.get_option("compression"), False)
+        self.compression = compression
+
+        if compression:
+            compression_format = "COMPRESSION = GZIP" 
         else:
-            # the logical date is the partition end date
-            query = "SELECT SYSTEM$TASK_RUNTIME_INFO('PARTITION_END')::timestamp_ltz"
-            rows = self.execute_sql(session, query, "Get the original scheduled timestamp of the initial graph run", dry_run)
-            if rows.__len__() == 1:
-                logical_date = rows[0][0]
-                self.info(f"Logical date set to the partition end date: {logical_date}", dry_run=dry_run)
-        if not logical_date:
-            return ts
-        return self.as_datetime(logical_date)
+            compression_format = "COMPRESSION = NONE"
+        self.compression_format = compression_format
 
-    def as_datetime(self, value: Union[str, datetime]) -> datetime:
-        """Convert a string to a datetime object.
-        Args:
-            value (str): The string to convert.
-        Returns:
-            datetime: The datetime object.
-        """
-        if isinstance(value, str):
-            from dateutil import parser
-            value = parser.parse(value).astimezone(pytz.timezone(self.timezone))
-        return value.astimezone(pytz.timezone(self.timezone))
+        null_if = self.get_option('NULL_IF')
+        if not null_if and self.is_true(self.metadata.get('emptyIsNull', "true"), False):
+            null_if = "NULL_IF = ('')"
+        elif null_if:
+            null_if = f"NULL_IF = {null_if}"
+        else:
+            null_if = ""
+        self.null_if = null_if
 
-    # DAG Runs
-    def get_previous_dag_run(self, session: Session, logical_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
-        """Get the previous DAG run.
-        Args:
-            session (Session): The Snowflake session.
-            logical_date (datetime): The logical date.
-            dry_run (bool): Whether to run in dry run mode.
-            at_scheduled_date (bool): Whether to get the DAG run at the scheduled date.
-        Returns:
-            Optional[tuple[datetime, datetime]]: The previous DAG Run as a tuple of (scheduled_time, query_start_time) or None.
-        """
-        # if we are at the scheduled date, we look for the last successful dag run before or at the scheduled date
-        # if we are not at the scheduled date, we look for the last successful dag run before the scheduled date
-        comparison_operator = "<=" if at_scheduled_date else "<"
-        query = f"""SELECT SCHEDULED_TIME, QUERY_START_TIME 
-FROM TABLE(
-    INFORMATION_SCHEMA.TASK_HISTORY(
-        ERROR_ONLY => false
-    )
-)
-WHERE GRAPH_RUN_GROUP_ID IN (
-    SELECT GRAPH_RUN_GROUP_ID 
-    FROM TABLE(
-        INFORMATION_SCHEMA.TASK_HISTORY(
-            ERROR_ONLY => false
-        )
-    )
-    WHERE 
-        NAME ilike '{self.name}$end' 
-        AND STATE = 'SUCCEEDED'
-        AND COMPLETED_TIME IS NOT NULL
-        AND COMPLETED_TIME {comparison_operator} '{logical_date.strftime(datetime_format)}'
-    ORDER BY COMPLETED_TIME DESC
-    LIMIT 1
-)
-ORDER BY SCHEDULED_TIME DESC"""
-        rows = self.execute_sql(session, query, f"Get the previous successful DAG run for {self.name} {comparison_operator} {logical_date.strftime(datetime_format)}", dry_run)
-        if rows and rows.__len__() > 0:
-            return (self.as_datetime(rows[0][0]), self.as_datetime(rows[0][1]))
-        return None
-
-    def get_current_graph_run_group_id(self, session: Session, dry_run: bool) -> Optional[str]:
-        query = "SELECT SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID')"
-        rows = self.execute_sql(session, query, "Get the current graph run group id", dry_run)
-        if rows.__len__() == 1:
-            return rows[0][0]
-        return None
-
-    def is_current_graph_scheduled(self, session: Session, dry_run: bool) -> bool:
-        """Check if the current graph is scheduled.
-        Args:
-            session (Session): The Snowflake session.
-            dry_run (bool): Whether to run in dry run mode.
-        Returns:
-            bool: True if the current graph is scheduled, False otherwise.
-        """
-        current_graph_run_group_id = self.get_current_graph_run_group_id(session, dry_run)
-        if current_graph_run_group_id:
-            # we check if the current graph run group id is scheduled
-            query = f"SELECT SCHEDULED_FROM FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) WHERE GRAPH_RUN_GROUP_ID = '{current_graph_run_group_id}'"
-            rows = self.execute_sql(session, query, f"Check if the current graph run group id {current_graph_run_group_id} is scheduled", dry_run)
-            if rows.__len__() == 1:
-                scheduled_from = rows[0][0]
-                scheduled = scheduled_from is not None and scheduled_from == 'SCHEDULE'
-                self.info(f"Current graph run group id {current_graph_run_group_id} has been {'scheduled' if scheduled else 'launched manually'}", dry_run=dry_run)
-                return scheduled
-        self.info(f"By default, the current graph run is considered scheduled", dry_run=dry_run)
-        return True
-
-    def find_dataset_event(self, session: Session, dataset: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, dry_run: bool) -> Optional[tuple[datetime, datetime]]:
-        """Find the events for a dataset.
-        Args:
-            session (Session): The Snowflake session.
-            dataset (str): The dataset.
-            scheduled_date_to_check_min (datetime): The minimum scheduled date to check.
-            scheduled_date_to_check_max (datetime): The maximum scheduled date to check.
-            ts (datetime): The timestamp.
-            dry_run (bool): Whether to run in dry run mode.
-        Returns:
-            Optional[tuple[datetime, datetime]]: The last event for the dataset as a tuple of (timestamp, scheduled_date) or None.
-        """
-        # we look for the last event for the dataset in the audit table
-        # the event is the last successful run of the dataset before the max scheduled date and after the min scheduled date
-        domainAndSchema = dataset.split('.')
-        if len(domainAndSchema) != 2:
-            raise ValueError(f"Invalid dataset name: {dataset}. It should be in the format 'domain.schema'.")
-        domain = domainAndSchema[0]
-        schema = domainAndSchema[-1]
-        query = f"""SELECT TIMESTAMP, SCHEDULED_DATE 
-FROM audit.audit 
-WHERE DOMAIN ilike '{domain}'
-    AND SCHEMA ilike '{schema}'
-    AND SUCCESS = true
-    AND SCHEDULED_DATE > TO_TIMESTAMP('{scheduled_date_to_check_min.strftime(datetime_format)}')
-    AND SCHEDULED_DATE <= TO_TIMESTAMP('{scheduled_date_to_check_max.strftime(datetime_format)}')
-ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
-"""
-        rows = self.execute_sql(session, query, f'Finding dataset event for {dataset} with scheduled date between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}', dry_run)
-        if rows and rows.__len__() > 0:
-            return (self.as_datetime(rows[0][0]), self.as_datetime(rows[0][1]))
-        return None
+        purge = self.get_option("PURGE")
+        if not purge:
+            purge = "FALSE"
+        else:
+            purge = purge.upper()
+        self.purge = purge
 
     # Copy data
-    def get_option(self, metadata_options: dict, key: str, metadata: dict, metadata_key: Optional[str] = None, default_value: Optional[str] = None) -> Optional[str]:
-        if metadata_options and key.lower() in metadata_options:
-            return metadata_options.get(key.lower(), None)
-        elif metadata_key and metadata.get(metadata_key, None):
-            return metadata[metadata_key].replace('\\', '\\\\')
+    def get_option(self, metadata_key: Optional[str] = None, default_value: Optional[str] = None) -> Optional[str]:
+        if self.metadata_options and key.lower() in self.metadata_options:
+            return self.metadata_options.get(key.lower(), None)
+        elif metadata_key and self.metadata.get(metadata_key, None):
+            return self.metadata[metadata_key].replace('\\', '\\\\')
         return default_value
 
-    def copy_extra_options(self, metadata_options: dict, common_options: list[str]):
+    def copy_extra_options(self, common_options: list[str]):
         extra_options = ""
-        if metadata_options:
-            for k, v in metadata_options.items():
+        if self.metadata_options:
+            for k, v in self.metadata_options.items():
                 if k.upper().startswith("SNOWFLAKE_"):
                     newKey = k[len("SNOWFLAKE_"):]
                     if not newKey in common_options:
                         extra_options += f"{newKey} = {v}\n"
         return extra_options
 
-    def build_copy_csv(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, compression_format: str, extension: str, null_if: str, purge: str) -> str:
-        skipCount = self.get_option(metadata_options, "SKIP_HEADER", metadata)
-        if not skipCount and self.is_true(metadata.get('withHeader', 'true'), False):
+    def build_copy_csv(self) -> str:
+        skipCount = self.get_option("SKIP_HEADER")
+        if not skipCount and self.is_true(self.metadata.get('withHeader', 'true'), False):
             skipCount = '1'
 
         common_options = [
@@ -731,107 +828,82 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             'ESCAPE_UNENCLOSED_FIELD', 
             'ENCODING'
         ]
-        extra_options = self.copy_extra_options(metadata_options, common_options)
+        extra_options = self.copy_extra_options(common_options)
+        if self.compression:
+            extension = ".gz"
+        else:
+            extension = ""
         sql = f'''
-COPY INTO {table_name} 
-FROM @{sl_incoming_file_stage}/{domain}/
-PATTERN = '{pattern}{extension}'
-PURGE = {purge}
+COPY INTO {self.table_name} 
+FROM @{self.sl_incoming_file_stage}/{self.domain}/
+PATTERN = '{self.pattern}{extension}'
+PURGE = {self.purge}
 FILE_FORMAT = (
     TYPE = CSV
     ERROR_ON_COLUMN_COUNT_MISMATCH = false
     SKIP_HEADER = {skipCount} 
-    FIELD_OPTIONALLY_ENCLOSED_BY = '{self.get_option(metadata_options, 'FIELD_OPTIONALLY_ENCLOSED_BY', metadata, 'quote')}' 
-    FIELD_DELIMITER = '{self.get_option(metadata_options, 'FIELD_DELIMITER', metadata, 'separator')}' 
-    ESCAPE_UNENCLOSED_FIELD = '{self.get_option(metadata_options, 'ESCAPE_UNENCLOSED_FIELD', metadata, 'escape')}' 
-    ENCODING = '{self.get_option(metadata_options, 'ENCODING', metadata, 'encoding')}'
-    {null_if}
+    FIELD_OPTIONALLY_ENCLOSED_BY = '{self.get_option('FIELD_OPTIONALLY_ENCLOSED_BY', 'quote')}' 
+    FIELD_DELIMITER = '{self.get_option('FIELD_DELIMITER', 'separator')}' 
+    ESCAPE_UNENCLOSED_FIELD = '{self.get_option('ESCAPE_UNENCLOSED_FIELD', 'escape')}' 
+    ENCODING = '{self.get_option('ENCODING', 'encoding')}'
+    {self.null_if}
     {extra_options}
-    {compression_format}
+    {self.compression_format}
 )'''
         return sql
 
-    def build_copy_json(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, compression_format: str, null_if: str, purge: str, variant: str) -> str:
-        strip_outer_array = self.get_option(metadata_options, "STRIP_OUTER_ARRAY", metadata, default_value='true')
+    def build_copy_json(self) -> str:
+        strip_outer_array = self.get_option("STRIP_OUTER_ARRAY", default_value='true')
         common_options = [
             'STRIP_OUTER_ARRAY', 
             'NULL_IF'
         ]
-        extra_options = self.copy_extra_options(metadata_options, common_options)
-        if (variant == "false"):
+        extra_options = self.copy_extra_options(common_options)
+        if (self.variant == "false"):
             match_by_columnName = "MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE"
         else:
             match_by_columnName = ''
         sql = f'''
-COPY INTO {table_name} 
-FROM @{sl_incoming_file_stage}/{domain}
-PATTERN = '{pattern}'
-PURGE = {purge}
+COPY INTO {self.table_name} 
+FROM @{self.sl_incoming_file_stage}/{self.domain}
+PATTERN = '{self.pattern}'
+PURGE = {self.purge}
 FILE_FORMAT = (
     TYPE = JSON
     STRIP_OUTER_ARRAY = {strip_outer_array}
-    {null_if}
+    {self.null_if}
     {extra_options}
-    {compression_format}
+    {self.compression_format}
 )
 {match_by_columnName}'''
         return sql
 
-    def build_copy_other(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, format: str, compression_format: str, null_if: str, purge: str) -> str:
+    def build_copy_other(self) -> str:
         common_options = [
             'NULL_IF'
         ]
-        extra_options = self.copy_extra_options(metadata_options, common_options)
+        extra_options = self.copy_extra_options(common_options)
         sql = f'''
-COPY INTO {table_name} 
-FROM @{sl_incoming_file_stage}/{domain} 
-PATTERN = '{pattern}'
-PURGE = {purge}
+COPY INTO {self.table_name} 
+FROM @{self.sl_incoming_file_stage}/{self.domain} 
+PATTERN = '{self.pattern}'
+PURGE = {self.purge}
 FILE_FORMAT = (
-    TYPE = {format}
-    {null_if}
+    TYPE = {self.format}
+    {self.null_if}
     {extra_options}
-    {compression_format}
+    {self.compression_format}
 )'''
         return sql
 
-    def build_copy(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, variant: str) -> str:
-        format: str = metadata.get('format', None)
-        if not format:
-            raise ValueError(f"Format for {sink} not found")
+    def build_copy(self) -> str:
+        if self.format == 'DSV':
+            return self.build_copy_csv()
+        elif self.format == 'JSON' or self.format == 'JSON_FLAT':
+            return self.build_copy_json()
+        elif self.format == 'PARQUET':
+            return self.build_copy_other()
+        elif self.format == 'XML':
+            return self.build_copy_other()
         else:
-            format = format.upper()
-
-        compression: bool = self.is_true(self.get_option(metadata_options, "compression", metadata), False)
-        if compression:
-            compression_format = "COMPRESSION = GZIP" 
-            extension = ".gz"
-        else:
-            compression_format = "COMPRESSION = NONE"
-            extension = ""
-
-        null_if = self.get_option(metadata_options, 'NULL_IF', metadata)
-        if not null_if and self.is_true(metadata.get('emptyIsNull', "true"), False):
-            null_if = "NULL_IF = ('')"
-        elif null_if:
-            null_if = f"NULL_IF = {null_if}"
-        else:
-            null_if = ""
-
-        purge = self.get_option(metadata_options, "PURGE", metadata)
-        if not purge:
-            purge = "FALSE"
-        else:
-            purge = purge.upper()
-
-        if format == 'DSV':
-            return self.build_copy_csv(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, compression_format, extension, null_if, purge)
-        elif format == 'JSON' or format == 'JSON_FLAT':
-            return self.build_copy_json(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, compression_format, null_if, purge, variant)
-        elif format == 'PARQUET':
-            return self.build_copy_other(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, format, compression_format, null_if, purge)
-        elif format == 'XML':
-            return self.build_copy_other(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, format, compression_format, null_if, purge)
-        else:
-            raise ValueError(f"Unsupported format {format}")
-  
+            raise ValueError(f"Unsupported format {self.format}")
