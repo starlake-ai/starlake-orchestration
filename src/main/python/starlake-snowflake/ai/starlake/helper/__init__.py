@@ -56,6 +56,29 @@ class SnowflakeHelper:
         self.safe_params = defaultdict(lambda: 'NULL', {})
         self.timezone = timezone if timezone else 'UTC'
 
+    def str_to_bool(self, value: str) -> bool:
+        """Convert a string to a boolean.
+        Args:
+            value (str): The string to convert.
+        Returns:
+            bool: The boolean value.
+        """
+        truthy = {'yes', 'y', 'true', '1'}
+        falsy = {'no', 'n', 'false', '0'}
+
+        value = value.strip().lower()
+        if value in truthy:
+            return True
+        elif value in falsy:
+            return False
+        raise ValueError(f"Valeur invalide : {value}")
+
+    def is_true(self, value: str, default: bool) -> bool:
+        if value is None:
+            return default
+        return value.lower() == "true"
+
+    # Logging
     def info(self, message: str, dry_run: bool = False) -> None:
         """Print an info message.
         Args:
@@ -100,23 +123,7 @@ class SnowflakeHelper:
         else:
             self.logger.debug(message)
 
-    def str_to_bool(self, value: str) -> bool:
-        """Convert a string to a boolean.
-        Args:
-            value (str): The string to convert.
-        Returns:
-            bool: The boolean value.
-        """
-        truthy = {'yes', 'y', 'true', '1'}
-        falsy = {'no', 'n', 'false', '0'}
-
-        value = value.strip().lower()
-        if value in truthy:
-            return True
-        elif value in falsy:
-            return False
-        raise ValueError(f"Valeur invalide : {value}")
-
+    # SQL Execution
     def bindParams(self, stmt: str) -> str:
         """Bind parameters to the SQL statement.
         Args:
@@ -165,6 +172,39 @@ class SnowflakeHelper:
             for sql in sqls:
                 self.execute_sql(session, sql, None, dry_run)
 
+    # Datasets
+    def check_if_dataset_exists(self, session: Session, dataset: str) -> bool:
+        """Check if the dataset exists.
+        Args:
+            session (Session): The Snowflake session.
+            dataset (str): The dataset.
+            Returns:
+            bool: True if the dataset exists, False otherwise.
+        """
+        query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'"
+        return self.execute_sql(session, query, f"Check if dataset {dataset} exists:", False).__len__() > 0
+
+    # Domains
+    def create_domain_if_not_exists(self, session: Session, domain: str, dry_run: bool = False) -> None:
+        """Create the schema if it does not exist.
+        Args:
+            session (Session): The Snowflake session.
+            domain (str): The domain.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        """
+        self.execute_sql(session, f"CREATE SCHEMA IF NOT EXISTS {domain}", f"Create schema {domain} if not exists:", dry_run)
+
+    # Change Tracking
+    def enable_change_tracking(self, session: Session, sink: str, dry_run: bool = False) -> None:
+        """Enable change tracking.
+        Args:
+            session (Session): The Snowflake session.
+            sink (str): The sink.
+            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
+        """
+        self.execute_sql(session, f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE", "Enable change tracking:", dry_run)
+
+    # Transactions
     def begin_transaction(self, session: Session, dry_run: bool = False) -> None:
         """Begin the transaction.
         Args:
@@ -189,46 +229,53 @@ class SnowflakeHelper:
         """
         self.execute_sql(session, "ROLLBACK", "ROLLBACK transaction:", dry_run)
 
-    def create_domain_if_not_exists(self, session: Session, domain: str, dry_run: bool = False) -> None:
-        """Create the schema if it does not exist.
-        Args:
-            session (Session): The Snowflake session.
-            domain (str): The domain.
-            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-        """
-        self.execute_sql(session, f"CREATE SCHEMA IF NOT EXISTS {domain}", f"Create schema {domain} if not exists:", dry_run)
-
-    def enable_change_tracking(self, session: Session, sink: str, dry_run: bool = False) -> None:
-        """Enable change tracking.
-        Args:
-            session (Session): The Snowflake session.
-            sink (str): The sink.
-            dry_run (bool, optional): Whether to run in dry run mode. Defaults to False.
-        """
-        self.execute_sql(session, f"ALTER TABLE {sink} SET CHANGE_TRACKING = TRUE", "Enable change tracking:", dry_run)
-
+    # Schema
     def schema_as_dict(self, schema_string: str) -> dict:
         tableNativeSchema = map(lambda x: (x.split()[0].strip(), x.split()[1].strip()), schema_string.replace("\"", "").split(","))
         tableSchemaDict = dict(map(lambda x: (x[0].lower(), x[1].lower()), tableNativeSchema))
         return tableSchemaDict
 
-    def add_columns_from_dict(self, dictionary: dict):
+    def add_columns_from_dict(self, domain: str, table: str, dictionary: dict):
         return [f"ALTER TABLE IF EXISTS {domain}.{table} ADD COLUMN IF NOT EXISTS {k} {v} NULL;" for k, v in dictionary.items()]
 
-    def drop_columns_from_dict(self, dictionary: dict):
+    def drop_columns_from_dict(self, domain: str, table: str, dictionary: dict):
         return [f"ALTER TABLE IF EXISTS {domain}.{table} DROP COLUMN IF EXISTS {col};" for col in dictionary.keys()]
 
-    def check_if_dataset_exists(self, session: Session, dataset: str) -> bool:
-        """Check if the dataset exists.
-        Args:
-            session (Session): The Snowflake session.
-            dataset (str): The dataset.
-            Returns:
-            bool: True if the dataset exists, False otherwise.
-        """
-        query=f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) ILIKE '{dataset}'"
-        return self.execute_sql(session, query, f"Check if dataset {dataset} exists:", False).__len__() > 0
+    def update_table_schema(self, session: Session, domain: str, table: str, schema_string: str, sync_strategy: Optional[str], dry_run: bool) -> bool:
+        if not sync_strategy:
+            sync_strategy = "NONE"
+        sync_strategy = sync_strategy.upper()
+        existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{domain}' and table_name ilike '{table}';"
+        rows = self.execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {domain}.{table}", False)
+        existing_columns = []
+        for row in rows:
+            existing_columns.append((str(row[0]).lower(), str(row[1]).lower()))
+        existing_schema = dict(existing_columns)
+        if dry_run:
+            print(f"-- Existing schema for {domain}.{table}: {existing_schema}") 
+        if schema_string.strip() == "":
+            return False
+        new_schema = self.schema_as_dict(schema_string)
+        new_columns = set(new_schema.keys()) - set(existing_schema.keys())
+        old_columns = set(existing_schema.keys()) - set(new_schema.keys())
+        nb_new_columns = new_columns.__len__()
+        nb_old_columns = old_columns.__len__()
+        update_required = nb_new_columns + nb_old_columns > 0
+        if not update_required:
+            if dry_run:
+                print(f"-- No schema update required for {domain}.{table}")
+            return False
+        new_columns_dict = {key: new_schema[key] for key in new_columns}
+        alter_columns = self.add_columns_from_dict(domain, table, new_columns_dict)
+        if sync_strategy == "ALL" or sync_strategy == "ADD":
+            self.execute_sqls(session, alter_columns, "Add columns", dry_run)
+        old_columns_dict = {key: existing_schema[key] for key in old_columns}
+        drop_columns = self.drop_columns_from_dict(domain, table, old_columns_dict)
+        if sync_strategy == "ALL":
+            self.execute_sqls(session, drop_columns, "Drop columns", dry_run)
+        return True
 
+    # Audit
     def check_if_audit_table_exists(self, session: Session, audit: dict, dry_run: bool = False) -> bool:
         """Check if the audit table exists.
         Args:
@@ -326,7 +373,7 @@ class SnowflakeHelper:
             rows_loaded = 0
             errors_seen = 0
             for row in rows:
-                info(f"Row: {row}", dry_run=dry_run)
+                self.info(f"Row: {row}", dry_run=dry_run)
                 row_dict = row.as_dict()
                 file = row_dict.get('file', None)
                 if file:
@@ -342,6 +389,7 @@ class SnowflakeHelper:
                 errors_seen += row_dict.get('errors_seen', 0)
             return ','.join(files), ','.join(first_error_lines), ','.join(first_error_column_names), rows_parsed, rows_loaded, errors_seen
 
+    # Expectations
     def check_if_expectations_table_exists(session: Session, expectations: dict, dry_run: bool = False) -> bool:
         """Check if the expectations table exists.
         Args:
@@ -461,6 +509,7 @@ class SnowflakeHelper:
             for expectation in expectation_items:
                 self.run_expectation(session, expectations, expectation.get("name", None), expectation.get("params", None), expectation.get("query", None), self.str_to_bool(expectation.get('failOnError', 'no')), jobid, dry_run)
 
+    # Dates
     def get_start_end_dates(self, cron_expr: str, current_date: datetime) -> tuple[datetime, datetime]:
         """Get the start and end dates by applying the cron expression to the current date.
         Args:
@@ -537,6 +586,19 @@ class SnowflakeHelper:
             return ts
         return self.as_datetime(logical_date)
 
+    def as_datetime(self, value: Union[str, datetime]) -> datetime:
+        """Convert a string to a datetime object.
+        Args:
+            value (str): The string to convert.
+        Returns:
+            datetime: The datetime object.
+        """
+        if isinstance(value, str):
+            from dateutil import parser
+            value = parser.parse(value).astimezone(pytz.timezone(self.timezone))
+        return value.astimezone(pytz.timezone(self.timezone))
+
+    # DAG Runs
     def get_previous_dag_run(self, session: Session, logical_date: datetime, dry_run: bool, at_scheduled_date: bool = False) -> Optional[tuple[datetime, datetime]]:
         """Get the previous DAG run.
         Args:
@@ -638,14 +700,138 @@ ORDER BY SCHEDULED_DATE DESC, TIMESTAMP DESC
             return (self.as_datetime(rows[0][0]), self.as_datetime(rows[0][1]))
         return None
 
-    def as_datetime(self, value: Union[str, datetime]) -> datetime:
-        """Convert a string to a datetime object.
-        Args:
-            value (str): The string to convert.
-        Returns:
-            datetime: The datetime object.
-        """
-        if isinstance(value, str):
-            from dateutil import parser
-            value = parser.parse(value).astimezone(pytz.timezone(self.timezone))
-        return value.astimezone(pytz.timezone(self.timezone))
+    # Copy data
+    def get_option(self, metadata_options: dict, key: str, metadata: dict, metadata_key: Optional[str] = None, default_value: Optional[str] = None) -> Optional[str]:
+        if metadata_options and key.lower() in metadata_options:
+            return metadata_options.get(key.lower(), None)
+        elif metadata_key and metadata.get(metadata_key, None):
+            return metadata[metadata_key].replace('\\', '\\\\')
+        return default_value
+
+    def copy_extra_options(self, metadata_options: dict, common_options: list[str]):
+        extra_options = ""
+        if metadata_options:
+            for k, v in metadata_options.items():
+                if k.upper().startswith("SNOWFLAKE_"):
+                    newKey = k[len("SNOWFLAKE_"):]
+                    if not newKey in common_options:
+                        extra_options += f"{newKey} = {v}\n"
+        return extra_options
+
+    def build_copy_csv(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, compression_format: str, extension: str, null_if: str, purge: str) -> str:
+        skipCount = self.get_option(metadata_options, "SKIP_HEADER", metadata)
+        if not skipCount and self.is_true(metadata.get('withHeader', 'true'), False):
+            skipCount = '1'
+
+        common_options = [
+            'SKIP_HEADER', 
+            'NULL_IF', 
+            'FIELD_OPTIONALLY_ENCLOSED_BY', 
+            'FIELD_DELIMITER',
+            'ESCAPE_UNENCLOSED_FIELD', 
+            'ENCODING'
+        ]
+        extra_options = self.copy_extra_options(metadata_options, common_options)
+        sql = f'''
+COPY INTO {table_name} 
+FROM @{sl_incoming_file_stage}/{domain}/
+PATTERN = '{pattern}{extension}'
+PURGE = {purge}
+FILE_FORMAT = (
+    TYPE = CSV
+    ERROR_ON_COLUMN_COUNT_MISMATCH = false
+    SKIP_HEADER = {skipCount} 
+    FIELD_OPTIONALLY_ENCLOSED_BY = '{self.get_option(metadata_options, 'FIELD_OPTIONALLY_ENCLOSED_BY', metadata, 'quote')}' 
+    FIELD_DELIMITER = '{self.get_option(metadata_options, 'FIELD_DELIMITER', metadata, 'separator')}' 
+    ESCAPE_UNENCLOSED_FIELD = '{self.get_option(metadata_options, 'ESCAPE_UNENCLOSED_FIELD', metadata, 'escape')}' 
+    ENCODING = '{self.get_option(metadata_options, 'ENCODING', metadata, 'encoding')}'
+    {null_if}
+    {extra_options}
+    {compression_format}
+)'''
+        return sql
+
+    def build_copy_json(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, compression_format: str, null_if: str, purge: str, variant: str) -> str:
+        strip_outer_array = self.get_option(metadata_options, "STRIP_OUTER_ARRAY", metadata, default_value='true')
+        common_options = [
+            'STRIP_OUTER_ARRAY', 
+            'NULL_IF'
+        ]
+        extra_options = self.copy_extra_options(metadata_options, common_options)
+        if (variant == "false"):
+            match_by_columnName = "MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE"
+        else:
+            match_by_columnName = ''
+        sql = f'''
+COPY INTO {table_name} 
+FROM @{sl_incoming_file_stage}/{domain}
+PATTERN = '{pattern}'
+PURGE = {purge}
+FILE_FORMAT = (
+    TYPE = JSON
+    STRIP_OUTER_ARRAY = {strip_outer_array}
+    {null_if}
+    {extra_options}
+    {compression_format}
+)
+{match_by_columnName}'''
+        return sql
+
+    def build_copy_other(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, format: str, compression_format: str, null_if: str, purge: str) -> str:
+        common_options = [
+            'NULL_IF'
+        ]
+        extra_options = self.copy_extra_options(metadata_options, common_options)
+        sql = f'''
+COPY INTO {table_name} 
+FROM @{sl_incoming_file_stage}/{domain} 
+PATTERN = '{pattern}'
+PURGE = {purge}
+FILE_FORMAT = (
+    TYPE = {format}
+    {null_if}
+    {extra_options}
+    {compression_format}
+)'''
+        return sql
+
+    def build_copy(self, sl_incoming_file_stage: str, pattern: str, domain: str, table_name: str, metadata_options: dict, metadata: dict, variant: str) -> str:
+        format: str = metadata.get('format', None)
+        if not format:
+            raise ValueError(f"Format for {sink} not found")
+        else:
+            format = format.upper()
+
+        compression: bool = self.is_true(self.get_option(metadata_options, "compression", metadata), False)
+        if compression:
+            compression_format = "COMPRESSION = GZIP" 
+            extension = ".gz"
+        else:
+            compression_format = "COMPRESSION = NONE"
+            extension = ""
+
+        null_if = self.get_option(metadata_options, 'NULL_IF', metadata)
+        if not null_if and self.is_true(metadata.get('emptyIsNull', "true"), False):
+            null_if = "NULL_IF = ('')"
+        elif null_if:
+            null_if = f"NULL_IF = {null_if}"
+        else:
+            null_if = ""
+
+        purge = self.get_option(metadata_options, "PURGE", metadata)
+        if not purge:
+            purge = "FALSE"
+        else:
+            purge = purge.upper()
+
+        if format == 'DSV':
+            return self.build_copy_csv(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, compression_format, extension, null_if, purge)
+        elif format == 'JSON' or format == 'JSON_FLAT':
+            return self.build_copy_json(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, compression_format, null_if, purge, variant)
+        elif format == 'PARQUET':
+            return self.build_copy_other(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, format, compression_format, null_if, purge)
+        elif format == 'XML':
+            return self.build_copy_other(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, format, compression_format, null_if, purge)
+        else:
+            raise ValueError(f"Unsupported format {format}")
+  
