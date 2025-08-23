@@ -14,7 +14,6 @@ from snowflake.core.task.dagv1 import DAGTask
 from snowflake.snowpark import Session
 
 from datetime import datetime
-import pytz
 
 class SnowflakeEvent(AbstractEvent[StarlakeDataset]):
     @classmethod
@@ -284,13 +283,15 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         execute_sqls = helper.execute_sqls
         get_execution_date = helper.get_execution_date
         as_datetime = helper.as_datetime
-        get_logical_date = helper.get_logical_date
+        # get_logical_date = helper.get_logical_date
         get_start_end_dates = helper.get_start_end_dates
         check_if_dataset_exists = helper.check_if_dataset_exists
         create_domain_if_not_exists = helper.create_domain_if_not_exists
         log_audit = helper.log_audit
         get_audit_info = helper.get_audit_info
         run_expectations = helper.run_expectations
+        update_table_schema = helper.update_table_schema
+        build_copy = helper.build_copy
 
         sink = kwargs.get('sink', None)
         if not task_type and len(arguments) > 0:
@@ -318,43 +319,6 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                             for key, value in [opt.split("=")]
                         })
                     break
-
-            def update_table_schema(session: Session, schema_string: str, sync_strategy: Optional[str], dry_run: bool) -> bool:
-                if not sync_strategy:
-                    sync_strategy = "NONE"
-                sync_strategy = sync_strategy.upper()
-                existing_schema_sql = f"select column_name, data_type from information_schema.columns where table_schema ilike '{domain}' and table_name ilike '{table}';"
-                rows = execute_sql(session, existing_schema_sql, f"Retrieve existing schema for {domain}.{table}", False)
-                existing_columns = []
-                for row in rows:
-                    existing_columns.append((str(row[0]).lower(), str(row[1]).lower()))
-                existing_schema = dict(existing_columns)
-                if dry_run:
-                    print(f"-- Existing schema for {domain}.{table}: {existing_schema}") 
-                if schema_string.strip() == "":
-                    return False
-                new_schema = schema_as_dict(schema_string)
-                new_columns = set(new_schema.keys()) - set(existing_schema.keys())
-                old_columns = set(existing_schema.keys()) - set(new_schema.keys())
-                nb_new_columns = new_columns.__len__()
-                nb_old_columns = old_columns.__len__()
-                update_required = nb_new_columns + nb_old_columns > 0
-                if not update_required:
-                    if dry_run:
-                        print(f"-- No schema update required for {domain}.{table}")
-                    return False
-                new_columns_dict = {key: new_schema[key] for key in new_columns}
-                old_columns_dict = {key: existing_schema[key] for key in old_columns}
-                alter_columns = add_columns_from_dict(new_columns_dict)
-                if sync_strategy == "ALL" or sync_strategy == "ADD":
-                    execute_sqls(session, alter_columns, "Add columns", dry_run)
-
-                old_columns_dict = {key: existing_schema[key] for key in old_columns}
-                drop_columns = drop_columns_from_dict(old_columns_dict)
-                if sync_strategy == "ALL":
-                    execute_sqls(session, drop_columns, "Drop columns", dry_run)
-
-                return True
 
             def get_logical_date(session: Session, backfill: bool = False, dry_run: bool = False) -> datetime:
                 """Get the logical date of the running dag.
@@ -481,7 +445,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                 # enable change tracking
                                 # enable_change_tracking(session, sink, dry_run)
                                 # update table schema
-                                update_table_schema(session, schema_string=",".join(statements.get("targetSchema", [])), sync_strategy=statements.get("syncStrategy", None), dry_run=dry_run)
+                                update_table_schema(session, domain, table, schema_string=",".join(statements.get("targetSchema", [])), sync_strategy=statements.get("syncStrategy", None), dry_run=dry_run)
                                 # execute addSCD2ColumnsSqls
                                 execute_sqls(session, statements.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                 # execute mainSqlIfExists
@@ -543,156 +507,15 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                         sl_incoming_file_stage = self.sl_incoming_file_stage
                         if not sl_incoming_file_stage:
                             raise ValueError(f"sl_incoming_file_stage for {sink} not found")
-                        temp_table_name = context.get('tempTableName', None)
+                        table_name = context.get('tempTableName', None) or sink
+                        variant = context.get('variant', "false")
                         context_schema: dict = context.get('schema', dict())
                         pattern: str = context_schema.get('pattern', None)
                         if not pattern:
                             raise ValueError(f"Pattern for {sink} not found")
                         metadata: dict = context_schema.get('metadata', dict())
-                        format: str = metadata.get('format', None)
-                        if not format:
-                            raise ValueError(f"Format for {sink} not found")
-                        else:
-                            format = format.upper()
                         metadata_options: dict = metadata.get("options", dict())
 
-                        def get_option(key: str, metadata_key: Optional[str] = None, default_value: Optional[str] = None) -> Optional[str]:
-                            if metadata_options and key.lower() in metadata_options:
-                                return metadata_options.get(key.lower(), None)
-                            elif metadata_key and metadata.get(metadata_key, None):
-                                return metadata[metadata_key].replace('\\', '\\\\')
-                            return default_value
-
-                        def is_true(value: str, default: bool) -> bool:
-                            if value is None:
-                                return default
-                            return value.lower() == "true"
-
-                        def copy_extra_options(common_options: list[str]):
-                            extra_options = ""
-                            if metadata_options:
-                                for k, v in metadata_options.items():
-                                    if k.upper().startswith("SNOWFLAKE_"):
-                                        newKey = k[len("SNOWFLAKE_"):]
-                                        if not newKey in common_options:
-                                            extra_options += f"{newKey} = {v}\n"
-                            return extra_options
-
-                        compression = is_true(get_option("compression"), False)
-                        if compression:
-                            compression_format = "COMPRESSION = GZIP" 
-                        else:
-                            compression_format = "COMPRESSION = NONE"
-
-                        null_if = get_option('NULL_IF')
-                        if not null_if and is_true(metadata.get('emptyIsNull', "true"), False):
-                            null_if = "NULL_IF = ('')"
-                        elif null_if:
-                            null_if = f"NULL_IF = {null_if}"
-                        else:
-                            null_if = ""
-
-                        purge = get_option("PURGE")
-                        if not purge:
-                            purge = "FALSE"
-                        else:
-                            purge = purge.upper()
-
-                        def build_copy_csv() -> str:
-                            skipCount = get_option("SKIP_HEADER")
-
-                            if not skipCount and is_true(metadata.get('withHeader', 'true'), False):
-                                skipCount = '1'
-
-                            common_options = [
-                                'SKIP_HEADER', 
-                                'NULL_IF', 
-                                'FIELD_OPTIONALLY_ENCLOSED_BY', 
-                                'FIELD_DELIMITER',
-                                'ESCAPE_UNENCLOSED_FIELD', 
-                                'ENCODING'
-                            ]
-                            extra_options = copy_extra_options(common_options)
-                            if compression:
-                                extension = ".gz"
-                            else:
-                                extension = ""
-                            sql = f'''
-COPY INTO {temp_table_name or sink} 
-FROM @{sl_incoming_file_stage}/{domain}/
-PATTERN = '{pattern}{extension}'
-PURGE = {purge}
-FILE_FORMAT = (
-    TYPE = CSV
-    ERROR_ON_COLUMN_COUNT_MISMATCH = false
-    SKIP_HEADER = {skipCount} 
-    FIELD_OPTIONALLY_ENCLOSED_BY = '{get_option('FIELD_OPTIONALLY_ENCLOSED_BY', 'quote')}' 
-    FIELD_DELIMITER = '{get_option('FIELD_DELIMITER', 'separator')}' 
-    ESCAPE_UNENCLOSED_FIELD = '{get_option('ESCAPE_UNENCLOSED_FIELD', 'escape')}' 
-    ENCODING = '{get_option('ENCODING', 'encoding')}'
-    {null_if}
-    {extra_options}
-    {compression_format}
-)'''
-                            return sql
-
-                        def build_copy_json() -> str:
-                            strip_outer_array = get_option("STRIP_OUTER_ARRAY", default_value='true')
-                            common_options = [
-                                'STRIP_OUTER_ARRAY', 
-                                'NULL_IF'
-                            ]
-                            extra_options = copy_extra_options(common_options)
-                            variant = context.get('variant', "false")
-                            if (variant == "false"):
-                                match_by_columnName = "MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE"
-                            else:
-                                ''
-                            sql = f'''
-COPY INTO {temp_table_name or sink} 
-FROM @{sl_incoming_file_stage}/{domain}
-PATTERN = '{pattern}'
-PURGE = {purge}
-FILE_FORMAT = (
-    TYPE = JSON
-    STRIP_OUTER_ARRAY = {strip_outer_array}
-    {null_if}
-    {extra_options}
-    {compression_format}
-)
-{match_by_columnName}'''
-                            return sql
-                            
-                        def build_copy_other(format: str) -> str:
-                            common_options = [
-                                'NULL_IF'
-                            ]
-                            extra_options = copy_extra_options(common_options)
-                            sql = f'''
-COPY INTO {temp_table_name or sink} 
-FROM @{sl_incoming_file_stage}/{domain} 
-PATTERN = '{pattern}'
-PURGE = {purge}
-FILE_FORMAT = (
-    TYPE = {format}
-    {null_if}
-    {extra_options}
-    {compression_format}
-)'''
-                            return sql
-
-                        def build_copy() -> str:
-                            if format == 'DSV':
-                                return build_copy_csv()
-                            elif format == 'JSON' or format == 'JSON_FLAT':
-                                return build_copy_json()
-                            elif format == 'PARQUET':
-                                return build_copy_other(format)
-                            elif format == 'XML':
-                                return build_copy_other(format)
-                            else:
-                                raise ValueError(f"Unsupported format {format}")
-  
                         # create the function that will execute the load
                         def fun(session: Session, dry_run: bool, logical_date: Optional[str] = None) -> None:
                             # get the current job id
@@ -738,12 +561,12 @@ FILE_FORMAT = (
                                         # enable change tracking
                                         # enable_change_tracking(session, sink, dry_run)
                                         # update table schema
-                                        update_table_schema(session, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
+                                        update_table_schema(session, domain, table, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
                                     if write_strategy == 'WRITE_TRUNCATE':
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
                                     # copy data
-                                    copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
+                                    copy_results = execute_sql(session, build_copy(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, variant), "Copy data", dry_run)
                                     if not exists:
                                         # enable change tracking
                                         # enable_change_tracking(session, sink, dry_run)
@@ -755,7 +578,7 @@ FILE_FORMAT = (
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
                                     # copy data
-                                    copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
+                                    copy_results = execute_sql(session, build_copy(sl_incoming_file_stage, pattern, domain, table_name, metadata_options, metadata, variant), "Copy data", dry_run)
                                     second_step = statements.get('secondStep', dict())
                                     # execute preActions
                                     execute_sqls(session, second_step.get('preActions', []), "Pre actions", dry_run)
@@ -767,7 +590,7 @@ FILE_FORMAT = (
                                         # execute addSCD2ColumnsSqls
                                         execute_sqls(session, second_step.get('addSCD2ColumnsSqls', []), "Add SCD2 columns", dry_run)
                                         # update schema
-                                        update_table_schema(session, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
+                                        update_table_schema(session, domain, table, schema_string=statements.get("schemaString", ""), sync_strategy="ADD", dry_run=dry_run)
                                         # execute mainSqlIfExists
                                         execute_sqls(session, second_step.get('mainSqlIfExists', []), "Main sql if exists", dry_run)
                                     else:
