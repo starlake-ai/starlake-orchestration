@@ -3,12 +3,10 @@ from snowflake.snowpark.dataframe import DataFrame
 
 from typing import List, Optional, Tuple, Union
 
-from types import ModuleType
-
 from croniter import croniter
 from croniter.croniter import CroniterBadCronError
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytz
 
@@ -836,9 +834,10 @@ class SnowflakeLoadTaskHelper(SnowflakeTaskHelper):
             extension = ""
         sql = f'''
 COPY INTO {self.table_name} 
-FROM @{self.sl_incoming_file_stage}/{self.domain}/
+FROM @{self.sl_incoming_file_stage}/{self.domain}
 PATTERN = '.*\/{self.pattern}{extension}'
 PURGE = {self.purge}
+FORCE = TRUE
 FILE_FORMAT = (
     TYPE = CSV
     ERROR_ON_COLUMN_COUNT_MISMATCH = false
@@ -869,6 +868,7 @@ COPY INTO {self.table_name}
 FROM @{self.sl_incoming_file_stage}/{self.domain}
 PATTERN = '.*\/{self.pattern}'
 PURGE = {self.purge}
+FORCE = TRUE
 FILE_FORMAT = (
     TYPE = JSON
     STRIP_OUTER_ARRAY = {strip_outer_array}
@@ -889,6 +889,7 @@ COPY INTO {self.table_name}
 FROM @{self.sl_incoming_file_stage}/{self.domain} 
 PATTERN = '.*\/{self.pattern}'
 PURGE = {self.purge}
+FORCE = TRUE
 FILE_FORMAT = (
     TYPE = {self.format}
     {self.null_if}
@@ -908,4 +909,3 @@ FILE_FORMAT = (
             return self.build_copy_other()
         else:
             raise ValueError(f"Unsupported format {self.format}")
-
