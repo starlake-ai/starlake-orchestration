@@ -783,7 +783,7 @@ class SnowflakeLoadTaskHelper(SnowflakeTaskHelper):
         self.metadata = metadata
         self.metadata_options: dict = metadata.get("options", dict())
         self.variant = variant
-        # Datasets areas
+        # Staging areas
         sl_incoming_area = sl_incoming_file_stage
         tmp = sl_incoming_area.split('/')
         if len(tmp) > 1:

@@ -549,7 +549,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
                                     # copy files
-                                    copy_files(session, from_area=SnowflakeArea.INCOMING, to_area=SnowflakeArea.INGESTING, remove=False, dry_run=dry_run)
+                                    copy_files(session, from_area=SnowflakeArea.INCOMING, to_area=SnowflakeArea.INGESTING, remove=True, dry_run=dry_run)
                                     # copy data
                                     copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     if not exists:
@@ -563,7 +563,7 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                                         # truncate table
                                         execute_sql(session, f"TRUNCATE TABLE {sink}", "Truncate table", dry_run)
                                     # copy files
-                                    copy_files(session, from_area=SnowflakeArea.INCOMING, to_area=SnowflakeArea.INGESTING, remove=False, dry_run=dry_run)
+                                    copy_files(session, from_area=SnowflakeArea.INCOMING, to_area=SnowflakeArea.INGESTING, remove=True, dry_run=dry_run)
                                     # copy data
                                     copy_results = execute_sql(session, build_copy(), "Copy data", dry_run)
                                     second_step = statements.get('secondStep', dict())
