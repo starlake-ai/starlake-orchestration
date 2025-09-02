@@ -442,7 +442,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             "user": kwargs.get('SNOWFLAKE_USER', env.get('SNOWFLAKE_USER', None)),
             "password": kwargs.get('SNOWFLAKE_PASSWORD', env.get('SNOWFLAKE_PASSWORD', None)),
             "database": kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None)),
-            "schema": kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None)),
+            "schema": kwargs.get('SNOWFLAKE_SL_TASK_SCHEMA', env.get('SNOWFLAKE_SL_TASK_SCHEMA', None)),
             "warehouse": kwargs.get('SNOWFLAKE_WAREHOUSE', env.get('SNOWFLAKE_WAREHOUSE', None)),
         }
         return Session.builder.configs(options).create()
@@ -453,7 +453,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         env = os.environ.copy() # Copy the current environment variables
         session = self.__class__.session(**kwargs)
         database = kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None))
-        schema = kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None))
+        schema = kwargs.get('SNOWFLAKE_SL_TASK_SCHEMA', env.get('SNOWFLAKE_SL_TASK_SCHEMA', None))
         if database is None or schema is None:
             raise StarlakeSnowflakeError("Database and schema must be provided to deploy the pipeline")
         stage_name = f"{database}.{schema}.{self.stage_location}".upper()
@@ -469,7 +469,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
         env = os.environ.copy() # Copy the current environment variables
         session = self.__class__.session(**kwargs)
         database = kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None))
-        schema = kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None))
+        schema = kwargs.get('SNOWFLAKE_SL_TASK_SCHEMA', env.get('SNOWFLAKE_SL_TASK_SCHEMA', None))
         if database is None or schema is None:
             raise StarlakeSnowflakeError("Database and schema must be provided to delete the pipeline")
         op = self.get_dag_operation(session, database, schema)
@@ -501,7 +501,7 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             import os
             env = os.environ.copy() # Copy the current environment variables
             database = kwargs.get('SNOWFLAKE_DB', env.get('SNOWFLAKE_DB', None))
-            schema = kwargs.get('SNOWFLAKE_SCHEMA', env.get('SNOWFLAKE_SCHEMA', None))
+            schema = kwargs.get('SNOWFLAKE_SL_TASK_SCHEMA', env.get('SNOWFLAKE_SL_TASK_SCHEMA', None))
             op = self.get_dag_operation(session, database, schema)
             task = op.schema.tasks[self.pipeline_id]
             config = dict() # TODO load the config from the task
