@@ -463,7 +463,7 @@ task_deps=json.loads("""[ {
   "task" : true
 } ]""")
 
-load_dependencies: bool = sl_job.get_context_var(var_name='load_dependencies', default_value='False', options=options).lower() == 'true'
+run_dependencies: bool = sl_job.get_context_var(var_name='run_dependencies', default_value='False', options=options).lower() == 'true'
 
 datasets: Set[str] = set()
 
@@ -505,7 +505,7 @@ def _load_datasets(task: dict):
 def _load_schedule():
     if _cron:
         schedule = _cron
-    elif not load_dependencies : # the DAG will do not depend on any datasets because all the related dependencies will be executed
+    elif not run_dependencies : # the DAG will do not depend on any datasets because all the related dependencies will be executed
         for task in task_deps:
             _load_datasets(task)
         schedule = list(map(lambda dataset: Dataset(dataset), datasets))
@@ -593,7 +593,7 @@ with DAG(dag_id=os.path.basename(__file__).replace(".py", "").replace(".pyc", ""
             airflow_task_id = airflow_task_group_id + "_table"
 
         children = []
-        if load_dependencies and 'children' in task: 
+        if run_dependencies and 'children' in task: 
             children = task['children']
         else:
             for child in task.get('children', []):
@@ -643,7 +643,7 @@ with DAG(dag_id=os.path.basename(__file__).replace(".py", "").replace(".pyc", ""
 
 ![transform without dependencies](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/bashTransformWithoutDependencies.png)
 
-If you want to load the dependencies, you just need to set the `load_dependencies` option to `True`:
+If you want to load the dependencies, you just need to set the `run_dependencies` option to `True`:
 
 ![transform without dependencies](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/bashTransformWithDependencies.png)
 

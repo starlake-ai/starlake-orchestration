@@ -466,8 +466,8 @@ task_deps=json.loads("""[ {
 
 job_name = os.path.basename(__file__).replace(".py", "").replace(".pyc", "").lower()
 
-# if you want to load dependencies, set load_dependencies to True in the options
-load_dependencies: bool = sl_job.get_context_var(var_name='load_dependencies', default_value='False', options=options).lower() == 'true'
+# if you want to load dependencies, set run_dependencies to True in the options
+run_dependencies: bool = sl_job.get_context_var(var_name='run_dependencies', default_value='False', options=options).lower() == 'true'
 
 sensor = None
 
@@ -493,7 +493,7 @@ for task in task_deps:
     load_task_dependencies(task)
 
 # if you choose to not load the dependencies, a sensor will be created to check if the dependencies are met
-if not load_dependencies:
+if not run_dependencies:
 
     def load_assets(task: dict):
         if 'children' in task:
@@ -598,7 +598,7 @@ def generate_node_for_task(task, dependencies: dict, nodes: List[NodeDefinition]
     task_id = compute_task_id(task)
 
     children = []
-    if load_dependencies and 'children' in task: 
+    if run_dependencies and 'children' in task: 
         children = task['children']
     else:
         for child in task.get('children', []):
@@ -703,7 +703,7 @@ defs = Definitions(
 
 ![transform job generated with StarlakeDagsterShellJob without dependencies](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/dagster/transformWithoutDependencies.png)
 
-If we want to load the dependencies, we just need to set the `load_dependencies` option to `True`:
+If we want to load the dependencies, we just need to set the `run_dependencies` option to `True`:
 
 ![transform job generated with StarlakeDagsterShellJob with dependencies](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/dagster/transformWithDependencies.png)
 
