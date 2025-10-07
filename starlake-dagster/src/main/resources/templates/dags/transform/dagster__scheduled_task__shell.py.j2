@@ -11,6 +11,6 @@
 # - beyond_data_cycle_enabled(True): whether the beyond data cycle feature is enabled or not [OPTIONAL]
 # - optional_dataset_enabled(False): whether a dataset can be treated as optional [OPTIONAL]
 #
-{% include 'templates/dags/__starlake_dagster_orchestrator.py' %}
+{% include 'templates/dags/__starlake_dagster_orchestrator.py.j2' %}
 {% include 'templates/dags/__starlake_shell_execution.py' %}
 {% include 'templates/dags/transform/__scheduled_task_tpl.py.j2' %}

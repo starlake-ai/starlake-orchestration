@@ -6,7 +6,7 @@
 # - retries(1): the number of retries to attempt before failing the task [OPTIONAL]
 # - retry_delay(300): the delay between retries in seconds [OPTIONAL]
 #
-{% include 'templates/dags/__starlake_sl_orchestrator.py' %}
-{% include 'templates/dags/__starlake_sql_execution.py' %}
+{% include 'templates/dags/__starlake_sl_orchestrator.py.j2' %}
+{% include 'templates/dags/__starlake_sql_execution.py.j2' %}
 provider = '{{ provider }}'
 {% include 'templates/dags/transform/__scheduled_task_tpl.py.j2' %}

@@ -19,6 +19,6 @@
 # - optional_dataset_enabled(False): whether a dataset can be treated as optional [OPTIONAL]
 # - dataset_triggering_strategy(any): the dataset triggering strategy to be used for the non scheduled dag, one of any or all (if not set the default 'any' strategy will be used) [OPTIONAL]
 # Naming rule: scheduled or sensor, global or domain or table, cloudrun or bash or dataproc or serverless with free-text
-{% include 'templates/dags/__starlake_dagster_orchestrator.py' %}
+{% include 'templates/dags/__starlake_dagster_orchestrator.py.j2' %}
 {% include 'templates/dags/__starlake_cloud_run_execution.py' %}
 {% include 'templates/dags/transform/__scheduled_task_tpl.py.j2' %}

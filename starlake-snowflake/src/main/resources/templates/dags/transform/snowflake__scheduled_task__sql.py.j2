@@ -18,6 +18,6 @@
 # - beyond_data_cycle_enabled(True): whether the beyond data cycle feature is enabled or not [OPTIONAL]
 # - min_timedelta_between_runs(900): the minimum time delta in seconds between two consecutive runs [OPTIONAL], default to 15 minutes
 #
-{% include 'templates/dags/__starlake_snowflake_orchestrator.py' %}
-{% include 'templates/dags/__starlake_sql_execution.py' %}
+{% include 'templates/dags/__starlake_snowflake_orchestrator.py.j2' %}
+{% include 'templates/dags/__starlake_sql_execution.py.j2' %}
 {% include 'templates/dags/transform/__scheduled_task_tpl.py.j2' %}
