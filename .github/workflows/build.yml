@@ -1,0 +1,50 @@
+name: Build Maven + PyPI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '!main'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - '**'
+
+env:
+  JAVA_VERSION: 17
+  PYTHON_VERSION: 3.11
+  MAVEN_OPTS: -Xmx1G
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Configure Java + Maven
+      - name: Set up Java and Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      # 3️⃣ Configure Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # 4️⃣ Install required Python dependencies for packaging
+      - name: Install Python build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install setuptools wheel twine
+
+      # 5️⃣ Build and packaging (JAR + Python)
+      - name: Build project (JAR + Python packages)
+        run: mvn -B clean package
+

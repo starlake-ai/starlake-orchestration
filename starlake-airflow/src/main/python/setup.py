@@ -7,8 +7,12 @@ from setuptools import find_packages
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
+import os
+
+version = os.environ.get("PROJECT_VERSION", "0.4.2")
+
 setup(name='starlake-airflow',
-      version='0.4.2',
+      version=version,
       description='Starlake Python Distribution For Airflow',
       long_description=long_description,
       long_description_content_type="text/markdown",
@@ -25,5 +29,5 @@ setup(name='starlake-airflow',
         "aws": [],
         "azure": [],
       },
-#      python_requires='>=3.8',
+      python_requires='>=3.8'
 )

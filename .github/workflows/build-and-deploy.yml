@@ -1,0 +1,135 @@
+
+name: Build & Deploy Maven + PyPI
+
+on:
+  push:
+    branches:
+      - main
+      - release/*
+  tags:
+    - "v*.*.*"
+
+env:
+  JAVA_VERSION: 17
+  PYTHON_VERSION: 3.11
+  MAVEN_OPTS: -Xmx1G
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      root_changed: ${{ steps.filter.outputs.root }}
+      py_sl_airflow_changed: ${{ steps.filter.outputs.py_sl_airflow }}
+      jar_sl_airflow_changed: ${{ steps.filter.outputs.jar_sl_airflow }}
+      py_sl_dagster_changed: ${{ steps.filter.outputs.py_sl_dagster }}
+      jar_sl_dagster_changed: ${{ steps.filter.outputs.jar_sl_dagster }}
+      py_sl_orchestration_changed: ${{ steps.filter.outputs.py_sl_orchestration }}
+      jar_sl_orchestration_changed: ${{ steps.filter.outputs.jar_sl_orchestration }}
+      py_sl_snowflake_changed: ${{ steps.filter.outputs.py_sl_snowflake }}
+      jar_sl_snowflake_changed: ${{ steps.filter.outputs.jar_sl_snowflake }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            root:
+              - 'pom.xml'
+            py_sl_airflow:
+              - 'starlake-airflow/src/main/python/**'
+            jar_sl_airflow:
+              - 'starlake-airflow/src/main/resources/**'
+            py_sl_dagster:
+              - 'starlake-dagster/src/main/python/**'
+            jar_sl_dagster:
+              - 'starlake-dagster/src/main/resources/**'
+            py_sl_orchestration:
+              - 'starlake-orchestration/src/main/python/**'
+            jar_sl_orchestration:
+              - 'starlake-orchestration/src/main/resources/**'
+            py_sl_snowflake:
+              - 'starlake-snowflake/src/main/python/**'
+            jar_sl_snowflake:
+              - 'starlake-snowflake/src/main/resources/**'
+
+  deploy-artefacts:
+    needs: detect-changes
+    if: >
+      startsWith(github.ref, 'refs/tags/v') &&
+      (
+        needs.detect-changes.outputs.root_changed == 'true' ||
+        needs.detect-changes.outputs.jar_sl_airflow_changed == 'true' ||
+        needs.detect-changes.outputs.jar_sl_dagster_changed == 'true' ||
+        needs.detect-changes.outputs.jar_sl_orchestration_changed == 'true' ||
+        needs.detect-changes.outputs.jar_sl_snowflake_changed == 'true' ||
+        needs.detect-changes.outputs.py_sl_airflow_changed == 'true' ||
+        needs.detect-changes.outputs.py_sl_dagster_changed == 'true' ||
+        needs.detect-changes.outputs.py_sl_orchestration_changed == 'true' ||
+        needs.detect-changes.outputs.py_sl_snowflake_changed == 'true'
+      )
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module:
+          - name: root
+            jar_changed: ${{ needs.detect-changes.outputs.root_changed }}
+            py_changed: 'false'
+          - name: starlake-airflow
+            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_airflow_changed }}
+            py_changed: ${{ needs.detect-changes.outputs.py_sl_airflow_changed }}
+          - name: starlake-dagster
+            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_dagster_changed }}
+            py_changed: ${{ needs.detect-changes.outputs.py_sl_dagster_changed }}
+          - name: starlake-orchestration
+            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_orchestration_changed }}
+            py_changed: ${{ needs.detect-changes.outputs.py_sl_orchestration_changed }}
+          - name: starlake-snowflake
+            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_snowflake_changed }}
+            py_changed: ${{ needs.detect-changes.outputs.py_sl_snowflake_changed }}
+    steps:
+      # 1️⃣ Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Configure Java + Maven
+      - name: Set up Java and Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          server-id: ossrh
+          server-username: ${{ secrets.OSSRH_USERNAME }}
+          server-password: ${{ secrets.OSSRH_PASSWORD }}
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      # 3️⃣ Configure Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set Python executable
+        run: echo "python.executable=$(which python3)" >> $GITHUB_ENV
+
+      # 4️⃣ Install required Python dependencies for packaging
+      - name: Install Python build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install setuptools wheel twine
+
+      # 5️⃣ Jar and PyPI Deployment
+      - name: Deploy ${{ matrix.module.name }}
+        if: ${{ matrix.module.jar_changed == 'true' || matrix.module.py_changed == 'true' }}
+        run: |
+          PROFILE=all
+          if [[ "${{ matrix.module.jar_changed }}" == "true" && "${{ matrix.module.py_changed }}" == "false" ]]; then
+            PROFILE=jar
+          elif [[ "${{ matrix.module.jar_changed }}" == "false" && "${{ matrix.module.py_changed }}" == "true" ]]; then
+            PROFILE=py
+          fi
+          echo "Activating Maven profile: $PROFILE for module ${{ matrix.module.name }}"
+          mvn -B deploy -nsu -pl ${{ matrix.module.name }} -P $PROFILE
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}

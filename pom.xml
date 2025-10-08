@@ -1,0 +1,282 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>ai.starlake</groupId>
+    <artifactId>orchestration</artifactId>
+    <version>0.4.2</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>starlake-orchestration</module>
+        <module>starlake-airflow</module>
+        <module>starlake-dagster</module>
+        <module>starlake-snowflake</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <python.executable>python3</python.executable>
+        <python.repo.url>https://upload.pypi.org/legacy/</python.repo.url>
+    </properties>
+
+    <distributionManagement>
+        <repository>
+            <id>ossrh</id>
+            <name>Sonatype Releases</name>
+            <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+        </repository>
+        <snapshotRepository>
+            <id>ossrh</id>
+            <name>Sonatype Snapshots</name>
+            <url>https://s01.oss.sonatype.org/content/repositories/snapshots/</url>
+        </snapshotRepository>
+    </distributionManagement>
+
+    <pluginRepositories>
+        <pluginRepository>
+            <id>ossrh</id>
+            <name>Sonatype OSSRH</name>
+            <url>https://s01.oss.sonatype.org/content/repositories/releases/</url>
+        </pluginRepository>
+    </pluginRepositories>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!-- plugin for jar packaging -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.3.0</version>
+                    <configuration>
+                        <includes>
+                            <include>**/*</include>
+                        </includes>
+                    </configuration>
+                </plugin>
+
+                <!-- GPG signature -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-gpg-plugin</artifactId>
+                    <version>3.2.4</version>
+                    <executions>
+                        <execution>
+                            <id>sign-artifacts</id>
+                            <phase>verify</phase>
+                            <goals><goal>sign</goal></goals>
+                        </execution>
+                    </executions>
+                    <configuration>
+                        <gpgArguments>
+                            <arg>--batch</arg>
+                            <arg>--pinentry-mode</arg>
+                            <arg>loopback</arg>
+                        </gpgArguments>
+                        <passphrase>${env.GPG_PASSPHRASE}</passphrase>
+                    </configuration>
+                </plugin>
+
+                <!-- OSSRH publication -->
+                <plugin>
+                    <groupId>org.sonatype.plugins</groupId>
+                    <artifactId>nexus-staging-maven-plugin</artifactId>
+                    <version>1.7.0</version>
+                    <extensions>true</extensions>
+                    <configuration>
+                        <serverId>ossrh</serverId>
+                        <nexusUrl>https://s01.oss.sonatype.org/</nexusUrl>
+                        <autoReleaseAfterClose>true</autoReleaseAfterClose>
+                    </configuration>
+                </plugin>
+
+                <!-- plugin to deploy jar -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-deploy-plugin</artifactId>
+                    <version>3.1.2</version>
+                </plugin>
+
+                <!-- copy README.md to src/main/python before packaging -->
+                <plugin>
+                    <artifactId>maven-resources-plugin</artifactId>
+                    <version>3.3.1</version>
+                    <executions>
+                        <execution>
+                            <id>copy-readme</id>
+                            <phase>generate-sources</phase>
+                            <goals>
+                                <goal>copy-resources</goal>
+                            </goals>
+                            <configuration>
+                                <outputDirectory>${project.basedir}/src/main/python</outputDirectory>
+                                <resources>
+                                    <resource>
+                                        <directory>${project.basedir}</directory>
+                                        <includes>
+                                            <include>README.md</include>
+                                        </includes>
+                                        <filtering>false</filtering>
+                                    </resource>
+                                </resources>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+
+                <!-- plugin to build and deploy Python package -->
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>exec-maven-plugin</artifactId>
+                    <version>3.1.0</version>
+
+                    <executions>
+                        <!-- build Python package -->
+                        <execution>
+                            <id>build-python-package</id>
+                            <phase>package</phase>
+                            <goals><goal>exec</goal></goals>
+                            <configuration>
+                                <executable>${python.executable}</executable>
+                                <workingDirectory>${project.basedir}/src/main/python</workingDirectory>
+                                <arguments>
+                                    <argument>-m</argument>
+                                    <argument>build</argument>
+                                    <argument>--outdir</argument>
+                                    <argument>${project.build.directory}/dist</argument>
+                                </arguments>
+                                <environmentVariables>
+                                    <PROJECT_VERSION>${project.version}</PROJECT_VERSION>
+                                </environmentVariables>
+                            </configuration>
+                        </execution>
+
+                        <!-- deploy Python package to PyPI -->
+                        <execution>
+                            <id>deploy-python-package</id>
+                            <phase>deploy</phase>
+                            <goals><goal>exec</goal></goals>
+                            <configuration>
+                                <executable>${python.executable}</executable>
+                                <workingDirectory>${project.build.directory}</workingDirectory>
+                                <arguments>
+                                    <argument>-m</argument>
+                                    <argument>twine</argument>
+                                    <argument>upload</argument>
+                                    <argument>--repository-url</argument>
+                                    <argument>${python.repo.url}</argument>
+                                    <argument>dist/*</argument>
+                                </arguments>
+                                <environmentVariables>
+                                    <TWINE_USERNAME>__token__</TWINE_USERNAME>
+                                    <TWINE_PASSWORD>${env.PYPI_TOKEN}</TWINE_PASSWORD>
+                                </environmentVariables>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+
+    <!-- ====================================================================== -->
+    <!-- 3️⃣ Profils : release / snapshot / deploy -->
+    <!-- ====================================================================== -->
+    <profiles>
+
+        <!-- Profil RELEASE activated if version does not include snapshot -->
+        <profile>
+            <id>release</id>
+            <activation>
+                <property>
+                    <name>!project.version</name>
+                    <value>*-SNAPSHOT</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.sonatype.plugins</groupId>
+                        <artifactId>nexus-staging-maven-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Profil SNAPSHOT activated if version includes -SNAPSHOT -->
+        <profile>
+            <id>snapshot</id>
+            <activation>
+                <property>
+                    <name>project.version</name>
+                    <value>*-SNAPSHOT</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-deploy-plugin</artifactId>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- JAR ONLY -->
+        <profile>
+            <id>jar</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <build>
+                <plugins>
+                    <!-- skip Python plugin -->
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- PY only -->
+        <profile>
+            <id>py</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+            <build>
+                <plugins>
+                    <!-- skip build/deploy JAR -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- JAR + PY -->
+        <profile>
+            <id>all</id>
+            <activation>
+                <activeByDefault>false</activeByDefault>
+            </activation>
+        </profile>
+    </profiles>
+</project>

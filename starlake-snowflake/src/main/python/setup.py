@@ -7,8 +7,12 @@ from setuptools import find_packages
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
+import os
+
+version = os.environ.get("PROJECT_VERSION", "0.3.3")
+
 setup(name='starlake-snowflake',
-      version='0.3.3',
+      version=version,
       description='Starlake Python Distribution For Snowflake',
       long_description=long_description,
       long_description_content_type="text/markdown",

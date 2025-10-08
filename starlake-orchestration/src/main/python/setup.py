@@ -7,8 +7,12 @@ from setuptools import find_packages
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
+import os
+
+version = os.environ.get("PROJECT_VERSION", "0.4.2")
+
 setup(name='starlake-orchestration',
-      version='0.4.2',
+      version=version,
       description='Starlake Python Distribution For orchestration',
       long_description=long_description,
       long_description_content_type="text/markdown",
