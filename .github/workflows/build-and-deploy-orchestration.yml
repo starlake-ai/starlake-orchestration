@@ -1,0 +1,57 @@
+name: Build & Deploy Maven + PyPI for Orchestration module
+
+on:
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: 17
+  PYTHON_VERSION: 3.11
+  MAVEN_OPTS: -Xmx1G
+
+jobs:
+  deploy-artefacts:
+    if: >
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      # 1️⃣ Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Configure Java + Maven
+      - name: Set up Java and Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          server-id: ossrh
+          server-username: ${{ secrets.SONATYPE_USERNAME }}
+          server-password: ${{ secrets.SONATYPE_PASSWORD }}
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      # 3️⃣ Configure Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set Python executable
+        run: echo "python.executable=$(which python3)" >> $GITHUB_ENV
+
+      # 4️⃣ Install required Python dependencies for packaging
+      - name: Install Python build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install setuptools wheel twine build
+
+      # 5️⃣ Jar and PyPI Deployment
+      - name: Deploy for Orchestration module
+        run: |
+          PROFILE=all
+          MODULE=starlake-orchestration
+          echo "Activating Maven profile: $PROFILE for module $MODULE"
+          mvn -B deploy -nsu -pl $MODULE -P $PROFILE
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
