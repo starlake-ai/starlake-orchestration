@@ -10,8 +10,6 @@ env:
 
 jobs:
   deploy-artefacts:
-    if: >
-      startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       # 1️⃣ Checkout
