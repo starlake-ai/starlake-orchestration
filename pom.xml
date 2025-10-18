@@ -4,9 +4,19 @@
                              http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <name>Starlake Orchestration</name>
+    <description>Starlake Orchestration Modules</description>
+    <url>https://starlake.ai</url>
+    <inceptionYear>2025</inceptionYear>
+
+    <organization>
+        <name>Starlake AI</name>
+        <url>https://starlake.ai</url>
+    </organization>
+
     <groupId>ai.starlake</groupId>
     <artifactId>orchestration</artifactId>
-    <version>0.4.2</version>
+    <version>0.4.3</version>
     <packaging>pom</packaging>
 
     <modules>
@@ -129,6 +139,39 @@
                     </executions>
                 </plugin>
 
+                <!-- plugin to manage license headers in Python files -->
+                <plugin>
+                    <groupId>com.mycila</groupId>
+                    <artifactId>license-maven-plugin</artifactId>
+                    <version>4.2</version>
+                    <configuration>
+                        <properties>
+                            <year>${project.inceptionYear}</year>
+                            <owner>${project.organization.name}</owner>
+                            <url>${project.organization.url}</url>
+                        </properties>
+                        <licenseSets>
+                            <licenseSet>
+                                <header>${project.basedir}/../LICENSE.txt</header>
+                                <excludes>
+                                    <exclude>src/main/python/setup.py</exclude>
+                                </excludes>
+                                <includes>
+                                    <include>src/main/python/**/*.py</include>
+                                </includes>
+                            </licenseSet>
+                        </licenseSets>
+                        <!--<strictCheck>false</strictCheck>//-->
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <phase>validate</phase>
+                            <goals>
+                                <goal>format</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
                 <!-- plugin to build and deploy Python package -->
                 <plugin>
                     <groupId>org.codehaus.mojo</groupId>

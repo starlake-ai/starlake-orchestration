@@ -5,12 +5,12 @@
     <parent>
         <groupId>ai.starlake</groupId>
         <artifactId>orchestration</artifactId>
-        <version>0.4.2</version>
+        <version>0.4.3</version>
     </parent>
 
     <modelVersion>4.0.0</modelVersion>
     <artifactId>starlake-snowflake</artifactId>
-    <version>0.3.3</version>
+    <version>0.3.4</version>
     <packaging>jar</packaging>
 
     <build>
@@ -22,6 +22,11 @@
             </plugin>
             <plugin>
                 <artifactId>maven-resources-plugin</artifactId>
+            </plugin>
+            <!-- License Management -->
+            <plugin>
+                <groupId>com.mycila</groupId>
+                <artifactId>license-maven-plugin</artifactId>
             </plugin>
             <!-- Build and Deploy Python module -->
             <plugin>

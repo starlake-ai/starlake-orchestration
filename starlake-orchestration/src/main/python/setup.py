@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.4.2")
+version = os.environ.get("PROJECT_VERSION", "0.4.3")
 
 setup(name='starlake-orchestration',
       version=version,
@@ -24,7 +24,7 @@ setup(name='starlake-orchestration',
       extras_require={
         "airflow": ["starlake-airflow~=0.4"],
         "dagster": ["starlake-dagster~=0.4"],
-        "snowflake": ["starlake-snowflake~=0.2"],
+        "snowflake": ["starlake-snowflake~=0.3"],
         "shell": [],
         "gcp": [],
         "aws": [],
