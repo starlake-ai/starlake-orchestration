@@ -5,8 +5,8 @@ on:
     branches:
       - main
       - release/*
-  tags:
-    - "v*.*.*"
+    tags:
+      - "v*.*.*"
 
 env:
   JAVA_VERSION: 17
