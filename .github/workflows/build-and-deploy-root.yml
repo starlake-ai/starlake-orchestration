@@ -36,7 +36,7 @@ jobs:
       # 3️⃣ Jar Deployment
       - name: Deploy Orchestration
         run: |
-          PROFILE=jar
+          PROFILE=release
           echo "Activating Maven profile: $PROFILE for root module"
           mvn --non-recursive deploy -P $PROFILE
         env:
