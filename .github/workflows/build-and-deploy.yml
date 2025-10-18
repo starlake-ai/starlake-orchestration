@@ -1,4 +1,3 @@
-
 name: Build & Deploy Maven + PyPI
 
 on:
@@ -99,8 +98,8 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
           server-id: ossrh
-          server-username: ${{ secrets.OSSRH_USERNAME }}
-          server-password: ${{ secrets.OSSRH_PASSWORD }}
+          server-username: ${{ secrets.SONATYPE_USERNAME }}
+          server-password: ${{ secrets.SONATYPE_PASSWORD }}
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
