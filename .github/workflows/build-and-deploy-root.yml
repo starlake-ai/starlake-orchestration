@@ -29,6 +29,10 @@ jobs:
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
+      # Check Maven settings
+      - name: Verify Maven settings
+        run: mvn help:effective-settings
+
       # 3️⃣ Jar Deployment
       - name: Deploy Orchestration
         run: |
