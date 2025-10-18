@@ -83,6 +83,7 @@
                         </execution>
                     </executions>
                     <configuration>
+                        <signer>bc</signer>
                         <gpgArguments>
                             <arg>--batch</arg>
                             <arg>--pinentry-mode</arg>
