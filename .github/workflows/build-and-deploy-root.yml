@@ -39,5 +39,3 @@ jobs:
           PROFILE=release
           echo "Activating Maven profile: $PROFILE for root module"
           mvn --non-recursive deploy -P $PROFILE
-        env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
