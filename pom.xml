@@ -232,14 +232,11 @@
     <!-- ====================================================================== -->
     <profiles>
 
-        <!-- Profil RELEASE activated if version does not include snapshot -->
+        <!-- Profil RELEASE activated by default -->
         <profile>
             <id>release</id>
             <activation>
-                <property>
-                    <name>!project.version</name>
-                    <value>*-SNAPSHOT</value>
-                </property>
+                <activeByDefault>true</activeByDefault>
             </activation>
             <build>
                 <plugins>
@@ -255,20 +252,28 @@
             </build>
         </profile>
 
-        <!-- Profil SNAPSHOT activated if version includes -SNAPSHOT -->
+        <!-- Profil SNAPSHOT to activate if version includes -SNAPSHOT -->
         <profile>
             <id>snapshot</id>
-            <activation>
-                <property>
-                    <name>project.version</name>
-                    <value>*-SNAPSHOT</value>
-                </property>
-            </activation>
             <build>
                 <plugins>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-deploy-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.plugins</groupId>
+                        <artifactId>nexus-staging-maven-plugin</artifactId>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
                     </plugin>
                 </plugins>
             </build>
