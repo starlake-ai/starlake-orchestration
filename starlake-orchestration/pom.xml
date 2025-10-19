@@ -8,6 +8,22 @@
         <version>0.4.3</version>
     </parent>
 
+    <name>Starlake Orchestration for Airflow</name>
+    <description>Starlake Orchestration templates and python library for Airflow</description>
+    <url>https://starlake.ai</url>
+
+    <organization>
+        <name>Starlake AI</name>
+        <url>https://starlake.ai</url>
+    </organization>
+
+    <licenses>
+        <license>
+            <name>The Apache License, Version 2.0</name>
+            <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+        </license>
+    </licenses>
+
     <modelVersion>4.0.0</modelVersion>
     <artifactId>starlake-orchestration</artifactId>
     <packaging>jar</packaging>
