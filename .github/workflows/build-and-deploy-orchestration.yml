@@ -46,7 +46,7 @@ jobs:
       # 5️⃣ Jar and PyPI Deployment
       - name: Deploy for Orchestration module
         run: |
-          PROFILE=py
+          PROFILE=all
           MODULE=starlake-orchestration
           echo "Activating Maven profile: $PROFILE for module $MODULE"
           mvn -B deploy -nsu -pl $MODULE -P $PROFILE
