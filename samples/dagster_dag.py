@@ -16,10 +16,7 @@ options={
     'run_dependencies_first':'true', 
     'retries':'1',
     'retry_delay':'30',
-    'stage_location':'staging',
-    'schema': 'starbake',
-    'warehouse':'COMPUTE_WH',
-    'SL_STARLAKE_PATH': '/Users/smanciot/starlake/starlake'
+    'SL_STARLAKE_PATH': 'starlake'
 }
 
 from ai.starlake.job import StarlakeJobFactory

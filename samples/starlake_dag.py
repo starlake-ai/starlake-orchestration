@@ -15,10 +15,7 @@ options={
     'tags':'starlake', 
     'run_dependencies_first':'false', 
     'retries':'1',
-    'retry_delay':'30',
-    'stage_location':'staging',
-    'schema': 'starbake',
-    'warehouse':'COMPUTE_WH',
+    'retry_delay':'30'
 }
 
 from ai.starlake.job import StarlakeJobFactory
