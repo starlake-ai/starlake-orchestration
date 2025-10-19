@@ -116,13 +116,6 @@
                     </configuration>
                 </plugin>
 
-                <!-- plugin to deploy jar -->
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-deploy-plugin</artifactId>
-                    <version>3.1.2</version>
-                </plugin>
-
                 <!-- copy README.md to src/main/python before packaging -->
                 <plugin>
                     <artifactId>maven-resources-plugin</artifactId>
