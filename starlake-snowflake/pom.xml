@@ -51,7 +51,7 @@
                     <execution>
                         <id>deploy-python-package</id>
                         <configuration>
-                            <workingDirectory>${project.basedir}/src/main/python</workingDirectory>
+                            <workingDirectory>${project.build.directory}</workingDirectory>
                         </configuration>
                     </execution>
                 </executions>
