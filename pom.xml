@@ -21,6 +21,23 @@
         </license>
     </licenses>
 
+    <scm>
+        <connection>scm:git:git://github.com/starlake-ai/starlake.git</connection>
+        <developerConnection>scm:git:ssh://github.com:starlake-ai/starlake.git</developerConnection>
+        <url>https://github.com/starlake-ai/starlake</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <developers>
+        <developer>
+            <id>fupelaqu</id>
+            <name>Stéphane Manciot</name>
+            <email>admin@softnetwork.fr</email>
+            <organization>Softnetwork</organization>
+            <organizationUrl>https://github.com/SOFTNETWORK-APP</organizationUrl>
+        </developer>
+    </developers>
+
     <groupId>ai.starlake</groupId>
     <artifactId>orchestration</artifactId>
     <version>0.4.3</version>
