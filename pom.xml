@@ -232,15 +232,15 @@
     </build>
 
     <!-- ====================================================================== -->
-    <!-- 3️⃣ Profils : release / snapshot / deploy -->
+    <!-- 3️⃣ Profils : release / snapshot / jar / py -->
     <!-- ====================================================================== -->
     <profiles>
 
-        <!-- Profil RELEASE activated by default -->
+        <!-- Profil RELEASE -->
         <profile>
             <id>release</id>
             <activation>
-                <activeByDefault>true</activeByDefault>
+                <activeByDefault>false</activeByDefault>
             </activation>
             <build>
                 <plugins>
@@ -284,13 +284,22 @@
             </activation>
             <build>
                 <plugins>
-                    <!-- skip Python plugin -->
+                    <!-- Build Java module -->
                     <plugin>
-                        <groupId>org.codehaus.mojo</groupId>
-                        <artifactId>exec-maven-plugin</artifactId>
-                        <configuration>
-                            <skip>true</skip>
-                        </configuration>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <artifactId>maven-resources-plugin</artifactId>
+                    </plugin>
+                    <!-- Signing and Publishing -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
                     </plugin>
                 </plugins>
             </build>
@@ -304,7 +313,6 @@
             </activation>
             <build>
                 <plugins>
-                    <!-- skip build/sign/deploy JAR -->
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-jar-plugin</artifactId>
@@ -313,15 +321,14 @@
                         </configuration>
                     </plugin>
                     <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-gpg-plugin</artifactId>
+                        <artifactId>maven-resources-plugin</artifactId>
                         <configuration>
                             <skip>true</skip>
                         </configuration>
                     </plugin>
                     <plugin>
-                        <groupId>org.sonatype.central</groupId>
-                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-install-plugin</artifactId>
                         <configuration>
                             <skip>true</skip>
                         </configuration>
@@ -333,6 +340,30 @@
                             <skip>true</skip>
                         </configuration>
                     </plugin>
+                    <!-- License Management -->
+                    <plugin>
+                        <groupId>com.mycila</groupId>
+                        <artifactId>license-maven-plugin</artifactId>
+                    </plugin>
+                    <!-- Build and Deploy Python module -->
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>build-python-package</id>
+                                <configuration>
+                                    <workingDirectory>${project.basedir}/src/main/python</workingDirectory>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>deploy-python-package</id>
+                                <configuration>
+                                    <workingDirectory>${project.build.directory}</workingDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
                 </plugins>
             </build>
         </profile>
@@ -343,6 +374,51 @@
             <activation>
                 <activeByDefault>false</activeByDefault>
             </activation>
+            <build>
+                <plugins>
+                    <!-- Build Java module -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <artifactId>maven-resources-plugin</artifactId>
+                    </plugin>
+                    <!-- License Management -->
+                    <plugin>
+                        <groupId>com.mycila</groupId>
+                        <artifactId>license-maven-plugin</artifactId>
+                    </plugin>
+                    <!-- Signing and Publishing -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                    </plugin>
+                    <!-- Build and Deploy Python module -->
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>build-python-package</id>
+                                <configuration>
+                                    <workingDirectory>${project.basedir}/src/main/python</workingDirectory>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>deploy-python-package</id>
+                                <configuration>
+                                    <workingDirectory>${project.build.directory}</workingDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
     </profiles>
 </project>
