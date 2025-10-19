@@ -8,8 +8,8 @@
         <version>0.4.3</version>
     </parent>
 
-    <name>Starlake Orchestration for Airflow</name>
-    <description>Starlake Orchestration templates and python library for Airflow</description>
+    <name>Starlake Orchestration</name>
+    <description>Starlake Orchestration templates and python library</description>
     <url>https://starlake.ai</url>
 
     <organization>
