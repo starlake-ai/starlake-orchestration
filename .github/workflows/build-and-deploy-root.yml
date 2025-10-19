@@ -31,7 +31,7 @@ jobs:
 
       # Check private gpg key is set up correctly
       - name: Verify GPG key
-        run: gpg --list-secret-keys
+        run: gpg --list-secret-keys --keyid-format LONG
 
       # 3️⃣ Jar Deployment
       - name: Deploy Orchestration
@@ -42,5 +42,5 @@ jobs:
         env:
           OSSRH_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           OSSRH_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
-          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          MAVEN_GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
