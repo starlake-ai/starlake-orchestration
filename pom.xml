@@ -314,14 +314,11 @@
             <build>
                 <plugins>
                     <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-jar-plugin</artifactId>
-                        <configuration>
-                            <skip>true</skip>
-                        </configuration>
+                        <artifactId>maven-resources-plugin</artifactId>
                     </plugin>
                     <plugin>
-                        <artifactId>maven-resources-plugin</artifactId>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
                         <configuration>
                             <skip>true</skip>
                         </configuration>
