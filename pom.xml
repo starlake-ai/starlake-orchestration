@@ -22,9 +22,9 @@
     </licenses>
 
     <scm>
-        <connection>scm:git:git://github.com/starlake-ai/starlake.git</connection>
-        <developerConnection>scm:git:ssh://github.com:starlake-ai/starlake.git</developerConnection>
-        <url>https://github.com/starlake-ai/starlake</url>
+        <connection>scm:git:git://github.com/starlake-ai/starlake-orchestration.git</connection>
+        <developerConnection>scm:git:ssh://github.com:starlake-ai/starlake-orchestration.git</developerConnection>
+        <url>https://github.com/starlake-ai/starlake-orchestration</url>
         <tag>HEAD</tag>
     </scm>
 
