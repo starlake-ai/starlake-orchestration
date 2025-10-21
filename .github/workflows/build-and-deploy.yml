@@ -122,8 +122,15 @@ jobs:
         run: |
           PROFILE=all
           if [[ "${{ matrix.module.jar_changed }}" == "true" && "${{ matrix.module.py_changed }}" == "false" ]]; then
-            PROFILE=jar
+            if [[ "${{ matrix.module.name }}" == "root" ]]; then
+              echo "Root module changed, deploying the root pom."
+              PROFILE=release
+            else
+              echo "Only JAR changes detected for module ${{ matrix.module.name }}."
+              PROFILE=jar
+            fi
           elif [[ "${{ matrix.module.jar_changed }}" == "false" && "${{ matrix.module.py_changed }}" == "true" ]]; then
+            echo "Only Python changes detected for module ${{ matrix.module.name }}." 
             PROFILE=py
           fi
           echo "Activating Maven profile: $PROFILE for module ${{ matrix.module.name }}"
