@@ -325,11 +325,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 return filtered_query.all()
 
             @provide_session
-            def find_dataset_events(uri: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, session: Session=None) -> List[DatasetEvent]:
-                print(f'Finding dataset events for {uri} with data_interval_end between {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and {scheduled_date_to_check_max.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
+            def find_dataset_events(uri: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, scheduled_date: datetime, session: Session=None) -> List[DatasetEvent]:
                 from sqlalchemy import and_, asc
                 from sqlalchemy.orm import joinedload
-                events: List[DatasetEvent] = (
+                base_query = (
                     session.query(DatasetEvent)
                     .options(joinedload(DatasetEvent.dataset))
                     .join(DagRun, and_(
@@ -338,15 +337,28 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         DatasetEvent.timestamp <= ts
                     ))
                     .join(DatasetModel, DatasetEvent.dataset_id == DatasetModel.id)
-                    .filter(
-                        DagRun.data_interval_end > scheduled_date_to_check_min,
-                        DagRun.data_interval_end <= scheduled_date_to_check_max,
-                        DatasetModel.uri == uri
-                    )
-                    .order_by(asc(DagRun.data_interval_end))
-                    .all()
                 )
-                return events
+                if scheduled_date_to_check_max > scheduled_date: 
+                    # we should include the previous execution of the corresponding dataset
+                    print(f'Finding dataset events for {uri} with data_interval_end >= {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and <= {scheduled_date.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
+                    filtered_query = (
+                        base_query.filter(
+                            DagRun.data_interval_end >= scheduled_date_to_check_min,
+                            DagRun.data_interval_end <= scheduled_date,
+                            DatasetModel.uri == uri
+                        )
+                    )
+                else:
+                    print(f'Finding dataset events for {uri} with data_interval_end > {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and <= {scheduled_date_to_check_max.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
+                    filtered_query = (
+                        base_query.filter(
+                            DagRun.data_interval_end > scheduled_date_to_check_min,
+                            DagRun.data_interval_end <= scheduled_date_to_check_max,
+                            DatasetModel.uri == uri
+                        )
+                    )
+                
+                return filtered_query.order_by(asc(DagRun.data_interval_end)).all()
 
             @provide_session
             def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context, session: Session=None) -> bool:
@@ -439,13 +451,13 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             dates_range = scheduled_dates_range(cron, scheduled_date)
                         else:
                             dates_range = scheduled_dates_range(cron, croniter(cron, scheduled_date.replace(hour=0, minute=0, second=0, microsecond=0)).get_next(datetime))
-                        (scheduled_date_to_check_min, scheduled_date_to_check_max) = dates_range
+                        scheduled_date_to_check_min = dates_range[0]
+                        scheduled_date_to_check_max = dates_range[1]
                         if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
                             scheduled_date_to_check_min = previous_dag_checked
                         if beyond_data_cycle_allowed:
                             scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
                             scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
-                        # TODO check it - scheduled_date_to_check_max = max(scheduled_date_to_check_max, scheduled_date)
                         scheduled_datetime = get_scheduled_datetime(dataset)
                         if scheduled_datetime:
                             # we check if the scheduled datetime is between the scheduled date to check min and max
@@ -458,7 +470,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 if scheduled_datetime > max_scheduled_date:
                                     max_scheduled_date = scheduled_datetime
                         if not found:
-                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, session=session)
+                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
                             if events:
                                 dataset_events = events
                                 nb_events = len(events)
@@ -489,7 +501,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
                         scheduled_date_to_check_min = previous_dag_checked - timedelta(seconds=freshness)
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
-                        events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, session=session)
+                        events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
                         if events:
                             dataset_events = events
                             nb_events = len(events)
