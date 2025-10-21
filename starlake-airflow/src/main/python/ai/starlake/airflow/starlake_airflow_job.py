@@ -326,7 +326,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
             @provide_session
             def find_dataset_events(uri: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, scheduled_date: datetime, session: Session=None) -> List[DatasetEvent]:
-                print(f'Finding dataset events for {uri} with data_interval_end between {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and {scheduled_date_to_check_max.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
                 from sqlalchemy import and_, asc
                 from sqlalchemy.orm import joinedload
                 base_query = (
@@ -341,6 +340,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 )
                 if scheduled_date_to_check_max > scheduled_date: 
                     # we should include the previous execution of the corresponding dataset
+                    print(f'Finding dataset events for {uri} with data_interval_end >= {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and <= {scheduled_date.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
                     filtered_query = (
                         base_query.filter(
                             DagRun.data_interval_end >= scheduled_date_to_check_min,
@@ -349,6 +349,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         )
                     )
                 else:
+                    print(f'Finding dataset events for {uri} with data_interval_end > {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and <= {scheduled_date_to_check_max.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
                     filtered_query = (
                         base_query.filter(
                             DagRun.data_interval_end > scheduled_date_to_check_min,
