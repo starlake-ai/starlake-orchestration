@@ -5,7 +5,7 @@
     <parent>
         <groupId>ai.starlake</groupId>
         <artifactId>orchestration</artifactId>
-        <version>0.4.3</version>
+        <version>0.4.3.1</version>
     </parent>
 
     <name>Starlake Orchestration for Snowflake</name>
@@ -14,7 +14,7 @@
 
     <modelVersion>4.0.0</modelVersion>
     <artifactId>starlake-snowflake</artifactId>
-    <version>0.3.4</version>
+    <version>0.3.4.1</version>
     <packaging>jar</packaging>
 
 </project>
