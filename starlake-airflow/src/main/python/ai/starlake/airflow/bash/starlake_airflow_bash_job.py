@@ -32,6 +32,31 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
     """Airflow Starlake Bash Job."""
     def __init__(self, filename: str=None, module_name: str=None, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None]=None, options: dict=None, **kwargs):
         super().__init__(filename, module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
+        self.__sl_included_env_vars: list = str(__class__.get_context_var(var_name='sl_include_env_vars', default_value='GOOGLE_APPLICATION_CREDENTIALS,AWS_KEY_ID,AWS_SECRET_KEY', options=self.options)).split(',')
+
+    @property
+    def sl_included_env_vars(self) -> list:
+        """Returns the list of os environment variables to include.
+
+        Returns:
+            list: The list of os environment variables to include.
+        """
+        return self.__sl_included_env_vars
+
+    @property
+    def sl_os_env_vars(self) -> dict:
+        """Returns the os environment variables to use.
+
+        Returns:
+            dict: The os environment variables to use.
+        """
+        import os
+        env_vars = dict()
+        # Add the SL_ environment variables from the os environment variables
+        for key in self.sl_included_env_vars:
+            if key in os.environ:
+                env_vars[key] = os.environ[key]
+        return env_vars
 
     @classmethod
     def sl_execution_environment(cls) -> Union[StarlakeExecutionEnvironment, str]:
@@ -58,7 +83,7 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         """
         found = False
 
-        env = self.sl_env_vars.copy() # Copy the current sl env variables
+        env = {**self.sl_os_env_vars.copy(), **self.sl_env_vars.copy()} # Copy the current sl env variables
 
         if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
             arguments = [] if not arguments else arguments
