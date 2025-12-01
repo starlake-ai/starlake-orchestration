@@ -12,7 +12,7 @@
     <description>Starlake Orchestration templates and python library for Dagster</description>
     <url>https://starlake.ai</url>
 
-    <modelVersion>4.0.0</modelVersion>
+    <modelVersion>4.0.1</modelVersion>
     <artifactId>starlake-dagster</artifactId>
     <packaging>jar</packaging>
 
