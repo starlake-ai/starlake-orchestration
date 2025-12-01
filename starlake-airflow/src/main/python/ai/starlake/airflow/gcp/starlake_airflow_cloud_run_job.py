@@ -72,7 +72,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         super().__init__(filename, module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
         self.project_id = __class__.get_context_var(var_name='cloud_run_project_id', default_value=os.getenv("GCP_PROJECT"), options=self.options) if not project_id else project_id
         self.cloud_run_job_name = __class__.get_context_var(var_name='cloud_run_job_name', options=self.options) if not cloud_run_job_name else cloud_run_job_name
-        self.cloud_run_job_region = __class__.get_context_var('cloud_run_job_region', "europe-west1", self.options) if not cloud_run_job_region else cloud_run_job_region
+        self.cloud_run_job_region = __class__.get_context_var('cloud_run_job_region', default_value=os.getenv("GCP_REGION"), options=self.options) if not cloud_run_job_region else cloud_run_job_region
         self.cloud_run_service_account = __class__.get_context_var(var_name='cloud_run_service_account', default_value="", options=self.options) if not cloud_run_service_account else cloud_run_service_account
         if self.cloud_run_service_account:
             self.impersonate_service_account = f"--impersonate-service-account {self.cloud_run_service_account}"
