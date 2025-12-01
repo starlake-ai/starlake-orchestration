@@ -5,14 +5,14 @@
     <parent>
         <groupId>ai.starlake</groupId>
         <artifactId>orchestration</artifactId>
-        <version>0.4.3.1</version>
+        <version>0.4.3.2</version>
     </parent>
 
     <name>Starlake Orchestration for Dagster</name>
     <description>Starlake Orchestration templates and python library for Dagster</description>
     <url>https://starlake.ai</url>
 
-    <modelVersion>4.0.1</modelVersion>
+    <modelVersion>4.0.0</modelVersion>
     <artifactId>starlake-dagster</artifactId>
     <packaging>jar</packaging>
 
