@@ -800,9 +800,9 @@ Additional options may be specified to configure the **Cloud Run job**.
 
 | name                         | type | description                                                                  |
 | ---------------------------- | ---- | ---------------------------------------------------------------------------- |
-| **cloud_run_project_id**     | str  | the optional cloud run project id (the project id on which the composer has been instantiated by default) |
+| **cloud_run_project_id**     | str  | the required cloud run project id (the project id on which the composer has been instantiated by default) |
 | **cloud_run_job_name**       | str  | the required name of the cloud run job                                       |
-| **cloud_run_region**         | str  | the optional region (`europe-west1` by default)                              |
+| **cloud_run_region**         | str  | the required region of the cloud run job                                       |
 | **cloud_run_service_account** | str  | the optional cloud run service account                                                                    |
 
 ## Amazon Web Services

@@ -1,7 +1,7 @@
 # This template executes individual cloud run jobs and requires the following dag generation options set:
 #
-# - cloud_run_project_id: the project id where the job is located (if not set, the project id of the composer environment will be used) [OPTIONAL]
-# - cloud_run_job_region(europe-west1): the region where the job is located (if not set, europe-west1 will be used) [OPTIONAL]
+# - cloud_run_project_id: the project id where the job is located (if not set, the project id of the composer environment will be used) [REQUIRED]
+# - cloud_run_job_region: the region where the job is located [REQUIRED]
 # - cloud_run_job_name: the name of the job to execute [REQUIRED]
 # - cloud_run_service_account: the service account to use for cloud run (if not set, the default service account will be used) [OPTIONAL]
 # - cloud_run_async(True): whether to run the job asynchronously or not [OPTIONAL]
