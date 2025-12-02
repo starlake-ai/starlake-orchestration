@@ -288,7 +288,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         else:
             schedule_name = None
         if schedule_name:
-            pipeline_id = f"{pipeline_id}-{schedule_name}"
+            pipeline_id = f"{pipeline_id}_{schedule_name}" #dagster does not allow to have '-' in job definition names
         super().__init__(group_id=pipeline_id, orchestration_cls=orchestration_cls, group=dag, **kwargs)
         self.__orchestration = orchestration
         self.__job = job
