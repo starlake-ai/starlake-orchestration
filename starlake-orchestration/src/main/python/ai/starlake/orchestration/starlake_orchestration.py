@@ -288,7 +288,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         else:
             schedule_name = None
         if schedule_name:
-            pipeline_id = f"{pipeline_id}-{schedule_name}"
+            pipeline_id = f"{pipeline_id}_{schedule_name}" #dagster does not allow to have '-' in job definition names
         super().__init__(group_id=pipeline_id, orchestration_cls=orchestration_cls, group=dag, **kwargs)
         self.__orchestration = orchestration
         self.__job = job
@@ -759,7 +759,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             'schedule': self.schedule_name
         })
         kwargs['params'] = params
-        task_id = kwargs.get('task_id', IStarlakeJob.get_sl_pre_load_task_id(domain, self.pre_load_strategy, **kwargs))
+        task_id = kwargs.get('task_id', self.job.__class__.get_sl_pre_load_task_id(domain, self.pre_load_strategy, **kwargs))
         kwargs.pop('task_id', None)
         return self.orchestration.sl_create_task(
             task_id, 

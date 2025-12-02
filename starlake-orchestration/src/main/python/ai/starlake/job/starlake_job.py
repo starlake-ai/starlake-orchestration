@@ -422,7 +422,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         else:
             arguments = [TaskType.PRELOAD.value, "--domain", domain, "--tables", ",".join(tables), "--strategy", pre_load_strategy.value, "--options", "SL_RUN_MODE=main,SL_LOG_LEVEL=info"]
 
-            task_id = kwargs.get('task_id', __class__.get_sl_pre_load_task_id(domain, pre_load_strategy, **kwargs))
+            task_id = kwargs.get('task_id', self.__class__.get_sl_pre_load_task_id(domain, pre_load_strategy, **kwargs))
 
             kwargs.pop("task_id", None)
             
