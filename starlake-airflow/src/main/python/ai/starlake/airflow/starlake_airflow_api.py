@@ -214,7 +214,17 @@ class StarlakeAirflowApiClient:
             timeout=self.timeout,
         )
 
-        if not resp.ok:
+        # Resource not found
+        if resp.status_code == 404:
+            log.debug("Airflow API 404 Not Found for %s", url)
+            return None
+
+        # No content
+        if resp.status_code == 204:
+            return None
+
+        # Other errors
+        if not (200 <= resp.status_code < 300):
             log.error(
                 "Airflow API error %s %s: %s",
                 resp.status_code,
@@ -225,9 +235,7 @@ class StarlakeAirflowApiClient:
                 f"Airflow API error {resp.status_code} for {url}: {resp.text}"
             )
 
-        if resp.status_code == 204:
-            return None
-
+        # Normal JSON response
         return to_dotdict(resp.json())
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -258,6 +266,19 @@ class StarlakeAirflowApiClient:
     # -----------------------------------------------------------------------
     # Datasets (Airflow 2.10+) / Assets (Airflow 3.x)
     # -----------------------------------------------------------------------
+    def get_dataset_by_uri(self, uri: str) -> Optional[DotDict]:
+        """
+        Unified interface for dataset (Airflow 2.4+) and asset (Airflow 3.x) by URI.
+        """
+        if self._supports_assets:
+            # Airflow 3.x → assets
+            return self._get(f"assets/{uri}")
+
+        if self._supports_datasets:
+            # Airflow 2.4+ → datasets
+            return self._get(f"datasets/{uri}")
+
+        raise RuntimeError("Datasets are not supported on this Airflow version.")
 
     def list_events(self, **params) -> List[DotDict]:
         """

@@ -24,7 +24,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSpark
 
 from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
-from ai.starlake.airflow.starlake_airflow_api import supports_inlet_events, DotDict, StarlakeAirflowApiClient
+from ai.starlake.airflow.starlake_airflow_api import supports_assets, supports_datasets, supports_inlet_events, DotDict, StarlakeAirflowApiClient
 
 from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range
 
@@ -410,6 +410,190 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 )
 
                 return filtered_query.all()
+
+            def find_datasets_events_api(
+                    client: StarlakeAirflowApiClient,
+                    uri: str,
+                    scheduled_date_to_check_min: datetime,
+                    scheduled_date_to_check_max: datetime,
+                    ts: datetime,
+                    scheduled_date: datetime,
+            ) -> List[DotDict]:
+                """
+                API-based equivalent of the original SQLAlchemy-based find_dataset_events.
+
+                Steps:
+                1. Resolve dataset/asset ID from URI.
+                2. Fetch events for this ID with timestamp <= ts, ordered by timestamp.
+                3. Collect all producing DAG IDs from these events.
+                4. For each producing DAG, list DagRuns in the data_interval_end window.
+                5. Cross events with DagRuns via (source_dag_id, source_run_id).
+                6. Sort events by producing DagRun.data_interval_end ascending.
+                """
+
+                # ----------------------------------------------------------------------
+                # 1. Check feature support and resolve dataset/asset by URI
+                # ----------------------------------------------------------------------
+                if not supports_datasets() and not supports_assets():
+                    logging.info("Datasets/assets not supported on this Airflow version")
+                    return []
+
+                logging.info("Resolving dataset/asset by uri=%s", uri)
+
+                dataset: Optional[DotDict] = client.get_dataset_by_uri(uri)
+
+                if not dataset:
+                    logging.info("No dataset/asset found for uri=%s", uri)
+                    return []
+
+                dataset_or_asset_id: int = dataset.id
+
+                logging.info(
+                    "Resolved dataset/asset id=%s for uri=%s",
+                    dataset_or_asset_id,
+                    uri,
+                )
+
+                # ----------------------------------------------------------------------
+                # 2. Fetch events for this ID with timestamp <= ts (ordered)
+                # ----------------------------------------------------------------------
+                logging.info(
+                    "Listing dataset/asset events for id=%s with timestamp <= %s",
+                    dataset_or_asset_id,
+                    ts.isoformat(),
+                )
+
+                params_events: Dict[str, Any] = {
+                    "timestamp_lte": ts.isoformat(),
+                    "order_by": ["timestamp"],
+                    "limit": 1000,
+                }
+
+                if supports_assets():
+                    params_events["asset_id"] = dataset_or_asset_id
+                else:
+                    params_events["dataset_id"] = dataset_or_asset_id
+
+                events: List[DotDict] = client.list_events(params=params_events)
+
+                if not events:
+                    logging.info(
+                        "No events found for uri=%s and timestamp <= %s",
+                        uri,
+                        ts.isoformat(),
+                    )
+                    return []
+
+                logging.info("Found %d events for uri=%s", len(events), uri)
+
+                # ----------------------------------------------------------------------
+                # 3. Collect producing DAG IDs from events
+                # ----------------------------------------------------------------------
+                producing_dag_ids = {ev.source_dag_id for ev in events if ev.source_dag_id}
+                if not producing_dag_ids:
+                    logging.info("No producing DAG IDs found in events for uri=%s", uri)
+                    return []
+
+                logging.info(
+                    "Producing DAG IDs for uri=%s: [%s]",
+                    uri,
+                    ",".join(sorted(producing_dag_ids)),
+                )
+
+                # ----------------------------------------------------------------------
+                # 4. For each producing DAG, list DagRuns in the data_interval_end window
+                # ----------------------------------------------------------------------
+                dag_run_index: Dict[tuple, DotDict] = {}
+
+                dr_params_base: Dict[str, Any] = {
+                    "order_by": ["data_interval_end", "start_date"],
+                    "limit": 1000,
+                }
+
+                if scheduled_date_to_check_max > scheduled_date:
+                    logging.info(
+                        "Filtering DagRuns with data_interval_end >= %s and <= %s",
+                        scheduled_date_to_check_min.isoformat(),
+                        scheduled_date.isoformat(),
+                    )
+                    dr_params_base["data_interval_end_gte"] = scheduled_date_to_check_min.isoformat()
+                    dr_params_base["data_interval_end_lte"] = scheduled_date.isoformat()
+                else:
+                    logging.info(
+                        "Filtering DagRuns with data_interval_end > %s and <= %s",
+                        scheduled_date_to_check_min.isoformat(),
+                        scheduled_date_to_check_max.isoformat(),
+                    )
+                    dr_params_base["data_interval_end_gt"] = scheduled_date_to_check_min.isoformat()
+                    dr_params_base["data_interval_end_lte"] = scheduled_date_to_check_max.isoformat()
+
+                # Load DagRuns per producing DAG and index them by (dag_id, run_id)
+                for prod_dag_id in producing_dag_ids:
+                    try:
+                        dag_runs = client.list_dag_runs(prod_dag_id, **dr_params_base)
+                    except Exception as e:
+                        logging.warning(
+                            "Failed to list DagRuns for producing DAG %s: %s",
+                            prod_dag_id,
+                            e,
+                        )
+                        continue
+
+                    for dr in dag_runs:
+                        key = (dr.dag_id, dr.run_id)
+                        dag_run_index[key] = dr
+
+                if not dag_run_index:
+                    logging.info(
+                        "No DagRuns found in the data_interval_end window for any producing DAG of uri=%s",
+                        uri,
+                    )
+                    return []
+
+                logging.info(
+                    "Indexed %d DagRuns for producing DAGs of uri=%s",
+                    len(dag_run_index),
+                    uri,
+                )
+
+                # ----------------------------------------------------------------------
+                # 5. Cross events with DagRuns and filter on data_interval_end window
+                # ----------------------------------------------------------------------
+                filtered_events: List[DotDict] = []
+
+                for ev in events:
+                    key = (ev.source_dag_id, ev.source_run_id)
+                    dr = dag_run_index.get(key)
+                    if not dr:
+                        # Either no DagRun for this event in the window or missing run
+                        continue
+
+                    # At this point, dr.data_interval_end is already within the desired window
+                    filtered_events.append(ev)
+
+                if not filtered_events:
+                    logging.info(
+                        "No events remained after crossing with DagRuns for uri=%s",
+                        uri,
+                    )
+                    return []
+
+                # ----------------------------------------------------------------------
+                # 6. Sort by producing DagRun.data_interval_end ascending
+                # ----------------------------------------------------------------------
+                def sort_key(ev: DotDict):
+                    dr = dag_run_index[(ev.source_dag_id, ev.source_run_id)]
+                    return dr.data_interval_end
+
+                filtered_events.sort(key=sort_key)
+
+                logging.info(
+                    "Returning %d filtered events for uri=%s",
+                    len(filtered_events),
+                    uri,
+                )
+
+                return filtered_events
 
             @provide_session
             def find_dataset_events(uri: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, scheduled_date: datetime, session: Session=None) -> List[DatasetEvent]:
