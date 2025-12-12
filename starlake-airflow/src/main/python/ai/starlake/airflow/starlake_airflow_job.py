@@ -569,6 +569,8 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         # Either no DagRun for this event in the window or missing run
                         continue
 
+                    ev.update({"dataset": dataset or {"extra": {}}})
+
                     # At this point, dr.data_interval_end is already within the desired window
                     filtered_events.append(ev)
 
@@ -776,10 +778,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 # we check the dataset events in reverse order
                                 while i <= nb_events and not found:
                                     event: Union[DotDict, DatasetEvent] = dataset_events[-i]
-                                    if client:
-                                        extra = event.extra or dataset.extra or {}
-                                    else:
-                                        extra = event.extra or event.dataset.extra or dataset.extra or {}
+                                    extra = event.extra or event.dataset.extra or dataset.extra or {}
                                     scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
                                     if scheduled_datetime:
                                         if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
@@ -814,10 +813,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             # we check the dataset events in reverse order
                             while i <= nb_events and not found:
                                 event: Union[DotDict, DatasetEvent] = dataset_events[-i]
-                                if client:
-                                    extra = event.extra or dataset.extra or {}
-                                else:
-                                    extra = event.extra or event.dataset.extra or dataset.extra or {}
+                                extra = event.extra or event.dataset.extra or dataset.extra or {}
                                 scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
                                 if scheduled_datetime:
                                     if scheduled_datetime > previous_dag_checked:
