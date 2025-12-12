@@ -26,21 +26,23 @@ from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
 from ai.starlake.airflow.starlake_airflow_api import supports_assets, supports_datasets, supports_inlet_events, DotDict, StarlakeAirflowApiClient
 
-from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range
+from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range, sl_schedule_format
 
 from ai.starlake.job.starlake_job import StarlakeOrchestrator
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
-from airflow.datasets import Dataset
+try:
+    from airflow.sdk import Asset as Dataset, AssetEvent as DatasetEvent   # Airflow 3.x
+except ImportError:
+    from airflow.datasets import Dataset       # Airflow 2.x
+    from airflow.models.dataset import DatasetEvent
 
 from airflow.models import DagRun, TaskInstance, Operator
 
 from airflow.models.serialized_dag import SerializedDagModel
 
 from airflow.models.baseoperator import BaseOperator
-
-from airflow.models.dataset import DatasetEvent, DatasetModel
 
 from airflow.operators.empty import EmptyOperator
 
@@ -182,7 +184,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     scheduled_dates = params.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER.value, params.get('sl_schedule', None))
                     if scheduled_dates:
                         try:
-                            from ai.starlake.common import sl_schedule_format
                             scheduled_date = scheduled_dates[-1]
                             return datetime.strptime(scheduled_date, sl_schedule_format).replace(tzinfo=pytz.timezone('UTC'))
                         except Exception:
@@ -599,6 +600,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             def find_dataset_events(uri: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, scheduled_date: datetime, session: Session=None) -> List[DatasetEvent]:
                 from sqlalchemy import and_, asc
                 from sqlalchemy.orm import joinedload
+                from airflow.models.dataset import DatasetModel
                 base_query = (
                     session.query(DatasetEvent)
                     .options(joinedload(DatasetEvent.dataset))
@@ -631,6 +633,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 
                 return filtered_query.order_by(asc(DagRun.data_interval_end)).all()
 
+            def ts_as_datetime(ts: Any) -> datetime:
+                if isinstance(ts, datetime):
+                    return ts
+                else:
+                    from dateutil import parser
+                    import pytz
+                    return parser.isoparse(str(ts)).astimezone(pytz.timezone('UTC'))
+
             @provide_session
             def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context, session: Session=None) -> bool:
                 from croniter import croniter
@@ -642,22 +652,32 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 last_dag_ts: Optional[datetime] = None
 
                 dag = context["dag"]
+                if supports_assets():
+                    client = StarlakeAirflowApiClient()
+                else:
+                    client = None
 
                 # we look for the first succeeded dag run before the scheduled date
-                __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=False)
+                if client:
+                    __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=False)
+                else:
+                    __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=False)
 
                 if __dag_runs and len(__dag_runs) > 0:
                     # we take the first dag run before the scheduled date
                     __dag_run = __dag_runs[0]
-                    previous_dag_checked = __dag_run.data_interval_end
+                    previous_dag_checked = ts_as_datetime(__dag_run.data_interval_end)
                     print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked} and start date {__dag_run.start_date}")
 
-                __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=True)
+                if client:
+                    __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=True)
+                else:
+                    __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=True)
                 if __dag_runs and len(__dag_runs) > 0:
                     # we take the first dag run before the scheduled date
                     __dag_run = __dag_runs[0]
-                    last_dag_checked = __dag_run.data_interval_end
-                    last_dag_ts = __dag_run.start_date
+                    last_dag_checked = ts_as_datetime(__dag_run.data_interval_end)
+                    last_dag_ts = ts_as_datetime(__dag_run.start_date)
                     print(f"Found last succeeded dag run {__dag_run.dag_id} with scheduled date {last_dag_checked} and start date {last_dag_ts}")
 
                 if not previous_dag_checked:
@@ -743,17 +763,23 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 if scheduled_datetime > max_scheduled_date:
                                     max_scheduled_date = scheduled_datetime
                         if not found:
-                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
+                            if client:
+                                events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
+                            else:
+                                events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
                             if events:
-                                dataset_events = events
+                                dataset_events: Union[List[DotDict], List[DatasetEvent]] = events
                                 nb_events = len(events)
                                 print(f"Found {nb_events} dataset event(s) for {dataset.uri} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                                dataset_event: Optional[DatasetEvent] = None
+                                dataset_event: Optional[Union[DotDict, DatasetEvent]] = None
                                 i = 1
                                 # we check the dataset events in reverse order
                                 while i <= nb_events and not found:
-                                    event: DatasetEvent = dataset_events[-i]
-                                    extra = event.extra or event.dataset.extra or dataset.extra or {}
+                                    event: Union[DotDict, DatasetEvent] = dataset_events[-i]
+                                    if client:
+                                        extra = event.extra or dataset.extra or {}
+                                    else:
+                                        extra = event.extra or event.dataset.extra or dataset.extra or {}
                                     scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
                                     if scheduled_datetime:
                                         if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
@@ -774,18 +800,24 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
                         scheduled_date_to_check_min = previous_dag_checked - timedelta(seconds=freshness)
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
-                        events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
+                        scheduled_datetime: Optional[datetime] = None
+                        dataset_event: Optional[Union[DotDict, DatasetEvent]] = None
+                        if client:
+                            events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
+                        else:
+                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
                         if events:
-                            dataset_events = events
+                            dataset_events: Union[List[DotDict], List[DatasetEvent]] = events
                             nb_events = len(events)
                             print(f"Found {nb_events} dataset event(s) for {dataset.uri} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                            dataset_event: Optional[DatasetEvent] = None
-                            scheduled_datetime: Optional[datetime] = None
                             i = 1
                             # we check the dataset events in reverse order
                             while i <= nb_events and not found:
-                                event: DatasetEvent = dataset_events[-i]
-                                extra = event.extra or event.dataset.extra or dataset.extra or {}
+                                event: Union[DotDict, DatasetEvent] = dataset_events[-i]
+                                if client:
+                                    extra = event.extra or dataset.extra or {}
+                                else:
+                                    extra = event.extra or event.dataset.extra or dataset.extra or {}
                                 scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
                                 if scheduled_datetime:
                                     if scheduled_datetime > previous_dag_checked:

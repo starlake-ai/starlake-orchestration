@@ -30,7 +30,10 @@ from airflow import DAG
 
 from airflow.models.dag import DagContext
 
-from airflow.datasets import Dataset
+try:
+    from airflow.sdk import Asset as Dataset   # Airflow 3.x
+except ImportError:
+    from airflow.datasets import Dataset       # Airflow 2.x
 
 from airflow.models.baseoperator import BaseOperator
 
