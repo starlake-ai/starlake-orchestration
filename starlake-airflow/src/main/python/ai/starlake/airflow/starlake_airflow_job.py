@@ -196,39 +196,49 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     return None
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
-
                 if not context:
                     from airflow.operators.python import get_current_context
                     context = get_current_context()
 
-                uri: str
-                event: DatasetEvent
+                ti = context["task_instance"]
+                template_ctx = ti.get_template_context()
 
-                triggering_dataset_events = context['task_instance'].get_template_context()["triggering_dataset_events"]
-                triggering_uris = {}
-                dataset_uris = {}
-                for uri, events in triggering_dataset_events.items():
-                    if not isinstance(events, list):
-                        continue
-
-                    for event in events:
-                        if not isinstance(event, DatasetEvent):
+                # Airflow 2.x
+                if "triggering_dataset_events" in template_ctx:
+                    triggering_dataset_events = template_ctx["triggering_dataset_events"]
+                    triggering_uris = {}
+                    dataset_uris = {}
+                    for uri, events in triggering_dataset_events.items():
+                        if not isinstance(events, list):
                             continue
 
-                        extra = event.extra or {}
-                        if not extra.get("ts", None):
-                            extra.update({"ts": event.timestamp})
-                        ds = Dataset(uri=uri, extra=extra)
-                        if uri not in triggering_uris:
-                            triggering_uris[uri] = event
-                            dataset_uris.update({uri: ds})
-                        else:
-                            previous_event: DatasetEvent = triggering_uris[uri]
-                            if event.timestamp > previous_event.timestamp:
+                        for event in events:
+                            if not isinstance(event, DatasetEvent):
+                                continue
+
+                            extra = event.extra or {}
+                            if not extra.get("ts", None):
+                                extra.update({"ts": event.timestamp})
+                            ds = Dataset(uri=uri, extra=extra)
+                            if uri not in triggering_uris:
                                 triggering_uris[uri] = event
                                 dataset_uris.update({uri: ds})
+                            else:
+                                previous_event: DatasetEvent = triggering_uris[uri]
+                                if event.timestamp > previous_event.timestamp:
+                                    triggering_uris[uri] = event
+                                    dataset_uris.update({uri: ds})
 
-                return list(dataset_uris.values())
+                    return list(dataset_uris.values())
+
+                # Airflow 3.x
+                if "triggering_assets" in template_ctx:
+                    assets = template_ctx["triggering_assets"]
+                    # Already Asset objects (aliased as Dataset)
+                    return [Dataset(uri=a.uri, extra=a.extra or {}) for a in assets]
+
+                # No triggering info
+                return []
 
             def find_previous_dag_runs_api(
                     dag,
