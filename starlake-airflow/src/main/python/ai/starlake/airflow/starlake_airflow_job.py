@@ -18,11 +18,13 @@ from __future__ import annotations
 
 from datetime import timedelta, datetime
 
-from typing import Optional, List, Union
+from typing import Any, Dict, Optional, List, Union
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOrchestrator, TaskType
 
 from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
+
+from ai.starlake.airflow.starlake_airflow_api import supports_inlet_events, DotDict, StarlakeAirflowApiClient
 
 from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range
 
@@ -32,7 +34,7 @@ from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
 from airflow.datasets import Dataset
 
-from airflow.models import DagRun, TaskInstance
+from airflow.models import DagRun, TaskInstance, Operator
 
 from airflow.models.serialized_dag import SerializedDagModel
 
@@ -67,29 +69,6 @@ DEFAULT_DAG_ARGS = {
     'retry_delay': timedelta(minutes=5),
     'max_active_runs': 1,
 }
-
-def __check_version__(version: str) -> bool:
-    """
-    Check if the current version is compatible with the given version.
-    """
-    from packaging.version import parse
-    import airflow
-
-    current_version = parse(airflow.__version__)
-
-    return current_version >= parse(version)
-
-def supports_inlet_events():
-    """
-    Check if the current environment supports inlet events.
-    """
-    return __check_version__("2.10.0")
-
-def supports_assets():
-    """
-    Check if the current environment supports assets.
-    """
-    return __check_version__("3.0.0")
 
 class AirflowDataset(AbstractEvent[Dataset]):
     @classmethod
@@ -250,12 +229,120 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
                 return list(dataset_uris.values())
 
+            def find_previous_dag_runs_api(
+                    dag,
+                    client: StarlakeAirflowApiClient,
+                    scheduled_date: datetime,
+                    at_scheduled_date: bool = False,
+            ) -> List[DotDict]:
+                """
+                Find previous successful DagRuns for the current DAG, excluding runs
+                where at least one leaf task is SKIPPED.
+
+                Uses Airflow public API via StarlakeAirflowApiClient.
+                """
+
+                # ----------------------------------------------------------------------
+                # 1. Identify leaf tasks
+                # ----------------------------------------------------------------------
+                leaves = dag.leaves
+                leaf_task_ids = [t.task_id for t in leaves]
+                logging.info("Leaf tasks to check: [%s]", ",".join(leaf_task_ids))
+
+                # ----------------------------------------------------------------------
+                # 2. Build DagRun query params
+                # ----------------------------------------------------------------------
+                dr_params: Dict[str, Any] = {
+                    "state": "success",
+                    "limit": 100,
+                    "order_by": ["-data_interval_end", "-start_date"],
+                }
+
+                if at_scheduled_date:
+                    dr_params["end_date_lte"] = scheduled_date.isoformat()
+                else:
+                    dr_params["end_date_lt"] = scheduled_date.isoformat()
+
+                dag_runs = client.list_dag_runs(dag_id, **dr_params)
+
+                # Extract end_date values
+                end_dates = [dr.end_date for dr in dag_runs if dr.end_date]
+                logging.info(
+                    "Found %d candidate DagRuns, end_dates: [%s]",
+                    len(dag_runs),
+                    ",".join(end_dates),
+                )
+
+                max_end_date = max(end_dates) if end_dates else scheduled_date.isoformat()
+
+                filtered_runs: List[DotDict] = []
+
+                # ----------------------------------------------------------------------
+                # 3. Build TaskInstance params (only valid keys)
+                # ----------------------------------------------------------------------
+                from airflow.utils.state import State
+
+                ti_base_params = {
+                    "limit": 1000,
+                    "end_date_lte": max_end_date,
+                    "order_by": ["-end_date", "-start_date"],
+                    "state": State.SKIPPED,
+                }
+
+                # ----------------------------------------------------------------------
+                # 4. Optimization: only one leaf → one API call
+                # ----------------------------------------------------------------------
+                if len(leaf_task_ids) == 1:
+                    leaf = leaf_task_ids[0]
+                    logging.info("Optimizing: only one leaf task (%s)", leaf)
+
+                    ti_params = ti_base_params.copy()
+                    ti_params["task_id"] = leaf
+
+                    # "~" = all dag runs for this DAG
+                    ti_list = client.list_task_instances(dag_id, "~", params=ti_params)
+
+                    skipped_run_ids = {ti.dag_run_id for ti in ti_list}
+
+                    for dr in dag_runs:
+                        if dr.dag_run_id not in skipped_run_ids:
+                            filtered_runs.append(dr)
+
+                else:
+                    # ------------------------------------------------------------------
+                    # 5. Standard path: check each DagRun individually
+                    # ------------------------------------------------------------------
+                    for dr in dag_runs:
+                        dag_run_id = dr.dag_run_id
+
+                        ti_params = ti_base_params.copy()
+
+                        ti_list = client.list_task_instances(
+                            dag_id,
+                            dag_run_id,
+                            params=ti_params,
+                        )
+
+                        if any(ti.task_id in leaf_task_ids for ti in ti_list):
+                            continue
+
+                        filtered_runs.append(dr)
+
+                # ----------------------------------------------------------------------
+                # 6. Final sort (API already sorts, but we ensure correctness)
+                # ----------------------------------------------------------------------
+                def sort_key(run):
+                    return (run.data_interval_end, run.start_date)
+
+                filtered_runs.sort(key=sort_key, reverse=True)
+
+                return filtered_runs
+
             @provide_session
-            def find_previous_dag_runs(scheduled_date: datetime, session: Session=None, at_scheduled_date: bool = False) -> List[DagRun]:
+            def find_previous_dag_runs(dag, scheduled_date: datetime, session: Session=None, at_scheduled_date: bool = False) -> List[DagRun]:
                 # we look for the first non skipped dag run before the scheduled date 
                 from airflow.utils.state import State
 
-                dag = SerializedDagModel.get_dag(dag_id)
                 leaves = dag.leaves
                 last_tasks_id = [task.task_id for task in leaves]
                 print(f"non skipped tasks to check [{','.join(last_tasks_id)}]")
@@ -370,8 +457,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 last_dag_checked: Optional[datetime] = None
                 last_dag_ts: Optional[datetime] = None
 
-                # we look for the first succeeded dag run before the scheduled date 
-                __dag_runs = find_previous_dag_runs(scheduled_date=scheduled_date, session=session, at_scheduled_date=False)
+                dag = context["dag"]
+
+                # we look for the first succeeded dag run before the scheduled date
+                __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=False)
 
                 if __dag_runs and len(__dag_runs) > 0:
                     # we take the first dag run before the scheduled date
@@ -379,7 +468,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     previous_dag_checked = __dag_run.data_interval_end
                     print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked} and start date {__dag_run.start_date}")
 
-                __dag_runs = find_previous_dag_runs(scheduled_date=scheduled_date, session=session, at_scheduled_date=True)
+                __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=True)
                 if __dag_runs and len(__dag_runs) > 0:
                     # we take the first dag run before the scheduled date
                     __dag_run = __dag_runs[0]
@@ -390,7 +479,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 if not previous_dag_checked:
                     # if the dag never run successfuly, 
                     # we set the previous dag checked to the start date of the dag
-                    previous_dag_checked = context["dag"].start_date
+                    previous_dag_checked = dag.start_date
                     print(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
 
                 if last_dag_ts and last_dag_checked:
