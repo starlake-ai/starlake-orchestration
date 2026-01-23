@@ -28,7 +28,10 @@ from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, S
 
 from airflow import DAG
 
-from airflow.models.dag import DagContext
+try:
+    from airflow.models.dag import DagContext # Airflow 2.x
+except ImportError:
+    pass
 
 try:
     from airflow.sdk import Asset as Dataset   # Airflow 3.x
@@ -39,7 +42,7 @@ from airflow.models.baseoperator import BaseOperator
 
 from airflow.utils.context import Context
 
-from airflow.utils.task_group import TaskGroup, TaskGroupContext
+from airflow.utils.task_group import TaskGroup
 
 from airflow.utils.state import DagRunState
 
@@ -142,11 +145,11 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         )
 
     def __enter__(self):
-        DagContext.push_context_managed_dag(self.dag)
+        #DagContext.push_context_managed_dag(self.dag)
         return super().__enter__()
     
     def __exit__(self, exc_type, exc_value, traceback):
-        DagContext.pop_context_managed_dag()
+        #DagContext.pop_context_managed_dag()
         return super().__exit__(exc_type, exc_value, traceback)
 
     def sl_transform_options(self, cron_expr: Optional[str] = None) -> Optional[str]:
@@ -300,13 +303,6 @@ class AirflowTaskGroup(AbstractTaskGroup[TaskGroup]):
     def __init__(self, group_id: str, group: TaskGroup, **kwargs) -> None:
         super().__init__(group_id, orchestration_cls=AirflowOrchestration, group=group)
 
-    def __enter__(self):
-        TaskGroupContext.push_context_managed_task_group(self.group)
-        return super().__enter__()
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        TaskGroupContext.pop_context_managed_task_group()
-        return super().__exit__(exc_type, exc_value, traceback)
 
 class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, Dataset]):
     def __init__(self, job: J, **kwargs) -> None:
