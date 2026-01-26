@@ -52,10 +52,15 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         """
         import os
         env_vars = dict()
-        # Add the SL_ environment variables from the os environment variables
-        for key in self.sl_included_env_vars:
-            if key in os.environ:
-                env_vars[key] = os.environ[key]
+
+        # Add all env vars if sl_include_env_vars is * or _
+        if self.sl_included_env_vars == ['*'] or self.sl_included_env_vars == ['_']:
+            env_vars = os.environ.copy()
+        else:
+            # Add the SL_ environment variables from the os environment variables
+            for key in self.sl_included_env_vars:
+                if key in os.environ:
+                    env_vars[key] = os.environ[key]
         return env_vars
 
     @classmethod
@@ -84,6 +89,8 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         found = False
 
         env = {**self.sl_os_env_vars.copy(), **self.sl_env_vars.copy()} # Copy the current sl env variables
+        import logging
+        logging.info(f"env: {env}")
 
         if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
             arguments = [] if not arguments else arguments
