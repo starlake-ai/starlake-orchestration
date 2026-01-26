@@ -22,9 +22,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from airflow.configuration import conf
-from airflow.hooks.base import BaseHook
-from packaging.version import parse
-import airflow
+from airflow.sdk.bases.hook import BaseHook
 
 
 log = logging.getLogger(__name__)
@@ -34,23 +32,19 @@ log = logging.getLogger(__name__)
 # Version helpers
 # ---------------------------------------------------------------------------
 
-def airflow_version() -> parse:
-    return parse(airflow.__version__)
-
-
 def supports_datasets() -> bool:
     """Datasets introduced in Airflow 2.4."""
-    return airflow_version() >= parse("2.4.0")
+    return False
 
 
 def supports_inlet_events() -> bool:
     """Inlet events introduced in Airflow 2.10."""
-    return airflow_version() >= parse("2.10.0")
+    return True
 
 
 def supports_assets() -> bool:
     """Assets replace datasets starting in Airflow 3.0."""
-    return airflow_version() >= parse("3.0.0")
+    return True
 
 
 def api_prefix() -> str:
@@ -58,7 +52,7 @@ def api_prefix() -> str:
     Airflow 2.x → /api/v1
     Airflow 3.x → /api/v2
     """
-    return "/api/v2" if supports_assets() else "/api/v1"
+    return "/api/v2"
 
 
 # ---------------------------------------------------------------------------
@@ -82,29 +76,19 @@ def to_dotdict(obj: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Airflow API Client (supports Airflow 2 & 3)
+# Airflow API Client (supports Airflow 3)
 # ---------------------------------------------------------------------------
 
-class StarlakeAirflowApiClient:
+class StarlakeAirflowApiClient(BaseHook):
     """
-    Robust client for Airflow's public API.
-
-    - Airflow 2.x:
-        * Basic Auth (username/password from Airflow connection)
-        * Datasets
-        * API prefix: /api/v1
-
-    - Airflow 3.x:
-        * Bearer JWT token (POST /auth/token)
-        * Assets instead of datasets
-        * API prefix: /api/v2
-
-    Features:
-        * Automatic version detection
-        * Automatic authentication mode
-        * Automatic endpoint selection (datasets vs assets)
-        * Retry logic
-        * DotDict responses
+    Client for interacting with the Airflow API (v2).
+    
+    This client handles:
+    - Authentication via JWT (if configured).
+    - Querying dataset events (AssetEvents).
+    - Triggering DAGs via the REST API.
+    
+    It abstracts away the differences between Airflow versions (now focused on v2/Airflow 3).
     """
 
     def __init__(
@@ -115,8 +99,8 @@ class StarlakeAirflowApiClient:
     ) -> None:
 
         self.timeout = timeout
-        self._supports_datasets = supports_datasets()
-        self._supports_assets = supports_assets()
+        self._supports_datasets = False
+        self._supports_assets = True
 
         # Base URL from airflow.cfg
         base = conf.get("webserver", "base_url").rstrip("/")
@@ -141,12 +125,8 @@ class StarlakeAirflowApiClient:
         self.session.mount("https://", adapter)
 
         # Authentication mode
-        if self._supports_assets:
-            # Airflow 3.x → JWT Bearer
-            self._configure_bearer_auth()
-        else:
-            # Airflow 2.x → Basic Auth
-            self.session.auth = (self.conn.login, self.conn.password)
+        # Airflow 3.x → JWT Bearer
+        self._configure_bearer_auth()
 
     # -----------------------------------------------------------------------
     # Authentication for Airflow 3.x
@@ -264,34 +244,18 @@ class StarlakeAirflowApiClient:
         return resp.task_instances
 
     # -----------------------------------------------------------------------
-    # Datasets (Airflow 2.10+) / Assets (Airflow 3.x)
+    # Assets (Airflow 3.x)
     # -----------------------------------------------------------------------
     def get_dataset_by_uri(self, uri: str) -> Optional[DotDict]:
         """
         Unified interface for dataset (Airflow 2.4+) and asset (Airflow 3.x) by URI.
         """
-        if self._supports_assets:
-            # Airflow 3.x → assets
-            return self._get(f"assets/{uri}")
-
-        if self._supports_datasets:
-            # Airflow 2.4+ → datasets
-            return self._get(f"datasets/{uri}")
-
-        raise RuntimeError("Datasets are not supported on this Airflow version.")
+        return self._get(f"assets/{uri}")
 
     def list_events(self, **params) -> List[DotDict]:
         """
         Unified interface for dataset events (Airflow 2.4+) and asset events (Airflow 3.x).
         """
-        if self._supports_assets:
-            # Airflow 3.x → assets
-            resp = self._get("assets/events", params=params)
-            return resp.events
+        resp = self._get("assets/events", params=params)
+        return resp.events
 
-        if self._supports_datasets:
-            # Airflow 2.4+ → datasets
-            resp = self._get("datasets/events", params=params)
-            return resp.events
-
-        raise RuntimeError("Datasets are not supported on this Airflow version.")
