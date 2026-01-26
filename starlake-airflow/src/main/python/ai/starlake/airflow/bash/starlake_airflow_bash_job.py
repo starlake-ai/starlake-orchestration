@@ -22,11 +22,11 @@ from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, Starla
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
 
-from airflow.sdk.bases.operator import BaseOperator
+from airflow.models.baseoperator import BaseOperator
 
-from airflow.providers.standard.operators.bash import BashOperator
+from airflow.operators.bash import BashOperator
 
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator
 
 class StarlakeAirflowBashJob(StarlakeAirflowJob):
     """Airflow Starlake Bash Job."""
@@ -52,10 +52,15 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         """
         import os
         env_vars = dict()
-        # Add the SL_ environment variables from the os environment variables
-        for key in self.sl_included_env_vars:
-            if key in os.environ:
-                env_vars[key] = os.environ[key]
+
+        # Add all env vars if sl_include_env_vars is * or _
+        if self.sl_included_env_vars == ['*'] or self.sl_included_env_vars == ['_']:
+            env_vars = os.environ.copy()
+        else:
+            # Add the SL_ environment variables from the os environment variables
+            for key in self.sl_included_env_vars:
+                if key in os.environ:
+                    env_vars[key] = os.environ[key]
         return env_vars
 
     @classmethod

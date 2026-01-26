@@ -23,7 +23,7 @@ setup(name='starlake-airflow',
       packages=find_packages(include=['ai', 'ai.*']),
       install_requires=['starlake-orchestration~=0.4'],
       extras_require={
-        "airflow": ["apache-airflow>=3.0.0"],
+        "airflow": ["airflow>=2.10.0"],
         "shell": [],
         "gcp": [], #["apache-airflow-providers-google>=10.0.7"]
         "aws": [],
