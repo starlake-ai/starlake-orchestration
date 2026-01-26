@@ -28,21 +28,13 @@ from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, S
 
 from airflow import DAG
 
-try:
-    from airflow.models.dag import DagContext # Airflow 2.x
-except ImportError:
-    pass
+from airflow.sdk import Asset as Dataset   # Airflow 3.x
 
-try:
-    from airflow.sdk import Asset as Dataset   # Airflow 3.x
-except ImportError:
-    from airflow.datasets import Dataset       # Airflow 2.x
-
-from airflow.models.baseoperator import BaseOperator
+from airflow.sdk.bases.operator import BaseOperator
 
 from airflow.utils.context import Context
 
-from airflow.utils.task_group import TaskGroup
+from airflow.sdk import TaskGroup
 
 from airflow.utils.state import DagRunState
 
@@ -51,6 +43,18 @@ from typing import Any, List, Optional, TypeVar, Union
 J = TypeVar("J", bound=StarlakeAirflowJob)
 
 class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], AirflowDataset):
+    """
+    Airflow implementation of the Starlake Pipeline.
+    
+    This class orchestrates Starlake domains and tables by generating Airflow DAGs.
+    It supports:
+    - Loading (ingestion) DAGs.
+    - Transform DAGs.
+    - Export DAGs.
+    - Job DAGs.
+    
+    It maps Starlake concepts (Domains, Tables) to Airflow execution units.
+    """
     def __init__(self, job: J, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[DAG, BaseOperator, TaskGroup, Dataset]] = None, **kwargs) -> None:
         def fun(upstream: Union[BaseOperator, TaskGroup], downstream: Union[BaseOperator, TaskGroup]) -> None:
             downstream.set_upstream(upstream)
@@ -302,6 +306,14 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
 class AirflowTaskGroup(AbstractTaskGroup[TaskGroup]):
     def __init__(self, group_id: str, group: TaskGroup, **kwargs) -> None:
         super().__init__(group_id, orchestration_cls=AirflowOrchestration, group=group)
+
+    def __enter__(self):
+        self.group.__enter__()
+        return super().__enter__()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        self.group.__exit__(exc_type, exc_value, traceback)
 
 
 class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, Dataset]):
