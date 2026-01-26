@@ -145,12 +145,12 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         )
 
     def __enter__(self):
-        #DagContext.push_context_managed_dag(self.dag)
+        self.dag.__enter__()
         return super().__enter__()
     
     def __exit__(self, exc_type, exc_value, traceback):
-        #DagContext.pop_context_managed_dag()
-        return super().__exit__(exc_type, exc_value, traceback)
+        super().__exit__(exc_type, exc_value, traceback)
+        self.dag.__exit__(exc_type, exc_value, traceback)
 
     def sl_transform_options(self, cron_expr: Optional[str] = None) -> Optional[str]:
         if cron_expr:
@@ -380,7 +380,7 @@ class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, D
     def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], **kwargs) -> AbstractTaskGroup[TaskGroup]:
         return AirflowTaskGroup(
             group_id, 
-            group=TaskGroup(group_id=group_id, **kwargs),
+            group=TaskGroup(group_id=group_id, dag=pipeline.dag, **kwargs),
             dag=pipeline.dag, 
             **kwargs
         )
