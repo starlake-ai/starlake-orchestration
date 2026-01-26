@@ -84,6 +84,8 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         found = False
 
         env = {**self.sl_os_env_vars.copy(), **self.sl_env_vars.copy()} # Copy the current sl env variables
+        import logging
+        logging.info(f"env: {env}")
 
         if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
             arguments = [] if not arguments else arguments
