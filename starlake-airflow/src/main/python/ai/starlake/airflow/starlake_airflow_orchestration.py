@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset, supports_inlet_events
+from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset
 
 from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset, sl_timestamp_format, StarlakeParameters
 
@@ -77,18 +77,15 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         if self.cron is not None:
             airflow_schedule = self.cron
         elif events:
-            if not supports_inlet_events():
-                airflow_schedule = events
+            max_active_runs = 1
+            default_args.update({'max_active_runs': 1})
+            from functools import reduce
+            if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
+                airflow_schedule = reduce(lambda a, b: a | b, events)
             else:
-                max_active_runs = 1
-                default_args.update({'max_active_runs': 1})
-                from functools import reduce
-                if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
-                    airflow_schedule = reduce(lambda a, b: a | b, events)
-                else:
-                    airflow_schedule = reduce(lambda a, b: a & b, events)
-                if self.job.data_cycle_enabled and not self.job.data_cycle:
-                    self.job.data_cycle = self.computed_cron_expr
+                airflow_schedule = reduce(lambda a, b: a & b, events)
+            if self.job.data_cycle_enabled and not self.job.data_cycle:
+                self.job.data_cycle = self.computed_cron_expr
                     
 
         def ts_as_datetime(ts, context: Context = None):
@@ -234,7 +231,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 AIRFLOW_AUTH = (AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
             else:
                 AIRFLOW_AUTH = None
-            payload = {k: kwargs[k] for k in ['conf', 'logical_date', 'execution_date', 'dag_run_id'] if k in kwargs}
+            payload = {k: kwargs[k] for k in ['conf', 'logical_date', 'dag_run_id'] if k in kwargs}
             # conf = kwargs.get('conf', {'backfill': True})
             # payload['conf'] = conf
             # generate a unique dag_run_id
@@ -243,7 +240,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             payload['dag_run_id'] = dag_run_id
             if logical_date:
                 payload['logical_date'] = logical_date + 'Z'
-                payload['execution_date'] = logical_date + 'Z'
             print(f"Starting pipeline {DAG_ID} with configuration {payload}")
             import requests
             from requests.exceptions import HTTPError

@@ -24,7 +24,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSpark
 
 from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
-from ai.starlake.airflow.starlake_airflow_api import supports_assets, supports_datasets, supports_inlet_events, DotDict, StarlakeAirflowApiClient
+from ai.starlake.airflow.starlake_airflow_api import DotDict, StarlakeAirflowApiClient
 
 from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range, sl_schedule_format
 
@@ -80,8 +80,6 @@ class AirflowDataset(AbstractEvent[Dataset]):
         }
         if source:
             extra["source"] = source
-        if not supports_inlet_events():
-            return Dataset(uri=dataset.refresh().url, extra=extra)
         return Dataset(uri=dataset.uri, extra=extra)
 
 class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOptions, AirflowDataset):
@@ -160,17 +158,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         Returns:
             Optional[BaseOperator]: The optional Airflow task.
         """
-        if not supports_inlet_events() and not scheduled and least_frequent_datasets:
-            with TaskGroup(group_id=f'{task_id}') as start:
-                with TaskGroup(group_id=f'trigger_least_frequent_datasets') as trigger_least_frequent_datasets:
-                     for dataset in least_frequent_datasets:
-                         StarlakeEmptyOperator(
-                             task_id=f"trigger_{dataset.uri}",
-                             dataset=dataset,
-                             source=self.source,
-                             **kwargs.copy())
-            return start
-        elif supports_inlet_events() and not scheduled:
+        if not scheduled:
             datasets: List[Dataset] = []
             datasets += list(map(lambda dataset: self.to_event(dataset=dataset), not_scheduled_datasets or []))
             datasets += list(map(lambda dataset: self.to_event(dataset=dataset), least_frequent_datasets or []))
@@ -450,9 +438,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 # ----------------------------------------------------------------------
                 # 1. Check feature support and resolve dataset/asset by URI
                 # ----------------------------------------------------------------------
-                if not supports_datasets() and not supports_assets():
-                    logging.info("Datasets/assets not supported on this Airflow version")
-                    return []
+
 
                 logging.info("Resolving dataset/asset by uri=%s", uri)
 
@@ -485,10 +471,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     "limit": 1000,
                 }
 
-                if supports_assets():
-                    params_events["asset_id"] = dataset_or_asset_id
-                else:
-                    params_events["dataset_id"] = dataset_or_asset_id
+                params_events["asset_id"] = dataset_or_asset_id
 
                 events: List[DotDict] = client.list_events(params=params_events)
 
@@ -683,10 +666,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 last_dag_ts: Optional[datetime] = None
 
                 dag = context["dag"]
-                if supports_assets():
-                    client = StarlakeAirflowApiClient()
-                else:
-                    client = None
+                client = StarlakeAirflowApiClient()
 
                 # we look for the first succeeded dag run before the scheduled date
                 if client:

@@ -32,19 +32,7 @@ log = logging.getLogger(__name__)
 # Version helpers
 # ---------------------------------------------------------------------------
 
-def supports_datasets() -> bool:
-    """Datasets introduced in Airflow 2.4."""
-    return False
 
-
-def supports_inlet_events() -> bool:
-    """Inlet events introduced in Airflow 2.10."""
-    return True
-
-
-def supports_assets() -> bool:
-    """Assets replace datasets starting in Airflow 3.0."""
-    return True
 
 
 def api_prefix() -> str:
@@ -99,8 +87,7 @@ class StarlakeAirflowApiClient(BaseHook):
     ) -> None:
 
         self.timeout = timeout
-        self._supports_datasets = False
-        self._supports_assets = True
+
 
         # Base URL from airflow.cfg
         base = conf.get("webserver", "base_url").rstrip("/")
