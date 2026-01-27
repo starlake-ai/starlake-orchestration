@@ -153,25 +153,25 @@ def sl_pre_load(
 
 The load of the domain will not be conditionned and no pre-load tasks will be executed.
 
-![none strategy example](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/none.png)
+![none strategy example](../images/none.png)
 
 ##### IMPORTED
 
 This strategy implies that at least one file is present in the landing area (`SL_ROOT/datasets/importing/{domain}` by default). If there is one or more files to load, the method `sl_import` will be called to import the domain before loading it, otherwise the loading of the domain will be skipped.
 
-![imported strategy example](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/imported.png)
+![imported strategy example](../images/imported.png)
 
 ##### PENDING
 
 This strategy implies that at least one file is present in the pending datasets area of the domain (`SL_ROOT/datasets/pending/{domain}` by default), otherwise the loading of the domain will be skipped.
 
-![pending strategy example](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/pending.png)
+![pending strategy example](../images/pending.png)
 
 ##### ACK
 
 This strategy implies that an **ack file** is present at the specified path (option `global_ack_file_path`), otherwise the loading of the domain will be skipped.
 
-![ack strategy example](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/ack.png)
+![ack strategy example](../images/ack.png)
 
 #### Options
 
@@ -377,7 +377,7 @@ for schedule in schedules:
             all_load_tasks >> all_done >> post_tasks >> end
 ```
 
-![dag generated with StarlakeAirflowBashJob](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/dagsWithStarlakeAirflowBashJob.png)
+![dag generated with StarlakeAirflowBashJob](../images/dagsWithStarlakeAirflowBashJob.png)
 
 #### StarlakeAirflowBashJob Transform Examples
 
@@ -648,11 +648,11 @@ with DAG(dag_id=os.path.basename(__file__).replace(".py", "").replace(".pyc", ""
 
 ```
 
-![transform without dependencies](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/bashTransformWithoutDependencies.png)
+![transform without dependencies](../images/bashTransformWithoutDependencies.png)
 
 If you want to load the dependencies, you just need to set the `run_dependencies` option to `True`:
 
-![transform without dependencies](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/bashTransformWithDependencies.png)
+![transform without dependencies](../images/bashTransformWithDependencies.png)
 
 ## Google Cloud Platform
 
@@ -737,7 +737,7 @@ sl_job = StarlakeAirflowDataprocJob(options=options)
 #...
 ```
 
-![dag generated with StarlakeAirflowDataprocJob](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/dagsWithStarlakeAirflowDataprocJob.png)
+![dag generated with StarlakeAirflowDataprocJob](../images/dagsWithStarlakeAirflowDataprocJob.png)
 
 ### StarlakeAirflowCloudRunJob
 
@@ -787,7 +787,7 @@ sl_job = StarlakeAirflowCloudRunJob(options=options)
 #...
 ```
 
-![dag generated with StarlakeAirflowCloudRunJob synchronously](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/dagsWithStarlakeAirflowCloudRunJobSynchronous.png)
+![dag generated with StarlakeAirflowCloudRunJob synchronously](../images/dagsWithStarlakeAirflowCloudRunJobSynchronous.png)
 
 ##### Asynchronous execution
 
