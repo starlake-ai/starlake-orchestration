@@ -48,11 +48,7 @@ from airflow.providers.standard.operators.python import ShortCircuitOperator
 
 from airflow.utils.context import Context
 
-from airflow.utils.session import provide_session
-
 from airflow.sdk import TaskGroup
-
-from sqlalchemy.orm.session import Session
 
 import logging
 
@@ -342,78 +338,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
                 return filtered_runs
 
-            @provide_session
-            def find_previous_dag_runs(dag, scheduled_date: datetime, session: Session=None, at_scheduled_date: bool = False) -> List[DagRun]:
-                # we look for the first non skipped dag run before the scheduled date
-                from airflow.utils.state import State
 
-                leaves = dag.leaves
-                last_tasks_id = [task.task_id for task in leaves]
-                print(f"non skipped tasks to check [{','.join(last_tasks_id)}]")
-
-                from sqlalchemy import and_
-                from sqlalchemy.orm import aliased
-
-                TI = aliased(TaskInstance)
-
-                if at_scheduled_date:
-                    # if we are at the scheduled date, we look for the last successful dag run before or at the scheduled date
-                    print(f"Finding previous dag runs for {dag_id} at scheduled date {scheduled_date.strftime(sl_timestamp_format)}")
-                    base_query = (
-                        session.query(DagRun)
-                        .filter(
-                            DagRun.dag_id == dag_id,
-                            DagRun.state == State.SUCCESS,
-                            DagRun.data_interval_end <= scheduled_date
-                        )
-                        .order_by(DagRun.data_interval_end.desc(), DagRun.start_date.desc())
-                    )
-
-                    skipped_query = (
-                        session.query(DagRun.id)
-                        .join(TI, and_(
-                            DagRun.dag_id == TI.dag_id,
-                            DagRun.run_id == TI.run_id,
-                            DagRun.state == State.SUCCESS,
-                            DagRun.data_interval_end <= scheduled_date,
-                            TI.task_id.in_(last_tasks_id),
-                            TI.state == State.SKIPPED
-                        ))
-                        .distinct()
-                    )
-
-                else:
-                    # if we are not at the scheduled date, we look for the last successful dag run before the scheduled date
-                    print(f"Finding previous dag runs for {dag_id} before scheduled date {scheduled_date.strftime(sl_timestamp_format)}")
-                    base_query = (
-                        session.query(DagRun)
-                        .filter(
-                            DagRun.dag_id == dag_id,
-                            DagRun.state == State.SUCCESS,
-                            DagRun.data_interval_end < scheduled_date
-                        )
-                        .order_by(DagRun.data_interval_end.desc(), DagRun.start_date.desc())
-                    )
-
-                    skipped_query = (
-                        session.query(DagRun.id)
-                        .join(TI, and_(
-                            DagRun.dag_id == TI.dag_id,
-                            DagRun.run_id == TI.run_id,
-                            DagRun.state == State.SUCCESS,
-                            DagRun.data_interval_end < scheduled_date,
-                            TI.task_id.in_(last_tasks_id),
-                            TI.state == State.SKIPPED
-                        ))
-                        .distinct()
-                    )
-
-                filtered_query = (
-                    base_query
-                    .filter(~DagRun.id.in_(skipped_query))
-                )
-
-                return filtered_query.all()
 
             def find_datasets_events_api(
                     client: StarlakeAirflowApiClient,
@@ -596,48 +521,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
                 return filtered_events
 
-            @provide_session
-            def find_dataset_events(uri: str, scheduled_date_to_check_min: datetime, scheduled_date_to_check_max: datetime, ts: datetime, scheduled_date: datetime, session: Session=None) -> List:
-                """
-                Find asset events for the given dataset URI.
 
-                In Airflow 3, this queries the AssetModel/AssetEvent to check availability.
-                """
-                from sqlalchemy import and_, asc
-                from sqlalchemy.orm import joinedload
-
-                base_query = (
-                    session.query(AssetEvent)
-                    .options(joinedload(AssetEvent.asset))
-                    .join(DagRun, and_(
-                        AssetEvent.source_dag_id == DagRun.dag_id,
-                        AssetEvent.source_run_id == DagRun.run_id,
-                        AssetEvent.timestamp <= ts
-                    ))
-                    .join(AssetModel, AssetEvent.asset_id == AssetModel.id)
-                )
-
-                if scheduled_date_to_check_max > scheduled_date:
-                    # we should include the previous execution of the corresponding dataset
-                    print(f'Finding dataset events for {uri} with data_interval_end >= {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and <= {scheduled_date.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
-                    filtered_query = (
-                        base_query.filter(
-                            DagRun.data_interval_end >= scheduled_date_to_check_min,
-                            DagRun.data_interval_end <= scheduled_date,
-                            AssetModel.uri == uri
-                        )
-                    )
-                else:
-                    print(f'Finding dataset events for {uri} with data_interval_end > {scheduled_date_to_check_min.strftime(sl_timestamp_format)} and <= {scheduled_date_to_check_max.strftime(sl_timestamp_format)}, and with timestamp <= {ts.strftime(sl_timestamp_format)}')
-                    filtered_query = (
-                        base_query.filter(
-                            DagRun.data_interval_end > scheduled_date_to_check_min,
-                            DagRun.data_interval_end <= scheduled_date_to_check_max,
-                            AssetModel.uri == uri
-                        )
-                    )
-
-                return filtered_query.order_by(asc(DagRun.data_interval_end)).all()
 
             def ts_as_datetime(ts: Any) -> datetime:
                 if isinstance(ts, datetime):
@@ -647,8 +531,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     import pytz
                     return parser.isoparse(str(ts)).astimezone(pytz.timezone('UTC'))
 
-            @provide_session
-            def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context, session: Session=None) -> bool:
+            def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context) -> bool:
                 from croniter import croniter
                 # We start by initializing the result to True (datasets are present)
                 # We will set it to False if any required dataset is missing.
@@ -669,10 +552,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 client = StarlakeAirflowApiClient()
 
                 # we look for the first succeeded dag run before the scheduled date
-                if client:
-                    __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=False)
-                else:
-                    __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=False)
+                __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=False)
 
                 if __dag_runs and len(__dag_runs) > 0:
                     # we take the first dag run before the scheduled date
@@ -680,10 +560,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     previous_dag_checked = ts_as_datetime(__dag_run.data_interval_end)
                     print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked} and start date {__dag_run.start_date}")
 
-                if client:
-                    __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=True)
-                else:
-                    __dag_runs = find_previous_dag_runs(dag=dag, scheduled_date=scheduled_date, session=session, at_scheduled_date=True)
+                __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=True)
                 if __dag_runs and len(__dag_runs) > 0:
                     # we take the first dag run before the scheduled date
                     __dag_run = __dag_runs[0]
@@ -774,10 +651,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 if scheduled_datetime > max_scheduled_date:
                                     max_scheduled_date = scheduled_datetime
                         if not found:
-                            if client:
-                                events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
-                            else:
-                                events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
+                            events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
                             if events:
                                 dataset_events: Union[List[DotDict], List] = events
                                 nb_events = len(events)
