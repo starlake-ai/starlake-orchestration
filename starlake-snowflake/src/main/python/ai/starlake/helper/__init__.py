@@ -33,7 +33,7 @@ import os
 import zipfile
 import tempfile
 
-def zip_selected_packages(package_root: str = site.getsitepackages()[0], package_name: str = "ai", include: list[str] = ["ai", "ai.starlake", "ai.starlake.common", "ai.starlake.helper"], exclude: list[str] = ["ai.starlake.airflow", "ai.starlake.aws", "ai.starlake.dagster", "ai.starlake.dataset", "ai.starlake.gcp", "ai.starlake.job", "ai.starlake.odbc", "ai.starlake.orchestration", "ai.starlake.snowflake", "ai.starlake.sql"]) -> str:
+def zip_selected_packages(package_root: Optional[str] = None, package_name: str = "ai", include: list[str] = ["ai", "ai.starlake", "ai.starlake.common", "ai.starlake.helper"], exclude: list[str] = ["ai.starlake.airflow", "ai.starlake.aws", "ai.starlake.dagster", "ai.starlake.dataset", "ai.starlake.gcp", "ai.starlake.job", "ai.starlake.odbc", "ai.starlake.orchestration", "ai.starlake.snowflake", "ai.starlake.sql"]) -> str:
     """
     Create a ZIP containing only selected subpackages of a package.
     Args:
@@ -42,6 +42,20 @@ def zip_selected_packages(package_root: str = site.getsitepackages()[0], package
         include (list[str]): List of subpackage prefixes to include.
         exclude (list[str]): List of subpackage prefixes to exclude.
     """
+    if package_root is None:
+        # Try to find the package root relative to this file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Go up 3 levels to find the root of 'ai' (helper -> starlake -> ai -> root)
+        candidate_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+        if os.path.isdir(os.path.join(candidate_root, package_name)):
+            package_root = candidate_root
+        else:
+            try:
+                package_root = site.getsitepackages()[0]
+            except Exception:
+                package_root = site.getusersitepackages()
+
+
     package_path = os.path.join(package_root, package_name)
     if not os.path.isdir(package_path):
         raise FileNotFoundError(f"Package '{package_name}' not found in {package_root}")

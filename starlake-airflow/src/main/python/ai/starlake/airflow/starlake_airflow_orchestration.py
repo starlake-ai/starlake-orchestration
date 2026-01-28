@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset, supports_inlet_events
+from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset
 
 from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset, sl_timestamp_format, StarlakeParameters
 
@@ -28,18 +28,13 @@ from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, S
 
 from airflow import DAG
 
-from airflow.models.dag import DagContext
+from airflow.sdk import Asset as Dataset   # Airflow 3.x
 
-try:
-    from airflow.sdk import Asset as Dataset   # Airflow 3.x
-except ImportError:
-    from airflow.datasets import Dataset       # Airflow 2.x
-
-from airflow.models.baseoperator import BaseOperator
+from airflow.sdk.bases.operator import BaseOperator
 
 from airflow.utils.context import Context
 
-from airflow.utils.task_group import TaskGroup, TaskGroupContext
+from airflow.sdk import TaskGroup
 
 from airflow.utils.state import DagRunState
 
@@ -48,6 +43,18 @@ from typing import Any, List, Optional, TypeVar, Union
 J = TypeVar("J", bound=StarlakeAirflowJob)
 
 class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], AirflowDataset):
+    """
+    Airflow implementation of the Starlake Pipeline.
+    
+    This class orchestrates Starlake domains and tables by generating Airflow DAGs.
+    It supports:
+    - Loading (ingestion) DAGs.
+    - Transform DAGs.
+    - Export DAGs.
+    - Job DAGs.
+    
+    It maps Starlake concepts (Domains, Tables) to Airflow execution units.
+    """
     def __init__(self, job: J, schedule: Optional[StarlakeSchedule] = None, dependencies: Optional[StarlakeDependencies] = None, orchestration: Optional[AbstractOrchestration[DAG, BaseOperator, TaskGroup, Dataset]] = None, **kwargs) -> None:
         def fun(upstream: Union[BaseOperator, TaskGroup], downstream: Union[BaseOperator, TaskGroup]) -> None:
             downstream.set_upstream(upstream)
@@ -70,18 +77,15 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         if self.cron is not None:
             airflow_schedule = self.cron
         elif events:
-            if not supports_inlet_events():
-                airflow_schedule = events
+            max_active_runs = 1
+            default_args.update({'max_active_runs': 1})
+            from functools import reduce
+            if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
+                airflow_schedule = reduce(lambda a, b: a | b, events)
             else:
-                max_active_runs = 1
-                default_args.update({'max_active_runs': 1})
-                from functools import reduce
-                if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
-                    airflow_schedule = reduce(lambda a, b: a | b, events)
-                else:
-                    airflow_schedule = reduce(lambda a, b: a & b, events)
-                if self.job.data_cycle_enabled and not self.job.data_cycle:
-                    self.job.data_cycle = self.computed_cron_expr
+                airflow_schedule = reduce(lambda a, b: a & b, events)
+            if self.job.data_cycle_enabled and not self.job.data_cycle:
+                self.job.data_cycle = self.computed_cron_expr
                     
 
         def ts_as_datetime(ts, context: Context = None):
@@ -142,12 +146,12 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         )
 
     def __enter__(self):
-        DagContext.push_context_managed_dag(self.dag)
+        self.dag.__enter__()
         return super().__enter__()
     
     def __exit__(self, exc_type, exc_value, traceback):
-        DagContext.pop_context_managed_dag()
-        return super().__exit__(exc_type, exc_value, traceback)
+        super().__exit__(exc_type, exc_value, traceback)
+        self.dag.__exit__(exc_type, exc_value, traceback)
 
     def sl_transform_options(self, cron_expr: Optional[str] = None) -> Optional[str]:
         if cron_expr:
@@ -227,7 +231,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 AIRFLOW_AUTH = (AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
             else:
                 AIRFLOW_AUTH = None
-            payload = {k: kwargs[k] for k in ['conf', 'logical_date', 'execution_date', 'dag_run_id'] if k in kwargs}
+            payload = {k: kwargs[k] for k in ['conf', 'logical_date', 'dag_run_id'] if k in kwargs}
             # conf = kwargs.get('conf', {'backfill': True})
             # payload['conf'] = conf
             # generate a unique dag_run_id
@@ -236,7 +240,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             payload['dag_run_id'] = dag_run_id
             if logical_date:
                 payload['logical_date'] = logical_date + 'Z'
-                payload['execution_date'] = logical_date + 'Z'
             print(f"Starting pipeline {DAG_ID} with configuration {payload}")
             import requests
             from requests.exceptions import HTTPError
@@ -301,12 +304,13 @@ class AirflowTaskGroup(AbstractTaskGroup[TaskGroup]):
         super().__init__(group_id, orchestration_cls=AirflowOrchestration, group=group)
 
     def __enter__(self):
-        TaskGroupContext.push_context_managed_task_group(self.group)
+        self.group.__enter__()
         return super().__enter__()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        TaskGroupContext.pop_context_managed_task_group()
-        return super().__exit__(exc_type, exc_value, traceback)
+        super().__exit__(exc_type, exc_value, traceback)
+        self.group.__exit__(exc_type, exc_value, traceback)
+
 
 class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, Dataset]):
     def __init__(self, job: J, **kwargs) -> None:
@@ -384,7 +388,7 @@ class AirflowOrchestration(AbstractOrchestration[DAG, BaseOperator, TaskGroup, D
     def sl_create_task_group(self, group_id: str, pipeline: AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], **kwargs) -> AbstractTaskGroup[TaskGroup]:
         return AirflowTaskGroup(
             group_id, 
-            group=TaskGroup(group_id=group_id, **kwargs),
+            group=TaskGroup(group_id=group_id, dag=pipeline.dag, **kwargs),
             dag=pipeline.dag, 
             **kwargs
         )
