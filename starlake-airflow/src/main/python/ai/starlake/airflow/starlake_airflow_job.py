@@ -881,6 +881,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         """
         kwargs.update({'doc': kwargs.get('doc', f'Load table {table} within {domain} domain.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
+        logging.info(">>>>>>>>COUOCOUC")
         return super().sl_load(task_id=task_id, domain=domain, table=table, spark_config=spark_config, dataset=dataset, **kwargs)
 
     def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig] = None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> BaseOperator:
@@ -964,10 +965,10 @@ class StarlakeDatasetMixin:
                     StarlakeParameters.FRESHNESS_PARAMETER.value: dataset.freshness,
                 })
                 if dataset.cron: # if the dataset is scheduled
-                    self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, ts_as_datetime(data_interval_end | ts), params.sl_schedule_parameter_name, params.sl_schedule_format)}}"
+                    self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, ts_as_datetime(dag_run.data_interval_end | ts), params.sl_schedule_parameter_name, params.sl_schedule_format)}}"
                 else:
                     self.scheduled_dataset = None
-                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts))}}"
+                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts))}}"
                 uri = dataset.uri
             else:
                 self.scheduled_dataset = None
@@ -979,7 +980,7 @@ class StarlakeDatasetMixin:
                     'sl_schedule_format': None
                 })
                 kwargs['params'] = params
-                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts))}}"
+                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts))}}"
             outlets.append(Dataset(uri=uri, extra=extra))
             kwargs["outlets"] = outlets
             self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date",)
