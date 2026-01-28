@@ -881,7 +881,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         """
         kwargs.update({'doc': kwargs.get('doc', f'Load table {table} within {domain} domain.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
-        logging.info(">>>>>>>>COUOCOUC")
         return super().sl_load(task_id=task_id, domain=domain, table=table, spark_config=spark_config, dataset=dataset, **kwargs)
 
     def sl_transform(self, task_id: str, transform_name: str, transform_options: str=None, spark_config: Optional[StarlakeSparkConfig] = None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> BaseOperator:
