@@ -189,6 +189,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
                 if not context:
+                    print("no context")
                     from airflow.operators.python import get_current_context
                     context = get_current_context()
 
@@ -210,10 +211,12 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     if not isinstance(events, list):
                         continue
 
+                    if hasattr(uri, "uri"):
+                        uri = uri.uri
                     for event in events:
-                        if type(event).__name__ != "AssetEvent":
+                        if type(event).__name__ not in ["AssetEvent", "AssetEventDagRunReferenceResult"]:
                             continue
-
+                        print(event)
                         extra = event.extra or {}
                         if not extra.get("ts", None):
                             extra.update({"ts": event.timestamp})
@@ -226,7 +229,6 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             if event.timestamp > previous_event.timestamp:
                                 triggering_uris[uri] = event
                                 dataset_uris.update({uri: ds})
-
                 return list(dataset_uris.values())
 
             def find_previous_dag_runs_api(
@@ -255,7 +257,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 dr_params: Dict[str, Any] = {
                     "state": "success",
                     "limit": 100,
-                    "order_by": ["-data_interval_end", "-start_date"],
+                    "order_by": ["-logical_date", "-start_date"],
                 }
 
                 if at_scheduled_date:
@@ -268,8 +270,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 # Extract end_date values
                 end_dates = [dr.end_date for dr in dag_runs if dr.end_date]
                 logging.info(
-                    "Found %d candidate DagRuns, end_dates: [%s]",
+                    "Found %d candidate DagRuns for scheduled_date %s, end_dates: [%s]", 
                     len(dag_runs),
+                    scheduled_date.isoformat(),
                     ",".join(end_dates),
                 )
 
@@ -374,7 +377,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     return []
 
                 dataset_or_asset_id: int = dataset.id
-
+                print("Dataset found %s", dataset)
                 logging.info(
                     "Resolved dataset/asset id=%s for uri=%s",
                     dataset_or_asset_id,
@@ -384,19 +387,20 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 # ----------------------------------------------------------------------
                 # 2. Fetch events for this ID with timestamp <= ts (ordered)
                 # ----------------------------------------------------------------------
+                params_events: Dict[str, Any] = {
+                    "timestamp_lte": ts.isoformat(),
+                    "asset_id": dataset_or_asset_id,
+                    "order_by": ["timestamp"],
+                    "limit": 1000,
+                }
+
                 logging.info(
                     "Listing dataset/asset events for id=%s with timestamp <= %s",
                     dataset_or_asset_id,
                     ts.isoformat(),
                 )
 
-                params_events: Dict[str, Any] = {
-                    "timestamp_lte": ts.isoformat(),
-                    "order_by": ["timestamp"],
-                    "limit": 1000,
-                }
-
-                params_events["asset_id"] = dataset_or_asset_id
+                logging.info("searching for events %s", str(params_events))
 
                 events: List[DotDict] = client.list_events(params=params_events)
 
@@ -406,6 +410,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         uri,
                         ts.isoformat(),
                     )
+                    params_events = {
+                        "order_by": ["timestamp"],
+                        "limit": 1000,
+                    }
+                    params_events["asset_id"] = dataset_or_asset_id
+                    events = client.list_events(params=params_events)
+                    logging.info("Events found: %s", events)
+
                     return []
 
                 logging.info("Found %d events for uri=%s", len(events), uri)
@@ -430,26 +442,18 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 dag_run_index: Dict[tuple, DotDict] = {}
 
                 dr_params_base: Dict[str, Any] = {
-                    "order_by": ["data_interval_end", "start_date"],
+                    "order_by": ["-logical_date", "-start_date"],
                     "limit": 1000,
                 }
 
                 if scheduled_date_to_check_max > scheduled_date:
                     logging.info(
-                        "Filtering DagRuns with data_interval_end >= %s and <= %s",
-                        scheduled_date_to_check_min.isoformat(),
-                        scheduled_date.isoformat(),
+                        "1. Filtering DagRuns with client-side data_interval_end check only (API filter removed)",
                     )
-                    dr_params_base["data_interval_end_gte"] = scheduled_date_to_check_min.isoformat()
-                    dr_params_base["data_interval_end_lte"] = scheduled_date.isoformat()
                 else:
                     logging.info(
-                        "Filtering DagRuns with data_interval_end > %s and <= %s",
-                        scheduled_date_to_check_min.isoformat(),
-                        scheduled_date_to_check_max.isoformat(),
+                        "2. Filtering DagRuns with client-side data_interval_end check only (API filter removed)",
                     )
-                    dr_params_base["data_interval_end_gt"] = scheduled_date_to_check_min.isoformat()
-                    dr_params_base["data_interval_end_lte"] = scheduled_date_to_check_max.isoformat()
 
                 # Load DagRuns per producing DAG and index them by (dag_id, run_id)
                 for prod_dag_id in producing_dag_ids:
@@ -462,10 +466,72 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             e,
                         )
                         continue
-
                     for dr in dag_runs:
-                        key = (dr.dag_id, dr.run_id)
-                        dag_run_index[key] = dr
+                        # Client-side validation of data_interval_end
+                        data_interval_end_str = dr.get("data_interval_end")
+                        run_type = dr.get("run_type")
+                        run_id = dr.get("run_id")
+
+                        logging.info("Checking DagRun: run_id=%s, run_type=%s, data_interval_end=%s", run_id, run_type, data_interval_end_str)
+
+                        if not data_interval_end_str:
+                             logging.info("Skipping DagRun %s: Missing data_interval_end", run_id)
+                             continue
+                        
+                        from dateutil import parser
+                        import pytz
+                        try:
+                            data_interval_end = parser.isoparse(str(data_interval_end_str)).astimezone(pytz.timezone('UTC'))
+                        except Exception as e:
+                            logging.warning(
+                                "Failed to parse data_interval_end %s for run %s: %s",
+                                data_interval_end_str,
+                                run_id,
+                                e,
+                            )
+                            continue
+
+                        # Check if run type allows relaxing the upper bound check
+                        is_manual_or_triggered = run_type in ["manual", "dataset_triggered", "asset_triggered"]
+                        
+                        logging.info(
+                            "Comparing data_interval_end %s with window [%s, %s] (is_manual_or_triggered=%s)", 
+                            data_interval_end, 
+                            scheduled_date_to_check_min, 
+                            scheduled_date if scheduled_date_to_check_max > scheduled_date else scheduled_date_to_check_max,
+                            is_manual_or_triggered
+                        )
+
+                        accepted = False
+                        if scheduled_date_to_check_max > scheduled_date:
+                             # Window: [min, scheduled_date]
+                             if data_interval_end >= scheduled_date_to_check_min:
+                                 if data_interval_end <= scheduled_date:
+                                     accepted = True
+                                     logging.info("Accepted DagRun %s: Within window", run_id)
+                                 elif is_manual_or_triggered:
+                                     accepted = True
+                                     logging.info("Accepted DagRun %s: Outside window but is manual/triggered", run_id)
+                                 else:
+                                     logging.info("Rejected DagRun %s: data_interval_end > scheduled_date (%s > %s)", run_id, data_interval_end, scheduled_date)
+                             else:
+                                 logging.info("Rejected DagRun %s: data_interval_end < min (%s < %s)", run_id, data_interval_end, scheduled_date_to_check_min)
+                        else:
+                             # Window: (min, max]
+                             if data_interval_end > scheduled_date_to_check_min:
+                                 if data_interval_end <= scheduled_date_to_check_max:
+                                     accepted = True
+                                     logging.info("Accepted DagRun %s: Within window", run_id)
+                                 elif is_manual_or_triggered:
+                                     accepted = True
+                                     logging.info("Accepted DagRun %s: Outside window but is manual/triggered", run_id)
+                                 else:
+                                     logging.info("Rejected DagRun %s: data_interval_end > max (%s > %s)", run_id, data_interval_end, scheduled_date_to_check_max)
+                             else:
+                                 logging.info("Rejected DagRun %s: data_interval_end <= min (%s <= %s)", run_id, data_interval_end, scheduled_date_to_check_min)
+                        
+                        if accepted:
+                            dag_run_index[(dr.dag_id, dr.run_id)] = dr
 
                 if not dag_run_index:
                     logging.info(
@@ -523,7 +589,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
 
 
-            def ts_as_datetime(ts: Any) -> datetime:
+            def ts_as_datetime(ts: Any) -> Optional[datetime]:
+                if not ts or str(ts) == "None" or str(ts) == "b'None'":
+                    return None
                 if isinstance(ts, datetime):
                     return ts
                 else:
@@ -587,7 +655,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         print(f"The last succeeded dag run with scheduled date {last_dag_checked} started at {last_dag_ts.strftime(sl_timestamp_format)}...")
 
                 data_cycle_freshness = None
-                if self.data_cycle:
+                if self.data_cycle and str(self.data_cycle).lower().strip() != "none":
                     # the freshness of the data cycle is the time delta between 2 iterations of its schedule
                     data_cycle_freshness = get_cron_frequency(self.data_cycle)
 
@@ -737,7 +805,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             def should_continue(start_date: str = None, **context) -> bool:
                 triggering_datasets = get_triggering_datasets(context)
                 if not triggering_datasets:
-                    print("No triggering datasets found. Manually triggered.")
+                    print("No triggering datasets found. DAG Manually triggered.")
                     return True
                 else:
                     from dateutil import parser
@@ -756,6 +824,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     checking_triggering_datasets = [dataset for dataset in triggering_datasets if dataset.uri in checking_uris]
                     checking_missing_datasets = [dataset for dataset in datasets if dataset.uri in list(set(checking_uris) - set(triggering_uris.keys()))]
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
+                    print("greatest_triggering_dataset_datetime")
+                    print(greatest_triggering_dataset_datetime)
+                    print(checking_datasets)
+                    print(context)
                     return check_datasets(greatest_triggering_dataset_datetime or ts, checking_datasets, ts, context)
 
             inlets: list = kwargs.get("inlets", [])
@@ -935,7 +1007,14 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 import jinja2
 
 class StarlakeDatasetMixin:
-    """Mixin to update Airflow outlets with Starlake datasets."""
+    """Mixin to update Airflow outlets with Starlake datasets.
+
+    This mixin handles the logic for:
+    1. Parsing Starlake dataset information (URI, cron, freshness, etc.).
+    2. Registering these datasets as Airflow outlets.
+    3. Injecting necessary macros into the template rendering context.
+    4. Updating the outlet events with runtime information (timestamp, scheduled outcomes) before execution.
+    """
     def __init__(self, 
                  task_id: str, 
                  dataset: Optional[Union[str, StarlakeDataset]] = None, 
@@ -994,6 +1073,12 @@ class StarlakeDatasetMixin:
             context: Context,
             jinja_env: jinja2.Environment | None = None,
         ) -> None:
+        """
+        Injects Starlake-specific macros into the Jinja context.
+
+        This ensures that macros like `ts_as_datetime`, `sl_scheduled_dataset`, and `sl_scheduled_date`
+        are available during template rendering, even if not globally defined in the DAG.
+        """
         dag = context.get('dag')
         __ts_as_datetime = dag.user_defined_macros.get('ts_as_datetime', None) if dag.user_defined_macros else None
         if not __ts_as_datetime:
@@ -1032,6 +1117,13 @@ class StarlakeDatasetMixin:
 
     
     def pre_execute(self, context: Context):
+        """
+        Updates outlet events with runtime metadata.
+
+        This method is called before the operator executes. It ensures that the `extra` field
+        of the dataset event contains the execution timestamp and any scheduled dataset information.
+        This is crucial for downstream tasks to know exactly which dataset version/schedule was triggered.
+        """
         if not context:
             from airflow.operators.python import get_current_context
             context = get_current_context()
@@ -1052,7 +1144,12 @@ class StarlakeDatasetMixin:
         return super().pre_execute(context)
 
 class StarlakeEmptyOperator(StarlakeDatasetMixin, EmptyOperator):
-    """StarlakeEmptyOperator."""
+    """
+    An EmptyOperator that supports Starlake dataset mechanisms.
+
+    This operator is useful for creating dummy tasks (e.g., start/end markers) that still need
+    to participate in the Starlake dataset event propagation and scheduling logic.
+    """
     def __init__(self, 
                  task_id: str, 
                  dataset: Optional[Union[str, StarlakeDataset]] = None, 

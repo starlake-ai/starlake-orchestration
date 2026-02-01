@@ -15,6 +15,7 @@
 #
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -22,7 +23,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from airflow.configuration import conf
-from airflow.sdk.bases.hook import BaseHook
 
 
 log = logging.getLogger(__name__)
@@ -31,8 +31,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
-
-
 
 
 def api_prefix() -> str:
@@ -64,19 +62,22 @@ def to_dotdict(obj: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Airflow API Client (supports Airflow 3)
+# Airflow API Client (HTTP REST API only - Airflow 3.0 blocks direct ORM access)
 # ---------------------------------------------------------------------------
 
-class StarlakeAirflowApiClient(BaseHook):
+class StarlakeAirflowApiClient:
     """
-    Client for interacting with the Airflow API (v2).
+    Client for interacting with the Airflow REST API (v2).
+    
+    NOTE: Airflow 3.0 blocks direct ORM access from task code with the error:
+    "Direct database access via the ORM is not allowed in Airflow 3.0"
+    
+    Therefore, this client ONLY uses the HTTP REST API for all operations.
     
     This client handles:
-    - Authentication via JWT (if configured).
-    - Querying dataset events (AssetEvents).
-    - Triggering DAGs via the REST API.
-    
-    It abstracts away the differences between Airflow versions (now focused on v2/Airflow 3).
+    - HTTP REST API requests with retry logic
+    - Authentication via JWT Bearer tokens
+    - Querying DagRuns, TaskInstances, Assets/Datasets, and AssetEvents
     """
 
     def __init__(
@@ -85,19 +86,59 @@ class StarlakeAirflowApiClient(BaseHook):
             timeout: int = 30,
             max_retries: int = 3,
     ) -> None:
-
+        """
+        Initialize the Airflow API client.
+        
+        Args:
+            conn_id: Airflow connection ID for HTTP authentication (optional)
+            timeout: HTTP request timeout in seconds
+            max_retries: Number of HTTP retry attempts
+        """
+        log.info("Initializing StarlakeAirflowApiClient (conn_id=%s, timeout=%s, max_retries=%s)", 
+                 conn_id, timeout, max_retries)
+        
         self.timeout = timeout
+        self._init_http_client(conn_id, max_retries)
+        log.info("StarlakeAirflowApiClient initialization complete - using HTTP REST API")
 
-
-        # Base URL from airflow.cfg
-        base = conf.get("webserver", "base_url").rstrip("/")
-        self.base_url = base
-        self.api_base_url = f"{base}{api_prefix()}"
+    def _init_http_client(self, conn_id: str, max_retries: int) -> None:
+        """Initialize HTTP client components for REST API access."""
+        log.info("Initializing HTTP client for REST API access...")
+        
+        # Base URL from environment or airflow.cfg
+        base = os.environ.get("AIRFLOW_API_BASE_URL")
+        if base:
+            log.info("Using AIRFLOW_API_BASE_URL from environment: %s", base)
+        else:
+            log.info("AIRFLOW_API_BASE_URL not set, checking airflow.cfg...")
+            try:
+                base = conf.get("api", "base_url")
+                log.info("Using base_url from [api] config: %s", base)
+            except Exception:
+                try:
+                    base = conf.get("webserver", "base_url")
+                    log.info("Using base_url from [webserver] config: %s", base)
+                except Exception:
+                    base = "http://localhost:8080"
+                    log.info("No base_url found in config, using default: %s", base)
+                    
+        self.base_url = base.rstrip("/")
+        self.base_url = "http://starlake-airflow:8080/airflow"
+        self.api_base_url = f"{self.base_url}{api_prefix()}"
+        log.info("API base URL set to: %s", self.api_base_url)
 
         # Airflow connection (username/password)
-        self.conn = BaseHook.get_connection(conn_id)
+        log.info("Looking up Airflow connection: %s", conn_id)
+        try:
+            from airflow.sdk.bases.hook import BaseHook
+            self.conn = BaseHook.get_connection(conn_id)
+            log.info("Found Airflow connection '%s' with login: %s", conn_id, self.conn.login)
+        except Exception as e:
+            log.info("Could not find Airflow connection '%s' (%s), using default credentials", conn_id, e)
+            self.conn = DotDict({"login": "airflow", "password": "airflow"})
 
         # HTTP session with retry strategy
+        log.info("Creating HTTP session with retry strategy (max_retries=%s)", max_retries)
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
 
@@ -111,12 +152,12 @@ class StarlakeAirflowApiClient(BaseHook):
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
-        # Authentication mode
-        # Airflow 3.x → JWT Bearer
+        # Authentication mode: Airflow 3.x → JWT Bearer
+        log.info("Configuring JWT Bearer authentication...")
         self._configure_bearer_auth()
 
     # -----------------------------------------------------------------------
-    # Authentication for Airflow 3.x
+    # Authentication for HTTP mode (Airflow 3.x)
     # -----------------------------------------------------------------------
 
     def _configure_bearer_auth(self) -> None:
@@ -124,12 +165,15 @@ class StarlakeAirflowApiClient(BaseHook):
         Obtain a JWT token via POST /auth/token and configure Authorization header.
         """
         token_url = self.base_url + "/auth/token"
+        log.info("Requesting JWT token from: %s", token_url)
 
         payload = {}
         if self.conn.login and self.conn.password:
             payload = {"username": self.conn.login, "password": self.conn.password}
+            log.info("Using credentials for user: %s", self.conn.login)
+        else:
+            log.info("No credentials provided, requesting token without authentication")
 
-        log.debug("Requesting JWT token from %s", token_url)
         resp = requests.post(
             token_url,
             json=payload,
@@ -138,6 +182,7 @@ class StarlakeAirflowApiClient(BaseHook):
         )
 
         if not resp.ok:
+            log.error("Failed to obtain JWT token: HTTP %s - %s", resp.status_code, resp.text[:500])
             raise RuntimeError(
                 f"Failed to obtain JWT token ({resp.status_code}): {resp.text}"
             )
@@ -151,12 +196,14 @@ class StarlakeAirflowApiClient(BaseHook):
         )
 
         if not token:
+            log.error("JWT token not found in response keys: %s", list(data.keys()))
             raise RuntimeError(f"JWT token not found in response: {data}")
 
+        log.info("JWT token obtained successfully (token length: %d chars)", len(token))
         self.session.headers["Authorization"] = f"Bearer {token}"
 
     # -----------------------------------------------------------------------
-    # Internal helpers
+    # HTTP helpers
     # -----------------------------------------------------------------------
 
     def _url(self, path: str) -> str:
@@ -171,7 +218,7 @@ class StarlakeAirflowApiClient(BaseHook):
     ) -> Any:
 
         url = self._url(path)
-        log.debug("Airflow API %s %s params=%s json=%s", method, url, params, json)
+        log.info("HTTP %s %s (params=%s)", method, url, params)
 
         resp = self.session.request(
             method=method,
@@ -183,27 +230,25 @@ class StarlakeAirflowApiClient(BaseHook):
 
         # Resource not found
         if resp.status_code == 404:
-            log.debug("Airflow API 404 Not Found for %s", url)
+            log.info("HTTP 404 Not Found for %s", url)
             return None
 
         # No content
         if resp.status_code == 204:
+            log.info("HTTP 204 No Content for %s", url)
             return None
 
         # Other errors
         if not (200 <= resp.status_code < 300):
-            log.error(
-                "Airflow API error %s %s: %s",
-                resp.status_code,
-                url,
-                resp.text[:1000],
-            )
+            log.error("HTTP error %s for %s: %s", resp.status_code, url, resp.text[:1000])
             raise RuntimeError(
                 f"Airflow API error {resp.status_code} for {url}: {resp.text}"
             )
 
         # Normal JSON response
-        return to_dotdict(resp.json())
+        result = to_dotdict(resp.json())
+        log.info("HTTP %s %s completed successfully", method, url)
+        return result
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return self._request("GET", path, params=params)
@@ -216,41 +261,65 @@ class StarlakeAirflowApiClient(BaseHook):
         """
         List DagRuns for a given DAG.
         """
+        log.info("list_dag_runs called for dag_id=%s with params=%s", dag_id, params)
         resp = self._get(f"dags/{dag_id}/dagRuns", params=params)
-        return resp.dag_runs
+        runs = resp.dag_runs if resp else []
+        log.info("list_dag_runs returned %d runs for dag_id=%s", len(runs), dag_id)
+        return runs
 
-    def get_dag_run(self, dag_id: str, dag_run_id: str) -> DotDict:
-        return self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}")
+    def get_dag_run(self, dag_id: str, dag_run_id: str) -> Optional[DotDict]:
+        """Get a specific DagRun."""
+        log.info("get_dag_run called for dag_id=%s, dag_run_id=%s", dag_id, dag_run_id)
+        result = self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}")
+        log.info("get_dag_run result: %s", "found" if result else "not found")
+        return result
 
     # -----------------------------------------------------------------------
     # Task Instances
     # -----------------------------------------------------------------------
 
     def list_task_instances(self, dag_id: str, dag_run_id: str, **params) -> List[DotDict]:
+        """List task instances for a specific DagRun."""
+        log.info("list_task_instances called for dag_id=%s, dag_run_id=%s with params=%s", dag_id, dag_run_id, params)
         resp = self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances", params=params)
-        return resp.task_instances
+        instances = resp.task_instances if resp else []
+        log.info("list_task_instances returned %d task instances", len(instances))
+        return instances
 
     def list_dag_task_instances(self, dag_id: str, **params) -> List[DotDict]:
         """
-        List IDs of task instances for a given DAG across all runs.
-        Ideally uses /dags/{dag_id}/dagRuns/~/taskInstances if available.
+        List task instances for a given DAG across all runs.
         """
+        log.info("list_dag_task_instances called for dag_id=%s with params=%s", dag_id, params)
         resp = self._get(f"dags/{dag_id}/dagRuns/~/taskInstances", params=params)
-        return resp.task_instances
+        instances = resp.task_instances if resp else []
+        log.info("list_dag_task_instances returned %d task instances", len(instances))
+        return instances
 
     # -----------------------------------------------------------------------
     # Assets (Airflow 3.x)
     # -----------------------------------------------------------------------
+
     def get_dataset_by_uri(self, uri: str) -> Optional[DotDict]:
         """
-        Unified interface for dataset (Airflow 2.4+) and asset (Airflow 3.x) by URI.
+        Get dataset/asset by URI.
         """
-        return self._get(f"assets/{uri}")
+        log.info("get_dataset_by_uri called for uri=%s", uri)
+        # Try finding by URI via list endpoint
+        resp = self._get("assets", params={"uri_pattern": uri, "limit": 1})
+        if resp and resp.assets:
+            result = resp.assets[0]
+            log.info("Found asset: id=%s, uri=%s", result.id, result.uri)
+            return result
+        log.info("No asset found for uri=%s", uri)
+        return None
 
     def list_events(self, **params) -> List[DotDict]:
         """
-        Unified interface for dataset events (Airflow 2.4+) and asset events (Airflow 3.x).
+        List asset events.
         """
+        log.info("list_events called with params=%s", str(params))
         resp = self._get("assets/events", params=params)
-        return resp.events
-
+        events = resp.asset_events if resp else []
+        log.info("list_events returned %d events", len(events))
+        return events
