@@ -24,7 +24,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSpark
 
 from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
-from ai.starlake.airflow.starlake_airflow_api import DotDict, StarlakeAirflowApiClient
+
 
 from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range, sl_schedule_format
 
@@ -231,576 +231,41 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                 dataset_uris.update({uri: ds})
                 return list(dataset_uris.values())
 
-            def find_previous_dag_runs_api(
-                    dag,
-                    client: StarlakeAirflowApiClient,
-                    scheduled_date: datetime,
-                    at_scheduled_date: bool = False,
-            ) -> List[DotDict]:
-                """
-                Find previous successful DagRuns for the current DAG, excluding runs
-                where at least one leaf task is SKIPPED.
-
-                Uses Airflow public API via StarlakeAirflowApiClient.
-                """
-
-                # ----------------------------------------------------------------------
-                # 1. Identify leaf tasks
-                # ----------------------------------------------------------------------
-                leaves = dag.leaves
-                leaf_task_ids = [t.task_id for t in leaves]
-                logging.info("Leaf tasks to check: [%s]", ",".join(leaf_task_ids))
-
-                # ----------------------------------------------------------------------
-                # 2. Build DagRun query params
-                # ----------------------------------------------------------------------
-                dr_params: Dict[str, Any] = {
-                    "state": "success",
-                    "limit": 100,
-                    "order_by": ["-logical_date", "-start_date"],
-                }
-
-                if at_scheduled_date:
-                    dr_params["end_date_lte"] = scheduled_date.isoformat()
-                else:
-                    dr_params["end_date_lt"] = scheduled_date.isoformat()
-
-                dag_runs = client.list_dag_runs(dag_id, **dr_params)
-
-                # Extract end_date values
-                end_dates = [dr.end_date for dr in dag_runs if dr.end_date]
-                logging.info(
-                    "Found %d candidate DagRuns for scheduled_date %s, end_dates: [%s]", 
-                    len(dag_runs),
-                    scheduled_date.isoformat(),
-                    ",".join(end_dates),
-                )
-
-                max_end_date = max(end_dates) if end_dates else scheduled_date.isoformat()
-
-                filtered_runs: List[DotDict] = []
-
-                # ----------------------------------------------------------------------
-                # 3. Build TaskInstance params (only valid keys)
-                # ----------------------------------------------------------------------
-                from airflow.utils.state import State
-
-                ti_base_params = {
-                    "limit": 1000,
-                    "end_date_lte": max_end_date,
-                    "order_by": ["-end_date", "-start_date"],
-                    "state": State.SKIPPED,
-                }
-
-                # ----------------------------------------------------------------------
-                # 4. Optimization: only one leaf → one API call
-                # ----------------------------------------------------------------------
-                if len(leaf_task_ids) == 1:
-                    leaf = leaf_task_ids[0]
-                    logging.info("Optimizing: only one leaf task (%s)", leaf)
-
-                    ti_params = ti_base_params.copy()
-                    ti_params["task_id"] = leaf
-
-                    # Use new method to list task instances across all runs
-                    ti_list = client.list_dag_task_instances(dag_id, params=ti_params)
-
-                    skipped_run_ids = {ti.dag_run_id for ti in ti_list}
-
-                    for dr in dag_runs:
-                        if dr.dag_run_id not in skipped_run_ids:
-                            filtered_runs.append(dr)
-
-                else:
-                    # ------------------------------------------------------------------
-                    # 5. Standard path: check each DagRun individually
-                    # ------------------------------------------------------------------
-                    for dr in dag_runs:
-                        dag_run_id = dr.dag_run_id
-
-                        ti_params = ti_base_params.copy()
-
-                        ti_list = client.list_task_instances(
-                            dag_id,
-                            dag_run_id,
-                            params=ti_params,
-                        )
-
-                        if any(ti.task_id in leaf_task_ids for ti in ti_list):
-                            continue
-
-                        filtered_runs.append(dr)
-
-                # ----------------------------------------------------------------------
-                # 6. Final sort (API already sorts, but we ensure correctness)
-                # ----------------------------------------------------------------------
-                def sort_key(run):
-                    return (run.data_interval_end, run.start_date)
-
-                filtered_runs.sort(key=sort_key, reverse=True)
-
-                return filtered_runs
-
-
-
-            def find_datasets_events_api(
-                    client: StarlakeAirflowApiClient,
-                    uri: str,
-                    scheduled_date_to_check_min: datetime,
-                    scheduled_date_to_check_max: datetime,
-                    ts: datetime,
-                    scheduled_date: datetime,
-            ) -> List[DotDict]:
-                """
-                API-based equivalent of the original SQLAlchemy-based find_dataset_events.
-
-                Steps:
-                1. Resolve dataset/asset ID from URI.
-                2. Fetch events for this ID with timestamp <= ts, ordered by timestamp.
-                3. Collect all producing DAG IDs from these events.
-                4. For each producing DAG, list DagRuns in the data_interval_end window.
-                5. Cross events with DagRuns via (source_dag_id, source_run_id).
-                6. Sort events by producing DagRun.data_interval_end ascending.
-                """
-
-                # ----------------------------------------------------------------------
-                # 1. Check feature support and resolve dataset/asset by URI
-                # ----------------------------------------------------------------------
-
-
-                logging.info("Resolving dataset/asset by uri=%s", uri)
-
-                dataset: Optional[DotDict] = client.get_dataset_by_uri(uri)
-
-                if not dataset:
-                    logging.info("No dataset/asset found for uri=%s", uri)
-                    return []
-
-                dataset_or_asset_id: int = dataset.id
-                print("Dataset found %s", dataset)
-                logging.info(
-                    "Resolved dataset/asset id=%s for uri=%s",
-                    dataset_or_asset_id,
-                    uri,
-                )
-
-                # ----------------------------------------------------------------------
-                # 2. Fetch events for this ID with timestamp <= ts (ordered)
-                # ----------------------------------------------------------------------
-                params_events: Dict[str, Any] = {
-                    "timestamp_lte": ts.isoformat(),
-                    "asset_id": dataset_or_asset_id,
-                    "order_by": ["timestamp"],
-                    "limit": 1000,
-                }
-
-                logging.info(
-                    "Listing dataset/asset events for id=%s with timestamp <= %s",
-                    dataset_or_asset_id,
-                    ts.isoformat(),
-                )
-
-                logging.info("searching for events %s", str(params_events))
-
-                events: List[DotDict] = client.list_events(params=params_events)
-
-                if not events:
-                    logging.info(
-                        "No events found for uri=%s and timestamp <= %s",
-                        uri,
-                        ts.isoformat(),
-                    )
-                    params_events = {
-                        "order_by": ["timestamp"],
-                        "limit": 1000,
-                    }
-                    params_events["asset_id"] = dataset_or_asset_id
-                    events = client.list_events(params=params_events)
-                    logging.info("Events found: %s", events)
-
-                    return []
-
-                logging.info("Found %d events for uri=%s", len(events), uri)
-
-                # ----------------------------------------------------------------------
-                # 3. Collect producing DAG IDs from events
-                # ----------------------------------------------------------------------
-                producing_dag_ids = {ev.source_dag_id for ev in events if ev.source_dag_id}
-                if not producing_dag_ids:
-                    logging.info("No producing DAG IDs found in events for uri=%s", uri)
-                    return []
-
-                logging.info(
-                    "Producing DAG IDs for uri=%s: [%s]",
-                    uri,
-                    ",".join(sorted(producing_dag_ids)),
-                )
-
-                # ----------------------------------------------------------------------
-                # 4. For each producing DAG, list DagRuns in the data_interval_end window
-                # ----------------------------------------------------------------------
-                dag_run_index: Dict[tuple, DotDict] = {}
-
-                dr_params_base: Dict[str, Any] = {
-                    "order_by": ["-logical_date", "-start_date"],
-                    "limit": 1000,
-                }
-
-                if scheduled_date_to_check_max > scheduled_date:
-                    logging.info(
-                        "1. Filtering DagRuns with client-side data_interval_end check only (API filter removed)",
-                    )
-                else:
-                    logging.info(
-                        "2. Filtering DagRuns with client-side data_interval_end check only (API filter removed)",
-                    )
-
-                # Load DagRuns per producing DAG and index them by (dag_id, run_id)
-                for prod_dag_id in producing_dag_ids:
-                    try:
-                        dag_runs = client.list_dag_runs(prod_dag_id, **dr_params_base)
-                    except Exception as e:
-                        logging.warning(
-                            "Failed to list DagRuns for producing DAG %s: %s",
-                            prod_dag_id,
-                            e,
-                        )
-                        continue
-                    for dr in dag_runs:
-                        # Client-side validation of data_interval_end
-                        data_interval_end_str = dr.get("data_interval_end")
-                        run_type = dr.get("run_type")
-                        run_id = dr.get("run_id")
-
-                        logging.info("Checking DagRun: run_id=%s, run_type=%s, data_interval_end=%s", run_id, run_type, data_interval_end_str)
-
-                        if not data_interval_end_str:
-                             logging.info("Skipping DagRun %s: Missing data_interval_end", run_id)
-                             continue
-                        
-                        from dateutil import parser
-                        import pytz
-                        try:
-                            data_interval_end = parser.isoparse(str(data_interval_end_str)).astimezone(pytz.timezone('UTC'))
-                        except Exception as e:
-                            logging.warning(
-                                "Failed to parse data_interval_end %s for run %s: %s",
-                                data_interval_end_str,
-                                run_id,
-                                e,
-                            )
-                            continue
-
-                        # Check if run type allows relaxing the upper bound check
-                        is_manual_or_triggered = run_type in ["manual", "dataset_triggered", "asset_triggered"]
-                        
-                        logging.info(
-                            "Comparing data_interval_end %s with window [%s, %s] (is_manual_or_triggered=%s)", 
-                            data_interval_end, 
-                            scheduled_date_to_check_min, 
-                            scheduled_date if scheduled_date_to_check_max > scheduled_date else scheduled_date_to_check_max,
-                            is_manual_or_triggered
-                        )
-
-                        accepted = False
-                        if scheduled_date_to_check_max > scheduled_date:
-                             # Window: [min, scheduled_date]
-                             if data_interval_end >= scheduled_date_to_check_min:
-                                 if data_interval_end <= scheduled_date:
-                                     accepted = True
-                                     logging.info("Accepted DagRun %s: Within window", run_id)
-                                 elif is_manual_or_triggered:
-                                     accepted = True
-                                     logging.info("Accepted DagRun %s: Outside window but is manual/triggered", run_id)
-                                 else:
-                                     logging.info("Rejected DagRun %s: data_interval_end > scheduled_date (%s > %s)", run_id, data_interval_end, scheduled_date)
-                             else:
-                                 logging.info("Rejected DagRun %s: data_interval_end < min (%s < %s)", run_id, data_interval_end, scheduled_date_to_check_min)
-                        else:
-                             # Window: (min, max]
-                             if data_interval_end > scheduled_date_to_check_min:
-                                 if data_interval_end <= scheduled_date_to_check_max:
-                                     accepted = True
-                                     logging.info("Accepted DagRun %s: Within window", run_id)
-                                 elif is_manual_or_triggered:
-                                     accepted = True
-                                     logging.info("Accepted DagRun %s: Outside window but is manual/triggered", run_id)
-                                 else:
-                                     logging.info("Rejected DagRun %s: data_interval_end > max (%s > %s)", run_id, data_interval_end, scheduled_date_to_check_max)
-                             else:
-                                 logging.info("Rejected DagRun %s: data_interval_end <= min (%s <= %s)", run_id, data_interval_end, scheduled_date_to_check_min)
-                        
-                        if accepted:
-                            dag_run_index[(dr.dag_id, dr.run_id)] = dr
-
-                if not dag_run_index:
-                    logging.info(
-                        "No DagRuns found in the data_interval_end window for any producing DAG of uri=%s",
-                        uri,
-                    )
-                    return []
-
-                logging.info(
-                    "Indexed %d DagRuns for producing DAGs of uri=%s",
-                    len(dag_run_index),
-                    uri,
-                )
-
-                # ----------------------------------------------------------------------
-                # 5. Cross events with DagRuns and filter on data_interval_end window
-                # ----------------------------------------------------------------------
-                filtered_events: List[DotDict] = []
-
-                for ev in events:
-                    key = (ev.source_dag_id, ev.source_run_id)
-                    dr = dag_run_index.get(key)
-                    if not dr:
-                        # Either no DagRun for this event in the window or missing run
-                        continue
-
-                    ev.update({"dataset": dataset or {"extra": {}}})
-
-                    # At this point, dr.data_interval_end is already within the desired window
-                    filtered_events.append(ev)
-
-                if not filtered_events:
-                    logging.info(
-                        "No events remained after crossing with DagRuns for uri=%s",
-                        uri,
-                    )
-                    return []
-
-                # ----------------------------------------------------------------------
-                # 6. Sort by producing DagRun.data_interval_end ascending
-                # ----------------------------------------------------------------------
-                def sort_key(ev: DotDict):
-                    dr = dag_run_index[(ev.source_dag_id, ev.source_run_id)]
-                    return dr.data_interval_end
-
-                filtered_events.sort(key=sort_key)
-
-                logging.info(
-                    "Returning %d filtered events for uri=%s",
-                    len(filtered_events),
-                    uri,
-                )
-
-                return filtered_events
-
-
-
-            def ts_as_datetime(ts: Any) -> Optional[datetime]:
-                if not ts or str(ts) == "None" or str(ts) == "b'None'":
-                    return None
-                if isinstance(ts, datetime):
-                    return ts
-                else:
-                    from dateutil import parser
-                    import pytz
-                    return parser.isoparse(str(ts)).astimezone(pytz.timezone('UTC'))
-
             def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context) -> bool:
-                from croniter import croniter
                 # We start by initializing the result to True (datasets are present)
                 # We will set it to False if any required dataset is missing.
-                dataset_res = True
+                # dataset_res = True
 
                 # We also track if we found at least one dataset event if checked via API
-                found_at_least_one = False
+                # found_at_least_one = False
 
                 # Iterate over all datasets that this job depends on
-                missing_datasets = []
-                max_scheduled_date = scheduled_date
+                # missing_datasets = []
+                # max_scheduled_date = scheduled_date
 
                 previous_dag_checked: Optional[datetime] = None
-                last_dag_checked: Optional[datetime] = None
-                last_dag_ts: Optional[datetime] = None
+                # last_dag_checked: Optional[datetime] = None
+                # last_dag_ts: Optional[datetime] = None
 
-                dag = context["dag"]
-                client = StarlakeAirflowApiClient()
+                dag_run = context.get("dag_run")
+                # dag = context["dag"]
+                # client = StarlakeAirflowApiClient()
 
                 # we look for the first succeeded dag run before the scheduled date
-                __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=False)
-
-                if __dag_runs and len(__dag_runs) > 0:
-                    # we take the first dag run before the scheduled date
-                    __dag_run = __dag_runs[0]
-                    previous_dag_checked = ts_as_datetime(__dag_run.data_interval_end)
-                    print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked} and start date {__dag_run.start_date}")
-
-                __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=True)
-                if __dag_runs and len(__dag_runs) > 0:
-                    # we take the first dag run before the scheduled date
-                    __dag_run = __dag_runs[0]
-                    last_dag_checked = ts_as_datetime(__dag_run.data_interval_end)
-                    last_dag_ts = ts_as_datetime(__dag_run.start_date)
-                    print(f"Found last succeeded dag run {__dag_run.dag_id} with scheduled date {last_dag_checked} and start date {last_dag_ts}")
-
+                if dag_run:
+                    previous_dag_checked = dag_run.data_interval_start
+                
                 if not previous_dag_checked:
-                    # if the dag never run successfuly,
-                    # we set the previous dag checked to the start date of the dag
-                    previous_dag_checked = dag.start_date
-                    print(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
+                    previous_dag_checked = ts
 
-                if last_dag_ts and last_dag_checked:
-                    if last_dag_checked.strftime(sl_timestamp_format) == scheduled_date.strftime(sl_timestamp_format):
-                        diff: timedelta = ts - last_dag_ts
-                        if diff.total_seconds() <= self.min_timedelta_between_runs:
-                            # we just run successfuly this dag, we should skip the current execution
-                            print(f"The last succeeded dag run with scheduled date {last_dag_checked} started less than {self.min_timedelta_between_runs} seconds ago ({diff.seconds} seconds)... The current DAG execution at {ts.strftime(sl_timestamp_format)} will be skipped")
-                            return False
-                        else:
-                            print(f"The last succeeded dag run with scheduled date {last_dag_checked} started more than {self.min_timedelta_between_runs} seconds ago ({diff.seconds} seconds)...")
-                    else:
-                        print(f"The last succeeded dag run with scheduled date {last_dag_checked} started at {last_dag_ts.strftime(sl_timestamp_format)}...")
+                max_scheduled_date = scheduled_date
 
-                data_cycle_freshness = None
-                if self.data_cycle and str(self.data_cycle).lower().strip() != "none":
-                    # the freshness of the data cycle is the time delta between 2 iterations of its schedule
-                    data_cycle_freshness = get_cron_frequency(self.data_cycle)
-
-                print(f"Start date is {ts.strftime(sl_timestamp_format)} and scheduled date is {scheduled_date.strftime(sl_timestamp_format)}")
-
-                # we retrieve the most frequent cron(s)
-                all_crons = set()
-                most_frequent = set()
-                for dataset in datasets:
-                    extra = dataset.extra or {}
-                    cron = extra.get(StarlakeParameters.CRON_PARAMETER.value, None)
-                    if cron:
-                        all_crons.add(cron)
-                if all_crons and len(all_crons) > 0:
-                    most_frequent = set(most_frequent_crons(all_crons))
-
-                # we check the datasets
-                for dataset in datasets:
-                    extra = dataset.extra or {}
-                    original_cron = extra.get(StarlakeParameters.CRON_PARAMETER.value, None)
-                    cron = original_cron or self.data_cycle
-                    scheduled = cron and is_valid_cron(cron)
-                    freshness = int(extra.get(StarlakeParameters.FRESHNESS_PARAMETER.value, 0))
-                    optional = False
-                    beyond_data_cycle_allowed = False
-                    if data_cycle_freshness:
-                        original_scheduled = original_cron and is_valid_cron(original_cron)
-                        if self.optional_dataset_enabled:
-                            # we check if the dataset is optional by comparing its freshness with that of the data cycle
-                            # the freshness of a scheduled dataset is the time delta between 2 iterations of its schedule
-                            # the freshness of a non scheduled dataset is defined by its freshness parameter
-                            optional = (original_scheduled and abs(data_cycle_freshness.total_seconds()) < abs(get_cron_frequency(original_cron).total_seconds())) or (not original_scheduled and abs(data_cycle_freshness.total_seconds()) < freshness)
-                        if self.beyond_data_cycle_enabled:
-                            # we check if the dataset scheduled date is allowed to be beyond the data cycle by comparing its freshness with that of the data cycle
-                            beyond_data_cycle_allowed = (original_scheduled and abs(data_cycle_freshness.total_seconds()) < abs(get_cron_frequency(original_cron).total_seconds() + freshness)) or (not original_scheduled and abs(data_cycle_freshness.total_seconds()) < freshness)
-                    found = False
-                    if optional:
-                        print(f"Dataset {dataset.uri} is optional, we skip it")
-                        continue
-                    elif scheduled:
-                        if not cron in most_frequent or cron.startswith('0 0') or get_cron_frequency(cron).days == 0:
-                            dates_range = scheduled_dates_range(cron, scheduled_date)
-                        else:
-                            dates_range = scheduled_dates_range(cron, croniter(cron, scheduled_date.replace(hour=0, minute=0, second=0, microsecond=0)).get_next(datetime))
-                        scheduled_date_to_check_min = dates_range[0]
-                        scheduled_date_to_check_max = dates_range[1]
-                        if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
-                            scheduled_date_to_check_min = previous_dag_checked
-                        if beyond_data_cycle_allowed:
-                            scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
-                            scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
-                        scheduled_datetime = get_scheduled_datetime(dataset)
-                        if scheduled_datetime:
-                            # we check if the scheduled datetime is between the scheduled date to check min and max
-                            if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
-                                # we will check within the inlet events
-                                print(f"Triggering dataset {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                            else:
-                                found = True
-                                print(f"Found trigerring dataset {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                                if scheduled_datetime > max_scheduled_date:
-                                    max_scheduled_date = scheduled_datetime
-                        if not found:
-                            events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
-                            if events:
-                                dataset_events: Union[List[DotDict], List] = events
-                                nb_events = len(events)
-                                print(f"Found {nb_events} dataset event(s) for {dataset.uri} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                                dataset_event = None
-                                i = 1
-                                # we check the dataset events in reverse order
-                                while i <= nb_events and not found:
-                                    event = dataset_events[-i]
-                                    extra = event.extra or event.dataset.extra or dataset.extra or {}
-                                    scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
-                                    if scheduled_datetime:
-                                        if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
-                                            print(f"Dataset event {event.id} for {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                                            i += 1
-                                        else:
-                                            found = True
-                                            print(f"Dataset event {event.id} for {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max} found")
-                                            dataset_event = event
-                                            if scheduled_datetime > max_scheduled_date:
-                                                max_scheduled_date = scheduled_datetime
-                                            break
-                                    else:
-                                        i += 1
-                            if not found:
-                                missing_datasets.append(dataset)
-                    else:
-                        # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
-                        scheduled_date_to_check_min = previous_dag_checked - timedelta(seconds=freshness)
-                        scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
-                        scheduled_datetime = None
-                        dataset_event = None
-                        if client:
-                            events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
-                        else:
-                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
-                        if events:
-                            dataset_events = events
-                            nb_events = len(events)
-                            print(f"Found {nb_events} dataset event(s) for {dataset.uri} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                            i = 1
-                            # we check the dataset events in reverse order
-                            while i <= nb_events and not found:
-                                event = dataset_events[-i]
-                                extra = event.extra or event.dataset.extra or dataset.extra or {}
-                                scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
-                                if scheduled_datetime:
-                                    if scheduled_datetime > previous_dag_checked:
-                                        if scheduled_date_to_check_min > scheduled_datetime:
-                                            # we stop because all previous dataset events would be also before the scheduled date to check
-                                            break
-                                        elif scheduled_datetime > scheduled_date_to_check_max:
-                                            i += 1
-                                        else:
-                                            found = True
-                                            print(f"Dataset event {event.id} for {dataset.uri} with scheduled datetime {scheduled_datetime} after {previous_dag_checked} and  around the scheduled date {scheduled_date} +- {freshness} in seconds found")
-                                            dataset_event = event
-                                            if scheduled_datetime <= scheduled_date:
-                                                # we stop because all previous dataset events would be also before the scheduled date but not closer than the current one
-                                                break
-                                    else:
-                                        # we stop because all previous dataset events would be also before the previous dag checked
-                                        break
-                                else:
-                                    i += 1
-                        if not found or not scheduled_datetime:
-                            missing_datasets.append(dataset)
-                            print(f"No dataset event for {dataset.uri} found since the previous dag checked {previous_dag_checked} and around the scheduled date {scheduled_date} +- {freshness} in seconds")
-                        else:
-                            print(f"Found dataset event {dataset_event.id} for {dataset.uri} after the previous dag checked {previous_dag_checked}  and  around the scheduled date {scheduled_date} +- {freshness} in seconds")
-                            if scheduled_datetime > max_scheduled_date:
-                                max_scheduled_date = scheduled_datetime
-                # if all the required datasets have been found, we can continue the dag
-                checked = not missing_datasets
-                if checked:
-                    print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
-                    print(f"Starlake start date will be set to {previous_dag_checked}")
-                    context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value, value=previous_dag_checked)
-                    print(f"Starlake end date will be set to {max_scheduled_date}")
-                    context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, value=max_scheduled_date)
-                return checked
+                print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
+                print(f"Starlake start date will be set to {previous_dag_checked}")
+                context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value, value=previous_dag_checked)
+                print(f"Starlake end date will be set to {max_scheduled_date}")
+                context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, value=max_scheduled_date)
+                return True
 
             def should_continue(start_date: str = None, **context) -> bool:
                 triggering_datasets = get_triggering_datasets(context)
@@ -824,10 +289,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     checking_triggering_datasets = [dataset for dataset in triggering_datasets if dataset.uri in checking_uris]
                     checking_missing_datasets = [dataset for dataset in datasets if dataset.uri in list(set(checking_uris) - set(triggering_uris.keys()))]
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
-                    print("greatest_triggering_dataset_datetime")
-                    print(greatest_triggering_dataset_datetime)
-                    print(checking_datasets)
-                    print(context)
+                    print("greatest_triggering_dataset_datetime=%s", str(greatest_triggering_dataset_datetime))
+                    print("checking_datasets=%s", str(checking_datasets))
+                    print("context=%s", str(context))
                     return check_datasets(greatest_triggering_dataset_datetime or ts, checking_datasets, ts, context)
 
             inlets: list = kwargs.get("inlets", [])
@@ -1007,14 +471,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 import jinja2
 
 class StarlakeDatasetMixin:
-    """Mixin to update Airflow outlets with Starlake datasets.
-
-    This mixin handles the logic for:
-    1. Parsing Starlake dataset information (URI, cron, freshness, etc.).
-    2. Registering these datasets as Airflow outlets.
-    3. Injecting necessary macros into the template rendering context.
-    4. Updating the outlet events with runtime information (timestamp, scheduled outcomes) before execution.
-    """
+    """Mixin to update Airflow outlets with Starlake datasets."""
     def __init__(self, 
                  task_id: str, 
                  dataset: Optional[Union[str, StarlakeDataset]] = None, 
@@ -1073,12 +530,6 @@ class StarlakeDatasetMixin:
             context: Context,
             jinja_env: jinja2.Environment | None = None,
         ) -> None:
-        """
-        Injects Starlake-specific macros into the Jinja context.
-
-        This ensures that macros like `ts_as_datetime`, `sl_scheduled_dataset`, and `sl_scheduled_date`
-        are available during template rendering, even if not globally defined in the DAG.
-        """
         dag = context.get('dag')
         __ts_as_datetime = dag.user_defined_macros.get('ts_as_datetime', None) if dag.user_defined_macros else None
         if not __ts_as_datetime:
@@ -1117,13 +568,6 @@ class StarlakeDatasetMixin:
 
     
     def pre_execute(self, context: Context):
-        """
-        Updates outlet events with runtime metadata.
-
-        This method is called before the operator executes. It ensures that the `extra` field
-        of the dataset event contains the execution timestamp and any scheduled dataset information.
-        This is crucial for downstream tasks to know exactly which dataset version/schedule was triggered.
-        """
         if not context:
             from airflow.operators.python import get_current_context
             context = get_current_context()
@@ -1144,12 +588,7 @@ class StarlakeDatasetMixin:
         return super().pre_execute(context)
 
 class StarlakeEmptyOperator(StarlakeDatasetMixin, EmptyOperator):
-    """
-    An EmptyOperator that supports Starlake dataset mechanisms.
-
-    This operator is useful for creating dummy tasks (e.g., start/end markers) that still need
-    to participate in the Starlake dataset event propagation and scheduling logic.
-    """
+    """StarlakeEmptyOperator."""
     def __init__(self, 
                  task_id: str, 
                  dataset: Optional[Union[str, StarlakeDataset]] = None, 
