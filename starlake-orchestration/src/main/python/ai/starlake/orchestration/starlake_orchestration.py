@@ -299,6 +299,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
         self.__schedule_name = schedule_name
         self.__sl_schedule_parameter_name = job.sl_schedule_parameter_name
         self.__sl_schedule_format = job.sl_schedule_format
+        self.__starlake_dependencies = dependencies
         self.__tasks: List[T] = [] # ordered list of tasks
         self.__tasks_names: List[str] = list()
 
@@ -472,15 +473,13 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     def graphs(self) -> Optional[Set[TreeNodeMixin]]:
         return self.__graphs
 
-    def __create_task(self, task_id: str, task_name: str, task_type: str, task_sink: Optional[str], dataset: Optional[StarlakeDataset] = None, inlets: Optional[List[StarlakeDataset]] = None) -> T:
+    def __create_task(self, task_id: str, task_name: str, task_type: str, task_sink: Optional[str]) -> T:
         """Create a task.
         Args:
             task_id (str): The task id.
             task_name (str): The task name.
             task_type (str): The task type.
             task_sink (Optional[str]): The task sink.
-            dataset (Optional[StarlakeDataset]): The dataset.
-            inlets (Optional[List[StarlakeDataset]]): The inputs.
         Returns:
             T: The task.
         """
@@ -492,8 +491,6 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 transform_name=task_name,
                 sink=task_sink,
                 params={'sink': task_sink},
-                dataset=dataset,
-                inlets=inlets,
             )
             self.__inner_tasks[task_id] = task
             return task
@@ -505,8 +502,6 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 task_id=task_id, 
                 domain=domain, 
                 table=table,
-                dataset=dataset,
-                inlets=inlets,
             )
             self.__inner_tasks[task_id] = task
             return task
@@ -519,17 +514,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             task_type = dependency.dependency_type
             task_id = f"{sanitize_id(dependency.name)}_{task_type}"
             task_sink = dependency.sink
-            dataset = dependency.to_dataset(
-                sl_schedule_parameter_name=self.sl_schedule_parameter_name, 
-                sl_schedule_format=self.sl_schedule_format
-            )
-            inlets = []
-            for dep in dependency.dependencies:
-                inlets.append(dep.to_dataset(
-                    sl_schedule_parameter_name=self.sl_schedule_parameter_name, 
-                    sl_schedule_format=self.sl_schedule_format
-                ))
-            return self.__create_task(task_id, task_name, task_type, task_sink, dataset=dataset, inlets=inlets)
+            return self.__create_task(task_id, task_name, task_type, task_sink)
         else:
             raise ValueError(f"Unsupported dependency type: {type(dependency)}")
 
@@ -630,6 +615,11 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     @property
     def datasets(self) -> Optional[List[StarlakeDataset]]:
         return self.__datasets
+
+    @final
+    @property
+    def starlake_dependencies(self) -> Optional[StarlakeDependencies]:
+        return self.__starlake_dependencies
 
     @final
     @property
@@ -744,14 +734,22 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     def start_task(self, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
         task_id = kwargs.get('task_id', f'start_{self.schedule_name}' if self.schedule_name else 'start')
         kwargs.pop('task_id', None)
+        if self.starlake_dependencies:
+            dependency = None
+            for dep in self.starlake_dependencies.dependencies:
+                if dep.dataset_triggering_strategy:
+                    dependency = dep
+                    break
+            if dependency and dependency.dataset_triggering_strategy:
+                print(f"Using dataset triggering strategy {dependency.dataset_triggering_strategy} from dependency {dependency.name}")
+                kwargs.update({'dataset_triggering_strategy': dependency.dataset_triggering_strategy})
+
         return self.orchestration.sl_create_task(
             task_id, 
             self.job.start_op(
                 task_id=task_id, 
                 scheduled = self.cron is not None,
-                not_scheduled_datasets=self.not_scheduled_datasets, 
-                least_frequent_datasets = self.least_frequent_datasets, 
-                most_frequent_datasets=self.most_frequent_datasets, 
+                datasets=self.datasets, 
                 **kwargs
             ),
             self

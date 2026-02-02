@@ -550,15 +550,15 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         """Post tasks."""
         return None
 
-    def start_op(self, task_id: str, scheduled: bool, not_scheduled_datasets: Optional[List[StarlakeDataset]], least_frequent_datasets: Optional[List[StarlakeDataset]], most_frequent_datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[T]:
+    def start_op(self, task_id: str, scheduled: bool, datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[T]:
         """Start operation."""
         events = kwargs.get('events', [])
         kwargs.pop('events', None)
-        if not scheduled and least_frequent_datasets:
-            datasets = least_frequent_datasets
+        if not scheduled and datasets:
+            _datasets = datasets
         else:
-            datasets = None
-        return self.dummy_op(task_id, list(map(lambda dataset: self.to_event(dataset=dataset, source=self.source), datasets or [])), task_type=TaskType.START, **kwargs)
+            _datasets = None
+        return self.dummy_op(task_id, list(map(lambda dataset: self.to_event(dataset=dataset, source=self.source), _datasets or [])), task_type=TaskType.START, **kwargs)
 
     def end_op(self, task_id: str, events: Optional[List[E]] = None, **kwargs) -> Optional[T]:
         """End operation."""

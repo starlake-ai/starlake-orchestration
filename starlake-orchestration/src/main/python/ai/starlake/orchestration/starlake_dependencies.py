@@ -178,7 +178,7 @@ class TreeNodeMixin:
             return self.node.id + " << " + "[" + ",".join([node.node.id for node in self.parents]) + "]"
 
 class StarlakeDependency(DependencyMixin):
-    def __init__(self, name: str, dependency_type: StarlakeDependencyType, cron: Optional[str]= None, dependencies: List[StarlakeDependency]= [], sink: Optional[str]= None, stream: Optional[str]= None, freshness: int = 0, **kwargs):
+    def __init__(self, name: str, dependency_type: StarlakeDependencyType, cron: Optional[str]= None, dependencies: List[StarlakeDependency]= [], sink: Optional[str]= None, stream: Optional[str]= None, freshness: int = 0, dataset_triggering_strategy: Optional[str] = None, **kwargs):
         """Initializes a new StarlakeDependency instance.
 
         Args:
@@ -189,6 +189,7 @@ class StarlakeDependency(DependencyMixin):
             sink (str): The optional sink.
             stream (str): The optional stream.
             freshness (int): The freshness in seconds. Defaults to 0.
+            dataset_triggering_strategy (str): The optional dataset triggering strategy.
         """
         super().__init__(name)
         self._name = name
@@ -209,6 +210,7 @@ class StarlakeDependency(DependencyMixin):
         self._dependencies = dependencies
         self._stream = stream
         self._freshness = freshness
+        self._dataset_triggering_strategy = dataset_triggering_strategy
         for dependency in self._dependencies:
             self << dependency
 
@@ -272,6 +274,10 @@ class StarlakeDependency(DependencyMixin):
     def freshness(self) -> int:
         return self._freshness
 
+    @property
+    def dataset_triggering_strategy(self) -> Optional[str]:
+        return self._dataset_triggering_strategy
+
     def to_dataset(self, sl_schedule_parameter_name: Optional[str] = None, sl_schedule_format: Optional[str] = None) -> StarlakeDataset:
         """Return the StarlakeDataset associated with this dependency."""
         name = self.name
@@ -325,6 +331,8 @@ class StarlakeDependencies():
 
             stream: Optional[str] = data.get('stream', None)
 
+            dataset_triggering_strategy: Optional[str] = data.get('dataset_triggering_strategy', None)
+
             freshness: int = data.get('freshness', 0)
 
             return StarlakeDependency(
@@ -335,6 +343,7 @@ class StarlakeDependencies():
                 sink=sink,
                 stream=stream,
                 freshness=freshness,
+                dataset_triggering_strategy=dataset_triggering_strategy
             )
 
         if isinstance(dependencies, str):
@@ -358,6 +367,8 @@ class StarlakeDependencies():
         for dependency in self.dependencies:
             first_level_tasks.add(dependency.name)
             filtered_datasets.add(dependency.uri)
+            if dependency.name not in all_dependencies.keys():
+                all_dependencies[dependency.name] = dependency
             load_task_dependencies(dependency)
             node = dependency.node
             all_nodes[dependency.id] = node
@@ -384,7 +395,7 @@ class StarlakeDependencies():
         return self.__filtered_datasets
 
     def get_dependency(self, name: str) -> Optional[StarlakeDependency]:
-        return self.__dependencies_map.get(name, None)
+        return self.__all_dependencies.get(name, None)
 
     def graphs(self, run_dependencies_first: bool = False) -> Set[TreeNodeMixin]:
         """Return the graphs from the dependencies.

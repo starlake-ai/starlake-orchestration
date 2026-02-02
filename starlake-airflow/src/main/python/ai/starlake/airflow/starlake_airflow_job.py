@@ -142,23 +142,19 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         return super().sl_import(task_id=task_id, domain=domain, tables=tables, **kwargs)
 
-    def start_op(self, task_id: str, scheduled: bool, not_scheduled_datasets: Optional[List[StarlakeDataset]], least_frequent_datasets: Optional[List[StarlakeDataset]], most_frequent_datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[BaseOperator]:
+    def start_op(self, task_id: str, scheduled: bool, datasets: Optional[List[StarlakeDataset]], **kwargs) -> Optional[BaseOperator]:
         """Overrides IStarlakeJob.start_op()
         It represents the first task of a pipeline, it will define the optional condition that may trigger the DAG.
         Args:
             task_id (str): The required task id.
             scheduled (bool): whether the dag is scheduled or not.
-            not_scheduled_datasets (Optional[List[StarlakeDataset]]): The optional not scheduled datasets.
-            least_frequent_datasets (Optional[List[StarlakeDataset]]): The optional least frequent datasets.
-            most_frequent_datasets (Optional[List[StarlakeDataset]]): The optional most frequent datasets.
+            datasets (Optional[List[StarlakeDataset]]): The optional datasets.
         Returns:
             Optional[BaseOperator]: The optional Airflow task.
         """
         if not scheduled:
-            datasets: List[Dataset] = []
-            datasets += list(map(lambda dataset: self.to_event(dataset=dataset), not_scheduled_datasets or []))
-            datasets += list(map(lambda dataset: self.to_event(dataset=dataset), least_frequent_datasets or []))
-            datasets += list(map(lambda dataset: self.to_event(dataset=dataset), most_frequent_datasets or []))
+            _datasets: List[Dataset] = []
+            _datasets += list(map(lambda dataset: self.to_event(dataset=dataset), datasets or []))
 
             dag_id = kwargs.get('dag_id', None)
             if not dag_id:
@@ -295,7 +291,31 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     return check_datasets(greatest_triggering_dataset_datetime or ts, checking_datasets, ts, context)
 
             inlets: list = kwargs.get("inlets", [])
-            inlets += datasets
+            from ai.starlake.dataset import DatasetTriggeringStrategy
+            dataset_triggering_strategy = kwargs.get("dataset_triggering_strategy", self.dataset_triggering_strategy)
+            if isinstance(dataset_triggering_strategy, str) and dataset_triggering_strategy not in [s.value for s in DatasetTriggeringStrategy]:
+                expression = dataset_triggering_strategy
+                # We need to replace the dataset names with the dataset objects
+                # We will use a dictionary to store the dataset objects
+                local_dict = {}
+                for index, dataset in enumerate(datasets):
+                    key = f"__d{index}__"
+                    local_dict[key] = self.to_event(dataset=dataset)
+                    import re
+                    # escape the dataset name to avoid issues with special characters
+                    # we use \b to ensure we match the full word
+                    expression = re.sub(f"\\b{re.escape(dataset.name)}\\b", key, expression)
+                try:
+                    inlets.append(eval(expression, {}, local_dict))
+                except Exception as e:
+                    print(f"Error parsing dataset triggering strategy: {dataset_triggering_strategy}")
+                    print(e)
+                    inlets += datasets 
+            elif dataset_triggering_strategy == DatasetTriggeringStrategy.ALL and len(datasets) > 0:
+                from functools import reduce
+                inlets.append(reduce(lambda a, b: a & b, datasets))
+            else:
+                inlets += datasets
             kwargs.update({'inlets': inlets})
             kwargs.update({'doc': kwargs.get('doc', f'Check if the DAG should be started.')})
             kwargs.update({'pool': kwargs.get('pool', self.pool)})
@@ -314,9 +334,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         **kwargs
                     )
             else:
-                return super().start_op(task_id, scheduled, not_scheduled_datasets, least_frequent_datasets, most_frequent_datasets, **kwargs)
+                return super().start_op(task_id, scheduled, datasets, **kwargs)
         else:
-            return super().start_op(task_id, scheduled, not_scheduled_datasets, least_frequent_datasets, most_frequent_datasets, **kwargs)
+            return super().start_op(task_id, scheduled, datasets, **kwargs)
 
     def sl_pre_load(self, domain: str, tables: set=set(), pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None, **kwargs) -> Optional[BaseOperator]:
         """Overrides IStarlakeJob.sl_pre_load()
