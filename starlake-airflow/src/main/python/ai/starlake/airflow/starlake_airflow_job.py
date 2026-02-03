@@ -152,6 +152,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         Returns:
             Optional[BaseOperator]: The optional Airflow task.
         """
+        datasets = datasets or []
         if not scheduled:
             _datasets: List[Dataset] = []
             _datasets += list(map(lambda dataset: self.to_event(dataset=dataset), datasets or []))

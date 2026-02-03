@@ -155,7 +155,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
 
     def sl_transform_options(self, cron_expr: Optional[str] = None) -> Optional[str]:
         if cron_expr:
-            return "{{sl_dates(params.cron_expr, ts_as_datetime(data_interval_end | ts))}}"
+            return "{{sl_dates(params.cron_expr, ts_as_datetime(dag_run.data_interval_end | ts))}}"
         return None
 
     def deploy(self, **kwargs) -> None:
