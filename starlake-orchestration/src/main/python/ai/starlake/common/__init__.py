@@ -94,19 +94,24 @@ def sl_schedule(cron: str, start_time: Optional[Union[str, datetime]] = None, fo
         start_time = parser.isoparse(start_time).astimezone(pytz.timezone(timezone))
     return croniter(cron, start_time).get_prev(datetime).strftime(format)
 
-def get_cron_frequency(cron_expression) -> timedelta:
+def get_cron_frequency(cron_expression, cycles: int = 12) -> timedelta:
     """
-    Calculate the timedelta between 2 executions of a cron expression.
+    Calculate the average timedelta between executions of a cron expression.
+    Uses multiple cycles to handle variable month lengths (28-31 days).
+    croniter projects future occurrences mathematically from the expression alone.
     :param cron_expression: A string representing the cron expression.
+    :param cycles: The number of cycles to average over (default: 12).
     :raise ValueError: If the cron expression is invalid.
-    :return: The timedelta between 2 executions of the cron expression.
+    :return: The average timedelta between executions of the cron expression.
     """
     if not is_valid_cron(cron_expression):
         raise ValueError(f"Invalid cron expression: {cron_expression}")
     iter = croniter(cron_expression)
-    next_run = iter.get_next(datetime)
-    next_run_2 = iter.get_next(datetime)
-    return next_run_2 - next_run
+    first_run = iter.get_next(datetime)
+    for _ in range(cycles):
+        last_run = iter.get_next(datetime)
+    total_delta = last_run - first_run
+    return total_delta / cycles
 
 def sort_crons_by_frequency(cron_expressions, reference_time: Optional[datetime] = None, **kwargs) -> Tuple[Dict[int, List[str]], List[str]]:
     """
