@@ -66,7 +66,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
             kwargs.update({'params': params})
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
 
@@ -194,6 +194,7 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
                 self.xcom_push(context, key="return_value", value=False)
             if self.retry_on_failure:
                 raise e
+            return False
 
 class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
     """
@@ -243,7 +244,7 @@ class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
                 else:
                     logger.error(msg = f"Task {self.task} has failed with no status")
                     return PokeReturnValue(True, False)
-            return None
+            return PokeReturnValue(False, None)
         except Exception as e:
             logger.error(msg = f"Task {self.task} has failed")
             return PokeReturnValue(True, False)

@@ -77,7 +77,7 @@ class StarlakeAirflowDataprocClusterConfig(StarlakeDataprocClusterConfig, Starla
         dataproc_name = caller_globals.get("dataproc_name", None)
         master_config = StarlakeAirflowDataprocMasterConfig.from_module(filename, module_name, options)
         worker_config = StarlakeAirflowDataprocWorkerConfig.from_module(filename, module_name, options)
-        dataproc_secondary_worker_config = getattr(module_name, "get_dataproc_secondary_worker_config", lambda dag_name: None)
+        dataproc_secondary_worker_config = caller_globals.get("get_dataproc_secondary_worker_config", lambda dag_name: None)
         secondary_worker_config = dataproc_secondary_worker_config(cluster_config_name)
         idle_delete_ttl=caller_globals.get('dataproc_idle_delete_ttl', None)
         single_node=caller_globals.get('dataproc_single_node', None)
@@ -226,7 +226,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             kwargs.update({'params': params})
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",") if not jar_list else jar_list

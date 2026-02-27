@@ -54,6 +54,8 @@ import logging
 
 import pytz
 
+log = logging.getLogger(__name__)
+
 DEFAULT_POOL:str ="default_pool"
 
 DEFAULT_DAG_ARGS = {
@@ -89,7 +91,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
     - Execution of Starlake commands (extract, load, transform).
     """
     ui_color = '#7c7287'
-    def __init__(self, filename: Optional[str] = None, module_name: Optional[str] = None, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None, options: dict = {}, **kwargs) -> None:
+    def __init__(self, filename: Optional[str] = None, module_name: Optional[str] = None, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None, options: Optional[dict] = None, **kwargs) -> None:
         """Overrides IStarlakeJob.__init__()
         Args:
             pre_load_strategy (Union[StarlakePreLoadStrategy, str, None]): The pre-load strategy to use.
@@ -181,12 +183,12 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     from dateutil import parser
                     return parser.isoparse(scheduled_date).astimezone(pytz.timezone('UTC'))
                 else:
-                    print(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a '{StarlakeParameters.SCHEDULED_DATE_PARAMETER.value}' key in its extra data.")
+                    log.warning(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a '{StarlakeParameters.SCHEDULED_DATE_PARAMETER.value}' key in its extra data.")
                     return None
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
                 if not context:
-                    print("no context")
+                    log.debug("no context")
                     from airflow.operators.python import get_current_context
                     context = get_current_context()
 
@@ -213,7 +215,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     for event in events:
                         if type(event).__name__ not in ["AssetEvent", "AssetEventDagRunReferenceResult"]:
                             continue
-                        print(event)
+                        log.debug(f"Triggering event: {event}")
                         extra = event.extra or {}
                         if not extra.get("ts", None):
                             extra.update({"ts": event.timestamp})
@@ -229,24 +231,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 return list(dataset_uris.values())
 
             def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context) -> bool:
-                # We start by initializing the result to True (datasets are present)
-                # We will set it to False if any required dataset is missing.
-                # dataset_res = True
-
-                # We also track if we found at least one dataset event if checked via API
-                # found_at_least_one = False
-
-                # Iterate over all datasets that this job depends on
-                # missing_datasets = []
-                # max_scheduled_date = scheduled_date
-
                 previous_dag_checked: Optional[datetime] = None
-                # last_dag_checked: Optional[datetime] = None
-                # last_dag_ts: Optional[datetime] = None
 
                 dag_run = context.get("dag_run")
-                # dag = context["dag"]
-                # client = StarlakeAirflowApiClient()
 
                 # we look for the first succeeded dag run before the scheduled date
                 if dag_run:
@@ -257,17 +244,17 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
                 max_scheduled_date = scheduled_date
 
-                print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
-                print(f"Starlake start date will be set to {previous_dag_checked}")
+                log.info(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
+                log.info(f"Starlake start date will be set to {previous_dag_checked}")
                 context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value, value=previous_dag_checked)
-                print(f"Starlake end date will be set to {max_scheduled_date}")
+                log.info(f"Starlake end date will be set to {max_scheduled_date}")
                 context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, value=max_scheduled_date)
                 return True
 
             def should_continue(start_date: str = None, **context) -> bool:
                 triggering_datasets = get_triggering_datasets(context)
                 if not triggering_datasets:
-                    print("No triggering datasets found. DAG Manually triggered.")
+                    log.info("No triggering datasets found. DAG Manually triggered.")
                     return True
                 else:
                     from dateutil import parser
@@ -282,13 +269,13 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     greatest_triggering_dataset_uri = greatest_triggering_dataset[0]
                     greatest_triggering_dataset_datetime = greatest_triggering_dataset[1]
                     # we then check the other datasets
-                    checking_uris = list(set(datasets_uris.keys()) - set(greatest_triggering_dataset_uri))
+                    checking_uris = list(set(datasets_uris.keys()) - {greatest_triggering_dataset_uri})
                     checking_triggering_datasets = [dataset for dataset in triggering_datasets if dataset.uri in checking_uris]
                     checking_missing_datasets = [dataset for dataset in datasets if dataset.uri in list(set(checking_uris) - set(triggering_uris.keys()))]
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
-                    print("greatest_triggering_dataset_datetime=%s", str(greatest_triggering_dataset_datetime))
-                    print("checking_datasets=%s", str(checking_datasets))
-                    print("context=%s", str(context))
+                    log.debug(f"greatest_triggering_dataset_datetime={greatest_triggering_dataset_datetime}")
+                    log.debug(f"checking_datasets={checking_datasets}")
+                    log.debug(f"context={context}")
                     return check_datasets(greatest_triggering_dataset_datetime or ts, checking_datasets, ts, context)
 
             inlets: list = kwargs.get("inlets", [])
@@ -307,11 +294,16 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     # we use \b to ensure we match the full word
                     expression = re.sub(f"\\b{re.escape(dataset.name)}\\b", key, expression)
                 try:
-                    inlets.append(eval(expression, {}, local_dict))
+                    # Validate that the expression only contains safe tokens
+                    import re as _re
+                    if not _re.fullmatch(r'[\s&|()]+|(?:__d\d+__[\s&|()]*)+', expression):
+                        sanitized = _re.sub(r'[^__\w&|() ]', '', expression)
+                        if sanitized != expression:
+                            raise ValueError(f"Unsafe characters in dataset triggering strategy expression: {expression}")
+                    inlets.append(eval(expression, {"__builtins__": {}}, local_dict))
                 except Exception as e:
-                    print(f"Error parsing dataset triggering strategy: {dataset_triggering_strategy}")
-                    print(e)
-                    inlets += datasets 
+                    log.warning(f"Error parsing dataset triggering strategy: {dataset_triggering_strategy}: {e}")
+                    inlets += datasets
             elif dataset_triggering_strategy == DatasetTriggeringStrategy.ALL and len(datasets) > 0:
                 from functools import reduce
                 inlets.append(reduce(lambda a, b: a & b, datasets))
@@ -570,18 +562,18 @@ class StarlakeDatasetMixin:
                 elif isinstance(ts, datetime):
                     return ts
 
-            print(f"add 'ts_as_datetime' to context")
+            log.debug("add 'ts_as_datetime' to context")
             context['ts_as_datetime'] = ts_as_datetime
 
         __sl_scheduled_dataset = dag.user_defined_macros.get('sl_scheduled_dataset', None) if dag.user_defined_macros else None
         if not __sl_scheduled_dataset:
-            print(f"add 'sl_scheduled_dataset' to context")
+            log.debug("add 'sl_scheduled_dataset' to context")
             from ai.starlake.common import sl_scheduled_dataset
             context['sl_scheduled_dataset'] = sl_scheduled_dataset
 
         __sl_scheduled_date = dag.user_defined_macros.get('sl_scheduled_date', None) if dag.user_defined_macros else None
         if not __sl_scheduled_date:
-            print(f"add 'sl_scheduled_date' to context")
+            log.debug("add 'sl_scheduled_date' to context")
             from ai.starlake.common import sl_scheduled_date
             context['sl_scheduled_date'] = sl_scheduled_date
 

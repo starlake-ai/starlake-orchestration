@@ -177,7 +177,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         env = os.environ.copy() # Copy the current environment variables
         DAG_ID = self.pipeline_id
         AIRFLOW_BASE_URL = kwargs.get('AIRFLOW_BASE_URL', env.get('AIRFLOW_BASE_URL', "http://localhost:8080"))
-        AIRFLOW_API_BASE_URL = f"{AIRFLOW_BASE_URL}/api/v1"
+        AIRFLOW_API_BASE_URL = f"{AIRFLOW_BASE_URL}/api/v2"
         AIRFLOW_USERNAME = kwargs.get('AIRFLOW_USERNAME', env.get('AIRFLOW_USERNAME', None))
         AIRFLOW_PASSWORD = kwargs.get('AIRFLOW_PASSWORD', env.get('AIRFLOW_PASSWORD', None))
         if AIRFLOW_USERNAME and AIRFLOW_PASSWORD:
@@ -216,7 +216,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             initialize_config().load_test_config()
             try:
                 print(f"Testing pipeline {DAG_ID} with execution date {execution_date} and  configuration {conf}")
-                self.dag.test(execution_date=execution_date, run_conf=conf)
+                self.dag.test(logical_date=execution_date, run_conf=conf)
             except Exception as e:
                 print(f"Pipeline {DAG_ID} failed with error {str(e)}")
 
@@ -224,7 +224,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             import time
             # Run the pipeline with the given configuration
             AIRFLOW_BASE_URL = kwargs.get('AIRFLOW_BASE_URL', env.get('AIRFLOW_BASE_URL', "http://localhost:8080"))
-            AIRFLOW_API_BASE_URL = f"{AIRFLOW_BASE_URL}/api/v1"
+            AIRFLOW_API_BASE_URL = f"{AIRFLOW_BASE_URL}/api/v2"
             AIRFLOW_USERNAME = kwargs.get('AIRFLOW_USERNAME', env.get('AIRFLOW_USERNAME', None))
             AIRFLOW_PASSWORD = kwargs.get('AIRFLOW_PASSWORD', env.get('AIRFLOW_PASSWORD', None))
             if AIRFLOW_USERNAME and AIRFLOW_PASSWORD:
@@ -258,7 +258,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             dag_run_id = json_response.get('dag_run_id', None)
             if dag_run_id:
                 print(f"Pipeline {DAG_ID} started with dag_run_id {dag_run_id}")
-                def check_state() -> bool:
+                while True:
                     response = requests.get(
                         f"{AIRFLOW_API_BASE_URL}/dags/{DAG_ID}/dagRuns/{dag_run_id}",
                         headers={'Content-Type': 'application/json'},
@@ -267,23 +267,17 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                     response.raise_for_status()
                     json_response = response.json()
                     state = json_response.get('state', None)
-                    if state == DagRunState.FAILED:
+                    if state == DagRunState.FAILED.value:
                         raise Exception(f"Pipeline {DAG_ID} failed")
-                    elif state == DagRunState.SUCCESS:
+                    elif state == DagRunState.SUCCESS.value:
                         print(f"Pipeline {DAG_ID} succeeded")
-                        return True
-                    elif state == DagRunState.QUEUED:
-                        print(f"Pipeline {DAG_ID} is queued")
+                        break
+                    elif state in (DagRunState.QUEUED.value, DagRunState.RUNNING.value):
+                        print(f"Pipeline {DAG_ID} is {state}")
                         time.sleep(5)
-                        return check_state()
-                    elif state == DagRunState.RUNNING:
-                        print(f"Pipeline {DAG_ID} is running")
-                        time.sleep(5)
-                        return check_state()
                     else:
                         print(f"Pipeline {DAG_ID} is in state {state}")
-                        return False
-                check_state()
+                        break
             else:
                 raise Exception(f"Pipeline {DAG_ID} failed")
 

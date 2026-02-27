@@ -18,6 +18,11 @@ from __future__ import annotations
 
 from enum import Enum
 
+# Aliases mapping alternative strategy names to canonical enum values
+_STRATEGY_ALIASES: dict[str, str] = {
+    "incoming": "imported",
+}
+
 class StarlakePreLoadStrategy(str, Enum):
     """Class with different pre load strategies."""
 
@@ -29,7 +34,13 @@ class StarlakePreLoadStrategy(str, Enum):
     @classmethod
     def is_valid(cls, strategy: str) -> bool:
         """Validate a pre load strategy."""
-        return strategy in cls.all_strategies()
+        return strategy in cls.all_strategies() or strategy in _STRATEGY_ALIASES
+
+    @classmethod
+    def resolve(cls, strategy: str) -> 'StarlakePreLoadStrategy':
+        """Resolve a strategy string, supporting aliases."""
+        resolved = _STRATEGY_ALIASES.get(strategy, strategy)
+        return cls(resolved)
 
     @classmethod
     def all_strategies(cls) -> set[str]:

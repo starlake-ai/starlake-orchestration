@@ -115,7 +115,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
 
         if isinstance(pre_load_strategy, str):
             pre_load_strategy = \
-                StarlakePreLoadStrategy(pre_load_strategy) if StarlakePreLoadStrategy.is_valid(pre_load_strategy) \
+                StarlakePreLoadStrategy.resolve(pre_load_strategy) if StarlakePreLoadStrategy.is_valid(pre_load_strategy) \
                     else StarlakePreLoadStrategy.NONE
 
         self.pre_load_strategy: StarlakePreLoadStrategy = pre_load_strategy
@@ -412,7 +412,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         """
         if isinstance(pre_load_strategy, str):
             pre_load_strategy = \
-                StarlakePreLoadStrategy(pre_load_strategy) if StarlakePreLoadStrategy.is_valid(pre_load_strategy) \
+                StarlakePreLoadStrategy.resolve(pre_load_strategy) if StarlakePreLoadStrategy.is_valid(pre_load_strategy) \
                     else self.pre_load_strategy
 
         pre_load_strategy = self.pre_load_strategy if not pre_load_strategy else pre_load_strategy

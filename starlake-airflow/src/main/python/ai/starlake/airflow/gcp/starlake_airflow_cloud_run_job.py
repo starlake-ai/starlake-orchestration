@@ -87,7 +87,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         self.use_gcloud = __class__.get_context_var("use_gcloud", "True", self.options).lower() == 'true'
 
     @classmethod
-    def sl_execution_environment(self) -> Union[StarlakeExecutionEnvironment, str]:
+    def sl_execution_environment(cls) -> Union[StarlakeExecutionEnvironment, str]:
         """Returns the execution environment to use.
 
         Returns:
@@ -157,7 +157,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         # check job status
                         get_completion_status_id = task_id + '_get_completion_status'
                         source_task_id=job_task.task_id
-                        bash_command = (f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key=None, task_ids='{source_task_id}')}}}} --region {self.cloud_run_job_region} --project {self.project_id} --format='value(status.failedCount, status.cancelledCounts)' {self.impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -z \"$value\"")
+                        bash_command = (f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}')}}}} --region {self.cloud_run_job_region} --project {self.project_id} --format='value(status.failedCount, status.cancelledCounts)' {self.impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -z \"$value\"")
                         if kwargs.get('do_xcom_push', False):
                             bash_command=f"""
                             set -e
