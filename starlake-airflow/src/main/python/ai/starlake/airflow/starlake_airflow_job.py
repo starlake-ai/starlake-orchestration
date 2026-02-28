@@ -128,6 +128,23 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
     def sl_orchestrator(cls) -> Union[StarlakeOrchestrator, str]:
         return StarlakeOrchestrator.AIRFLOW
 
+    @staticmethod
+    def _inject_scheduled_date(arguments, task_type, kwargs):
+        """Inject --scheduledDate argument for LOAD/TRANSFORM tasks.
+
+        This is shared across all execution environments (Bash, CloudRun, Dataproc, Fargate).
+        """
+        if task_type not in (TaskType.LOAD, TaskType.TRANSFORM):
+            return arguments
+        arguments = arguments or []
+        params = kwargs.get('params', dict())
+        cron = params.get('cron_expr', params.get('cron', None))
+        params['cron'] = cron
+        kwargs['params'] = params
+        command = arguments.pop(0)
+        return [command, "--scheduledDate",
+            "\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'"] + arguments
+
     def sl_import(self, task_id: str, domain: str, tables: set=set(), **kwargs) -> BaseOperator:
         """Overrides IStarlakeJob.sl_import()
         Generate the Airflow task that will run the starlake `import` command.

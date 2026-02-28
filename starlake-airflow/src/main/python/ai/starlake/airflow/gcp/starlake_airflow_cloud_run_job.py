@@ -28,7 +28,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, Starla
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
 
-from ai.starlake.airflow.bash import StarlakeBashOperator
+from ai.starlake.airflow.bash import StarlakeBashOperator, wrap_bash_for_xcom
 
 from airflow.exceptions import AirflowException
 
@@ -50,25 +50,6 @@ from google.longrunning import operations_pb2
 
 from enum import Enum
 CloudRunMode = Enum("CloudRunMode", ["SYNC", "DEFER", "ASYNC"])
-
-def _wrap_bash_for_xcom(bash_command):
-    """Wrap a bash command to capture return code and push to XCom."""
-    escaped = bash_command.replace("'", '"')
-    return f"""
-            set -e
-            bash -c '
-            {escaped}
-            return_code=$?
-
-            # Push the return code to XCom
-            echo $return_code
-
-            # Exit with the captured return code if non-zero
-            # if [ $return_code -ne 0 ]; then
-            #     exit $return_code
-            # fi
-            '
-            """
 
 class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
     """Airflow Starlake Cloud Run Job."""
@@ -113,19 +94,6 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             StarlakeExecutionEnvironment: The execution environment to use.
         """
         return StarlakeExecutionEnvironment.CLOUD_RUN
-
-    def _inject_scheduled_date(self, arguments, task_type, kwargs):
-        """Inject --scheduledDate argument for LOAD/TRANSFORM tasks."""
-        if task_type not in (TaskType.LOAD, TaskType.TRANSFORM):
-            return arguments
-        arguments = arguments or []
-        params = kwargs.get('params', dict())
-        cron = params.get('cron_expr', params.get('cron', None))
-        params['cron'] = cron
-        kwargs['params'] = params
-        command = arguments.pop(0)
-        return [command, "--scheduledDate",
-            "\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'"] + arguments
 
     def _build_container_overrides(self, arguments):
         """Build container overrides for native Cloud Run API calls."""
@@ -178,7 +146,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         if self.use_gcloud:
             bash_command = self._build_gcloud_command(command, wait=True)
             if kwargs.get('do_xcom_push', False):
-                bash_command = _wrap_bash_for_xcom(bash_command)
+                bash_command = wrap_bash_for_xcom(bash_command)
             kwargs.pop('do_xcom_push', None)
             return StarlakeBashOperator(
                 task_id=task_id,
@@ -228,7 +196,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             source_task_id = job_task.task_id
             bash_command = (f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}')}}}} --region {self.cloud_run_job_region} --project {self.project_id} --format='value(status.failedCount, status.cancelledCounts)' {self.impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -z \"$value\"")
             if kwargs.get('do_xcom_push', False):
-                bash_command = _wrap_bash_for_xcom(bash_command)
+                bash_command = wrap_bash_for_xcom(bash_command)
             job_status = StarlakeBashOperator(
                 task_id=f'{task_id}_get_completion_status',
                 dataset=dataset,
@@ -300,7 +268,7 @@ class GCloudRunJobCompletionSensor(StarlakeDatasetMixin, BashSensor):
             bash_command=(f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}')}}}}  --region {cloud_run_job_region} --project {project_id} --format='value(status.completionTime, status.cancelledCounts)' {impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -n \"$value\"")
 
         if kwargs.get('do_xcom_push', False) and retry_on_failure:
-            bash_command = _wrap_bash_for_xcom(bash_command)
+            bash_command = wrap_bash_for_xcom(bash_command)
 
         super().__init__(
             task_id=task_id,

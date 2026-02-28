@@ -219,16 +219,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             cluster_name = cluster_name[0:-1] + 'Z'
         task_id = f"{cluster_id}_submit" if not task_id else task_id
         arguments = [] if not arguments else arguments
-        if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
-            params: dict = kwargs.get('params', dict())
-            cron = params.get('cron_expr', params.get('cron', None))
-            params.update({'cron': cron})
-            kwargs.update({'params': params})
-            tmp_arguments = []
-            tmp_arguments.append("--scheduledDate")
-            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
-            command = arguments.pop(0)
-            arguments = [command] + tmp_arguments + arguments
+        arguments = StarlakeAirflowJob._inject_scheduled_date(arguments, task_type, kwargs)
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",") if not jar_list else jar_list
         main_class = __class__.get_context_var("spark_job_main_class", "ai.starlake.job.Main", self.options) if not main_class else main_class
 
