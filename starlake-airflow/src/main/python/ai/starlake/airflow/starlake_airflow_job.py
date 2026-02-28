@@ -141,9 +141,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         cron = params.get('cron_expr', params.get('cron', None))
         params['cron'] = cron
         kwargs['params'] = params
-        command = arguments.pop(0)
+        command = arguments[0]
         return [command, "--scheduledDate",
-            "\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'"] + arguments
+            "\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'"] + arguments[1:]
 
     def sl_import(self, task_id: str, domain: str, tables: set=set(), **kwargs) -> BaseOperator:
         """Overrides IStarlakeJob.sl_import()
@@ -282,7 +282,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     # we first retrieve the scheduled datetime of all the triggering datasets
                     triggering_scheduled = {dataset.uri: get_scheduled_datetime(dataset) for dataset in triggering_datasets}
                     # then we retrieve the triggering dataset with the greatest scheduled datetime
-                    greatest_triggering_dataset: tuple = max(triggering_scheduled.items(), key=lambda x: x[1] or datetime.min, default=(None, None))
+                    greatest_triggering_dataset: tuple = max(triggering_scheduled.items(), key=lambda x: x[1] or datetime.min.replace(tzinfo=pytz.UTC), default=(None, None))
                     greatest_triggering_dataset_uri = greatest_triggering_dataset[0]
                     greatest_triggering_dataset_datetime = greatest_triggering_dataset[1]
                     # we then check the other datasets
@@ -490,7 +490,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
     def default_dag_args(self) -> dict:
         import json
         from json.decoder import JSONDecodeError
-        dag_args = DEFAULT_DAG_ARGS
+        dag_args = DEFAULT_DAG_ARGS.copy()
         try:
             dag_args.update(json.loads(__class__.get_context_var(var_name="default_dag_args", options=self.options)))
         except (MissingEnvironmentVariable, JSONDecodeError):

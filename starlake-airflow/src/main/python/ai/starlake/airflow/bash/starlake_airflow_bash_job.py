@@ -104,7 +104,7 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
                         key: value
                         for opt in opts.split(",")
                         if "=" in opt
-                        for key, value in [opt.split("=")]
+                        for key, value in [opt.split("=", 1)]
                     })
                     options = ",".join(f"{key}={value}" for key, value in temp.items())
                     for opt in opts.split(","):

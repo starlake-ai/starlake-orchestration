@@ -210,7 +210,7 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
             operation_request
         )
         if operation.done:
-            if operation.error.SerializeToString():
+            if operation.error.code != 0:
                 error_msg = f"{operation.error.message} [{operation.error.code}]"
                 if self.retry_on_failure:
                     raise AirflowException(error_msg)

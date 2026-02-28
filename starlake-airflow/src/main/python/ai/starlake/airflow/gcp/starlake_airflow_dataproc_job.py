@@ -20,7 +20,7 @@ import uuid
 
 from typing import Optional, Union
 
-from ai.starlake.common import TODAY
+from ai.starlake.common import today
 
 from ai.starlake.dataset import StarlakeDataset
 
@@ -131,7 +131,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
         cluster_id = cluster_id or self.cluster_config.cluster_id
         if not cluster_name:
             nb_clusters = len(self.clusters) + (1 if is_new else 0)
-            cluster_name = f"{cluster_id.replace('_', '-')}-{nb_clusters}-{TODAY}"[0:51]
+            cluster_name = f"{cluster_id.replace('_', '-')}-{nb_clusters}-{today()}"[0:51]
         else:
             cluster_name = cluster_name[0:51]
         if cluster_name[-1] == '-':

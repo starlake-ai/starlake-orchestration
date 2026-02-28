@@ -62,7 +62,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
 
             dg_pipeline: DagsterPipeline = pipeline
 
-            def multi_asset_sensor_with_skip_reason(context: MultiAssetSensorEvaluationContext):
+            def multi_asset_sensor_with_skip_reason(context: MultiAssetSensorEvaluationContext, dg_pipeline=dg_pipeline, datasets=datasets, pipeline_id=pipeline_id):
                 asset_events = context.latest_materialization_records_by_key()
                 if self.job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
                     events_checked = any(asset_events.values())
@@ -671,7 +671,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 previous_partition = start_date
             else:
                 print(f"No previous successful runs found for {self.pipeline_id} around {scheduled_date} and no start date set for the pipeline")
-                return False
+                return (False, None, None, [])
 
         print(f"Previous successful run for {self.pipeline_id} around {scheduled_date} is {previous_partition.strftime(sl_timestamp_format)}")
 
@@ -744,7 +744,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                             event = dataset_events[nb_events - i]
                             mat = event.asset_materialization
                             scheduled_datetime = self.get_event_partition(event)
-                            if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
+                            if not scheduled_datetime or scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
                                 print(f"Dataset {event.partition_key or event.storage_id} for {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
                                 i += 1
                             else:
@@ -759,6 +759,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
                 scheduled_date_to_check_min = scheduled_date - timedelta(seconds=freshness)
                 scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
+                scheduled_datetime = None
                 events = self.find_dataset_events(instance, AssetKey(dataset.uri), limit=limit)
                 if not events:
                     print(f"No dataset events for {dataset.uri} found between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")

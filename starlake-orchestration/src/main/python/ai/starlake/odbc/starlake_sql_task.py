@@ -63,7 +63,7 @@ class SQLTask(ABC, StarlakeOptions):
             if arg == "--options" and arguments.__len__() > index + 1:
                 opts = arguments[index+1]
                 if opts.strip().__len__() > 0:
-                    self.task_options.update({
+                    task_options.update({
                         key: value
                         for opt in opts.split(",")
                         if "=" in opt  # Only process valid key=value pairs
@@ -561,7 +561,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
     def add_columns_from_dict(self, dictionary: dict):
         return [f"ALTER TABLE IF EXISTS {self.domain}.{self.table} ADD COLUMN IF NOT EXISTS {k} {v};" for k, v in dictionary.items()]
 
-    def drop_columns_from_dict(dictionary: dict):
+    def drop_columns_from_dict(self, dictionary: dict):
         # In the current version, we do not drop any existing columns for backward compatibility
         # return [f"ALTER TABLE IF EXISTS {self.domain}.{self.table} DROP COLUMN IF EXISTS {k};" for k, v in dictionary.items()]
         return []    
@@ -660,7 +660,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         '''
         return sql
         
-    def build_copy_other(self, format: str, provider: SessionProvider) -> str:
+    def build_copy_other(self, provider: SessionProvider) -> str:
         common_options = [
             'NULL_IF'
         ]
@@ -689,7 +689,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
         elif self.format == 'XML':
             return self.build_copy_other(provider=provider)
         else:
-            raise ValueError(f"Unsupported format {format}")
+            raise ValueError(f"Unsupported format {self.format}")
 
     def execute(self, session: Session, jobid: Optional[str] = None, config: dict = dict(), dry_run: bool = False) -> None:
         """Load the data.
@@ -741,7 +741,7 @@ class SQLLoadTask(SQLTask, StarlakeOptions):
             elif nbSteps == 2:
                 # execute first step
                 self.execute_sqls(session, self.statements.get('firstStep', []), "Execute first step", dry_run)
-                if self.write_strategy == 'WRITE_TRUNCATE':
+                if write_strategy == 'WRITE_TRUNCATE':
                     # truncate table
                     self.execute_sql(session, f"TRUNCATE TABLE {self.sink}", "Truncate table", dry_run)
                 # create stage if not exists

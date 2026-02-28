@@ -71,7 +71,8 @@ class StarlakeParameters(str, Enum):
     def __str__(self):
         return self.value
 
-TODAY = datetime.today().strftime('%Y-%m-%d')
+def today():
+    return datetime.today().strftime('%Y-%m-%d')
 
 def asQueryParameters(parameters: Union[dict,None]=None) -> str:
     from urllib.parse import quote
@@ -158,7 +159,7 @@ def sort_crons_by_frequency(cron_expressions, reference_time: Optional[datetime]
 
 sl_timestamp_format = '%Y-%m-%dT%H:%M:%S%z'
 
-def sl_cron_start_end_dates(cron_expr: str, start_time: datetime = cron_start_time(), format: str = sl_timestamp_format) -> str:
+def sl_cron_start_end_dates(cron_expr: str, start_time: Optional[datetime] = None, format: str = sl_timestamp_format) -> str:
     """
     Returns the start and end dates for a cron expression.
 
@@ -166,6 +167,8 @@ def sl_cron_start_end_dates(cron_expr: str, start_time: datetime = cron_start_ti
     :param start_time: The start time.
     :param format: The format to return the dates in.
     """
+    if start_time is None:
+        start_time = cron_start_time()
     (sl_start_date, sl_end_date) = scheduled_dates_range(cron_expr, start_time)
     return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value}='{sl_start_date.strftime(format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value}='{sl_end_date.strftime(format)}'"
 

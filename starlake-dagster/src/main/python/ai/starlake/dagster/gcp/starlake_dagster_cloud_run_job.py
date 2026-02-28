@@ -55,7 +55,10 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
         else:
             self.impersonate_service_account = ""
         self.separator = separator if separator != ',' else ' '
-        self.update_env_vars = self.separator.join([(f"--update-env-vars \"^{self.separator}^" if i == 0 else "") + f"{key}={value}" for i, (key, value) in enumerate(self.sl_env_vars.items())]) + "\""
+        if self.sl_env_vars:
+            self.update_env_vars = self.separator.join([(f"--update-env-vars \"^{self.separator}^" if i == 0 else "") + f"{key}={value}" for i, (key, value) in enumerate(self.sl_env_vars.items())]) + "\""
+        else:
+            self.update_env_vars = ""
 
     @classmethod
     def sl_execution_environment(cls) -> Union[StarlakeExecutionEnvironment, str]:
@@ -128,8 +131,8 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             tmp_arguments.append(f"\'{logical_datetime}\'")
-            command = arguments.pop(0)
-            command_with_arguments = [command] + tmp_arguments + arguments
+            command = arguments[0]
+            command_with_arguments = [command] + tmp_arguments + arguments[1:]
 
             if transform:
                 opts = command_with_arguments[-1].split(",")

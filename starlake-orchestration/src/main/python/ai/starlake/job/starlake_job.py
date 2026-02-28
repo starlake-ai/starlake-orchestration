@@ -165,7 +165,8 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
                 **kwargs
             )
 
-        self.get_spark_config = getattr(self.caller_module_name, "get_spark_config", default_spark_config) if module_name else default_spark_config
+        caller_module = sys.modules.get(self.caller_module_name) if module_name else None
+        self.get_spark_config = getattr(caller_module, "get_spark_config", default_spark_config) if caller_module else default_spark_config
 
         self._events: List[E] = []
 
@@ -208,7 +209,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
         self.__min_timedelta_between_runs = int(__class__.get_context_var(var_name='min_timedelta_between_runs', default_value=15*60, options=self.options))
         self.__run_dependencies_first = __class__.get_context_var(var_name='run_dependencies_first', default_value='False', options=self.options).lower() == 'true'
-        self.__pipeline_id = self.caller_filename.replace(".py", "").replace(".pyc", "").upper()
+        self.__pipeline_id = self.caller_filename.replace(".py", "").replace(".pyc", "").upper() if self.caller_filename else None
 
     @property
     def dataset_triggering_strategy(self) -> DatasetTriggeringStrategy:
@@ -603,7 +604,8 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         env = os.environ.copy() # Copy the current environment variables
 
         if args is None:
-            return env.update(self.sl_env_vars) # Add/overwrite with sl env variables
+            env.update(self.sl_env_vars) # Add/overwrite with sl env variables
+            return env
         elif isinstance(args, str):
             arguments = args.split(" ")
         else:

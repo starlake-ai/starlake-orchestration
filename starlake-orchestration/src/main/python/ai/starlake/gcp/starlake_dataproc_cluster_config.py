@@ -66,7 +66,8 @@ class StarlakeDataprocMasterConfig(StarlakeDataprocMachineConfig, StarlakeOption
                 options=options,
                 **kwargs
             )
-        dataproc_master_config = getattr(module_name, "get_dataproc_master_config", default_dataproc_master_config)
+        caller_module = sys.modules.get(module_name) if module_name else None
+        dataproc_master_config = getattr(caller_module, "get_dataproc_master_config", default_dataproc_master_config) if caller_module else default_dataproc_master_config
         return dataproc_master_config(cluster_config_name, **caller_globals.get('dataproc_master_properties', {}))
 
 class StarlakeDataprocWorkerConfig(StarlakeDataprocMachineConfig, StarlakeOptions):
@@ -92,7 +93,8 @@ class StarlakeDataprocWorkerConfig(StarlakeDataprocMachineConfig, StarlakeOption
                 options=options,
                 **kwargs
             )
-        dataproc_worker_config = getattr(module_name, "get_dataproc_worker_config", default_dataproc_worker_config)
+        caller_module = sys.modules.get(module_name) if module_name else None
+        dataproc_worker_config = getattr(caller_module, "get_dataproc_worker_config", default_dataproc_worker_config) if caller_module else default_dataproc_worker_config
         return dataproc_worker_config(cluster_config_name, **caller_globals.get('dataproc_worker_properties', {}))
 
 class StarlakeDataprocClusterConfig(StarlakeOptions):
@@ -151,7 +153,8 @@ class StarlakeDataprocClusterConfig(StarlakeOptions):
         dataproc_name = caller_globals.get("dataproc_name", None)
         master_config = StarlakeDataprocMasterConfig.from_module(filename, module_name, options)
         worker_config = StarlakeDataprocWorkerConfig.from_module(filename, module_name, options)
-        dataproc_secondary_worker_config = getattr(module_name, "get_dataproc_secondary_worker_config", lambda dag_name: None)
+        caller_module = sys.modules.get(module_name) if module_name else None
+        dataproc_secondary_worker_config = getattr(caller_module, "get_dataproc_secondary_worker_config", lambda dag_name: None) if caller_module else lambda dag_name: None
         secondary_worker_config = dataproc_secondary_worker_config(cluster_config_name)
         idle_delete_ttl=caller_globals.get('dataproc_idle_delete_ttl', None)
         single_node=caller_globals.get('dataproc_single_node', None)

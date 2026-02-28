@@ -28,7 +28,7 @@ from ai.starlake.dagster import StarlakeDagsterJob, StarlakeDagsterUtils, Dagste
 
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment, TaskType
 
-from ai.starlake.common import TODAY
+from ai.starlake.common import today
 
 from ai.starlake.gcp import StarlakeDataprocClusterConfig
 
@@ -54,7 +54,7 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
         super().__init__(filename=filename, module_name=module_name, pre_load_strategy=pre_load_strategy, options=options, **kwargs)
         self.cluster_config = StarlakeDataprocClusterConfig.from_module(filename, module_name, self.options) if not cluster_config else cluster_config
         cluster_id = self.cluster_config.cluster_id
-        cluster_name = f"{self.cluster_config.dataproc_name}-{cluster_id.replace('_', '-')}-{TODAY}"
+        cluster_name = f"{self.cluster_config.dataproc_name}-{cluster_id.replace('_', '-')}-{today()}"
         self.__dataproc__  = DataprocResource(
             project_id=self.cluster_config.project_id,
             region=self.cluster_config.region,
@@ -220,8 +220,8 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             tmp_arguments.append(f"\'{logical_datetime}\'")
-            command = arguments.pop(0)
-            command_with_arguments = [command] + tmp_arguments + arguments
+            command = arguments[0]
+            command_with_arguments = [command] + tmp_arguments + arguments[1:]
 
             if transform:
                 opts = command_with_arguments[-1].split(",")

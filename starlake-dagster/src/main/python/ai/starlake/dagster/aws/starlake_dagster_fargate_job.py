@@ -110,8 +110,8 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             tmp_arguments.append(f"\'{logical_datetime}\'")
-            command = arguments.pop(0)
-            command_with_arguments = [command] + tmp_arguments + arguments
+            command = arguments[0]
+            command_with_arguments = [command] + tmp_arguments + arguments[1:]
 
             if transform:
                 opts = command_with_arguments[-1].split(",")
@@ -127,7 +127,7 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
                 # Update the fargate arguments and environment
                 fargate.arguments = command_with_arguments
                 environment = fargate.environment
-                environment.update(env)
+                environment.extend([{"name": k, "value": v} for k, v in env.items()])
                 fargate.environment = environment
 
             command = fargate.command

@@ -161,10 +161,10 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
             out={out: Out(dagster_type=str, is_required=True)}
         )
         def dummy(context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, **kwargs):
-            yield Output(value=task_id, output_name=out)
-
             for asset in assets:
                 yield AssetMaterialization(asset_key=asset.path, description=kwargs.get("description", f"Dummy op {task_id} execution succeeded"))
+
+            yield Output(value=task_id, output_name=out)
 
         return dummy
 
