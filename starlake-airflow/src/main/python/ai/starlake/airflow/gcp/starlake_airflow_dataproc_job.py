@@ -34,6 +34,8 @@ from airflow.sdk.bases.operator import BaseOperator
 
 from airflow.task.trigger_rule import TriggerRule
 
+from airflow.providers.google.cloud.operators.dataproc import DataprocCreateClusterOperator, DataprocDeleteClusterOperator, DataprocSubmitJobOperator
+
 class StarlakeAirflowDataprocMasterConfig(StarlakeDataprocMasterConfig, StarlakeAirflowOptions):
     def __init__(self, machine_type: str, disk_type: str, disk_size: int, options: dict, **kwargs):
         super().__init__(
@@ -115,6 +117,27 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
 
         self.pool = pool
 
+    def _resolve_cluster_name(self, cluster_id=None, cluster_name=None, is_new=False):
+        """Resolve cluster_id and cluster_name with consistent naming logic.
+
+        Args:
+            cluster_id: Optional cluster id override. Defaults to config value.
+            cluster_name: Optional explicit cluster name. If provided, truncated to 51 chars.
+            is_new: If True, increments the cluster count (for create operations).
+
+        Returns:
+            tuple: (cluster_id, cluster_name)
+        """
+        cluster_id = cluster_id or self.cluster_config.cluster_id
+        if not cluster_name:
+            nb_clusters = len(self.clusters) + (1 if is_new else 0)
+            cluster_name = f"{cluster_id.replace('_', '-')}-{nb_clusters}-{TODAY}"[0:51]
+        else:
+            cluster_name = cluster_name[0:51]
+        if cluster_name[-1] == '-':
+            cluster_name = cluster_name[0:-1] + 'Z'
+        return cluster_id, cluster_name
+
     def create_dataproc_cluster(
             self,
             cluster_id: str=None,
@@ -125,11 +148,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
         Create the Cloud Dataproc cluster.
         This operator will be flagged a success if the cluster by this name already exists.
         """
-        cluster_id = self.cluster_config.cluster_id if not cluster_id else cluster_id
-        nb_clusters = len(self.clusters) + 1
-        cluster_name = f"{cluster_id.replace('_', '-')}-{nb_clusters}-{TODAY}"[0:51] if not cluster_name else cluster_name[0:51]
-        if cluster_name[-1] == '-':
-            cluster_name = cluster_name[0:-1] + 'Z'
+        cluster_id, cluster_name = self._resolve_cluster_name(cluster_id, cluster_name, is_new=True)
 
         cluster = self.clusters.get(cluster_name, None)
 
@@ -142,8 +161,6 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             })
 
             spark_events_bucket = f'dataproc-{self.cluster_config.project_id}'
-
-            from airflow.providers.google.cloud.operators.dataproc import DataprocCreateClusterOperator
 
             cluster = DataprocCreateClusterOperator(
                 task_id=task_id,
@@ -169,18 +186,12 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             cluster_name: str=None,
             **kwargs) -> BaseOperator:
         """Tears down the cluster even if there are failures in upstream tasks."""
-        cluster_id = self.cluster_config.cluster_id if not cluster_id else cluster_id
-        nb_clusters = len(self.clusters)
-        cluster_name = f"{cluster_id.replace('_', '-')}-{nb_clusters}-{TODAY}"[0:51] if not cluster_name else cluster_name[0:51]
-        if cluster_name[-1] == '-':
-            cluster_name = cluster_name[0:-1] + 'Z'
+        cluster_id, cluster_name = self._resolve_cluster_name(cluster_id, cluster_name)
         task_id = f"delete_{cluster_id.replace('-', '_')}_cluster" if not task_id else task_id
         kwargs.update({
             'pool': kwargs.get('pool', self.pool),
             'trigger_rule': kwargs.get('trigger_rule', TriggerRule.ALL_DONE)
         })
-
-        from airflow.providers.google.cloud.operators.dataproc import DataprocDeleteClusterOperator
 
         delete_cluster = DataprocDeleteClusterOperator(
             task_id=task_id,
@@ -212,25 +223,21 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
         task_type: Optional[TaskType] = None,
         **kwargs) -> BaseOperator:
         """Create a dataproc job on the specified cluster"""
-        cluster_id = self.cluster_config.cluster_id if not cluster_id else cluster_id
-        nb_clusters = len(self.clusters)
-        cluster_name = f"{cluster_id.replace('_', '-')}-{nb_clusters}-{TODAY}"[0:51] if not cluster_name else cluster_name[0:51]
-        if cluster_name[-1] == '-':
-            cluster_name = cluster_name[0:-1] + 'Z'
+        cluster_id, cluster_name = self._resolve_cluster_name(cluster_id, cluster_name)
         task_id = f"{cluster_id}_submit" if not task_id else task_id
         arguments = [] if not arguments else arguments
         arguments = StarlakeAirflowJob._inject_scheduled_date(arguments, task_type, kwargs)
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",") if not jar_list else jar_list
         main_class = __class__.get_context_var("spark_job_main_class", "ai.starlake.job.Main", self.options) if not main_class else main_class
 
-        sparkBucket = __class__.get_context_var(var_name="spark_bucket", options=self.options)
+        spark_bucket = __class__.get_context_var(var_name="spark_bucket", options=self.options)
         spark_properties = {
-            "spark.hadoop.fs.defaultFS": f"gs://{sparkBucket}",
+            "spark.hadoop.fs.defaultFS": f"gs://{spark_bucket}",
             "spark.eventLog.enabled": "true",
             "spark.sql.sources.partitionOverwriteMode": "DYNAMIC",
             "spark.sql.legacy.parquet.int96RebaseModeInWrite": "CORRECTED",
             "spark.sql.catalogImplementation": "in-memory",
-            "spark.datasource.bigquery.temporaryGcsBucket": sparkBucket,
+            "spark.datasource.bigquery.temporaryGcsBucket": spark_bucket,
             "spark.datasource.bigquery.allowFieldAddition": "true",
             "spark.datasource.bigquery.allowFieldRelaxation": "true",
             "spark.dynamicAllocation.enabled": "false",
@@ -323,8 +330,6 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
             StarlakeExecutionEnvironment: The execution environment to use.
         """
         return StarlakeExecutionEnvironment.DATAPROC
-
-from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
 
 class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
     """Dataproc Job Operator"""
