@@ -20,7 +20,7 @@ from datetime import timedelta
 
 import logging
 
-from typing import Any, Dict, Optional, Sequence, Union
+from typing import Optional, Sequence, Union
 
 from ai.starlake.dataset import StarlakeDataset
 
@@ -51,11 +51,30 @@ from google.longrunning import operations_pb2
 from enum import Enum
 CloudRunMode = Enum("CloudRunMode", ["SYNC", "DEFER", "ASYNC"])
 
+def _wrap_bash_for_xcom(bash_command):
+    """Wrap a bash command to capture return code and push to XCom."""
+    escaped = bash_command.replace("'", '"')
+    return f"""
+            set -e
+            bash -c '
+            {escaped}
+            return_code=$?
+
+            # Push the return code to XCom
+            echo $return_code
+
+            # Exit with the captured return code if non-zero
+            # if [ $return_code -ne 0 ]; then
+            #     exit $return_code
+            # fi
+            '
+            """
+
 class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
     """Airflow Starlake Cloud Run Job."""
     def __init__(
-            self, 
-            filename: str = None, 
+            self,
+            filename: str = None,
             module_name: str = None,
             pre_load_strategy: Union[StarlakePreLoadStrategy, str, None]=None,
             project_id: str=None,
@@ -95,196 +114,168 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         """
         return StarlakeExecutionEnvironment.CLOUD_RUN
 
+    def _inject_scheduled_date(self, arguments, task_type, kwargs):
+        """Inject --scheduledDate argument for LOAD/TRANSFORM tasks."""
+        if task_type not in (TaskType.LOAD, TaskType.TRANSFORM):
+            return arguments
+        arguments = arguments or []
+        params = kwargs.get('params', dict())
+        cron = params.get('cron_expr', params.get('cron', None))
+        params['cron'] = cron
+        kwargs['params'] = params
+        command = arguments.pop(0)
+        return [command, "--scheduledDate",
+            "\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'"] + arguments
+
+    def _build_container_overrides(self, arguments):
+        """Build container overrides for native Cloud Run API calls."""
+        return {"container_overrides": [{
+            "env": [{"name": k, "value": v} for k, v in self.sl_env_vars.items()],
+            "args": arguments
+        }]}
+
+    def _build_gcloud_command(self, command, wait=False):
+        """Build gcloud command for Cloud Run job execution."""
+        mode = "--wait" if wait else "--async"
+        return (
+            f"gcloud beta run jobs execute {self.cloud_run_job_name} "
+            f"--args \"{command}\" "
+            f"{self.update_env_vars} "
+            f"{mode} --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}"
+        )
+
     def sl_job(self, task_id: str, arguments: list, spark_config: StarlakeSparkConfig=None, dataset: Optional[Union[StarlakeDataset, str]]=None, task_type: Optional[TaskType] = None, **kwargs) -> BaseOperator:
         """Overrides StarlakeAirflowJob.sl_job()
         Generate the Airflow task that will run the starlake command.
-        
+
         Args:
             task_id (str): The required task id.
             arguments (list): The required arguments of the starlake command to run.
             spark_config (Optional[StarlakeSparkConfig], optional): The optional spark configuration. Defaults to None.
             dataset (Optional[Union[StarlakeDataset, str]], optional): The optional dataset to materialize. Defaults to None.
             task_type (Optional[TaskType], optional): The optional task type. Defaults to None.
-            
+
         Returns:
             BaseOperator: The Airflow task.
         """
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'retry_delay': timedelta(seconds=self.retry_delay_in_seconds)})
-        if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
-            arguments = [] if not arguments else arguments
-            params: dict = kwargs.get('params', dict())
-            cron = params.get('cron_expr', params.get('cron', None))
-            params.update({'cron': cron})
-            kwargs.update({'params': params})
-            tmp_arguments = []
-            tmp_arguments.append("--scheduledDate")
-            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
-            command = arguments.pop(0)
-            arguments = [command] + tmp_arguments + arguments
+        arguments = self._inject_scheduled_date(arguments, task_type, kwargs)
         command = f'^{self.separator}^' + self.separator.join(arguments)
-        if self.cloud_run_async: # asynchronous job
-            with TaskGroup(group_id=f'{task_id}_wait') as task_completion_sensors:
-                if self.use_gcloud: # use gcloud
-                    kwargs.update({'do_xcom_push': True})
-                    job_task = BashOperator(
-                        task_id=task_id,
-                        bash_command=(
-                            f"gcloud beta run jobs execute {self.cloud_run_job_name} "
-                            f"--args \"{command}\" "
-                            f"{self.update_env_vars} "
-                            f"--async --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}" #--task-timeout 300
-                        ),
-                        **kwargs
-                    )
-                    # check job completion
-                    check_completion_id = task_id + '_check_completion'
-                    completion_sensor = GCloudRunJobCompletionSensor(
-                        task_id=check_completion_id,
-                        dataset=dataset if self.retry_on_failure else None,
-                        source=self.source,
-                        project_id=self.project_id,
-                        cloud_run_job_region=self.cloud_run_job_region,
-                        source_task_id=job_task.task_id,
-                        retry_on_failure=self.retry_on_failure,
-                        poke_interval=self.cloud_run_async_poke_interval,
-                        impersonate_service_account = self.impersonate_service_account,
-                        **kwargs
-                    )
-                    if self.retry_on_failure:
-                        job_task >> completion_sensor
-                    else:
-                        # check job status
-                        get_completion_status_id = task_id + '_get_completion_status'
-                        source_task_id=job_task.task_id
-                        bash_command = (f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}')}}}} --region {self.cloud_run_job_region} --project {self.project_id} --format='value(status.failedCount, status.cancelledCounts)' {self.impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -z \"$value\"")
-                        if kwargs.get('do_xcom_push', False):
-                            bash_command=f"""
-                            set -e
-                            bash -c '
-                            {bash_command.replace("'", '"')}
-                            return_code=$?
 
-                            # Push the return code to XCom
-                            echo $return_code
+        if not self.cloud_run_async:
+            return self._create_sync_job(task_id, command, arguments, dataset, **kwargs)
 
-                            # Exit with the captured return code if non-zero
-                            # if [ $return_code -ne 0 ]; then
-                            #     exit $return_code
-                            # fi
-                            '
-                            """
-                        job_status = StarlakeBashOperator(
-                            task_id=get_completion_status_id,
-                            dataset=dataset,
-                            source=self.source,
-                            bash_command=bash_command,
-                            **kwargs
-                        )
-                        job_task >> completion_sensor >> job_status
-
-                else:
-                    container_overrides: Dict[str, Any] = {
-                        "env": [
-                            {"name": key, "value": value} for key, value in self.sl_env_vars.items()
-                        ]
-                    }
-                    container_overrides["args"] = arguments
-                    job_overrides = {"container_overrides": [container_overrides]}
-                    job_task = CloudRunJobOperator(
-                        task_id=task_id,
-                        dataset=None,
-                        source=self.source,
-                        project_id=self.project_id,
-                        job_name=self.cloud_run_job_name,
-                        region=self.cloud_run_job_region,
-                        overrides=job_overrides,
-                        mode=CloudRunMode.ASYNC,
-                        impersonation_chain=self.impersonate_service_account,
-                        **kwargs
-                    )
-                    check_completion_id = task_id + '_check_completion'
-                    completion_sensor = CloudRunJobCompletionSensor(
-                        task_id=check_completion_id,
-                        dataset=dataset,
-                        source=self.source,
-                        source_task_id=job_task.task_id,
-                        impersonation_chain=self.impersonate_service_account,
-                        **kwargs
-                    )
-
-                    job_task >> completion_sensor
-
-            return task_completion_sensors
-
-        else: # synchronous job
+        with TaskGroup(group_id=f'{task_id}_wait') as task_completion_sensors:
             if self.use_gcloud:
-                bash_command = (
-                    f"gcloud beta run jobs execute {self.cloud_run_job_name} "
-                    f"--args \"{command}\" "
-                    f"{self.update_env_vars} "
-                    f"--wait --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}" #--task-timeout 300 
-                )
-                if kwargs.get('do_xcom_push', False):
-                    bash_command=f"""
-                    set -e
-                    bash -c '
-                    {bash_command.replace("'", '"')}
-                    return_code=$?
-
-                    # Push the return code to XCom
-                    echo $return_code
-
-                    # Exit with the captured return code if non-zero
-                    # if [ $return_code -ne 0 ]; then
-                    #     exit $return_code
-                    # fi
-                    '
-                    """
-                kwargs.pop('do_xcom_push', None)
-                return StarlakeBashOperator(
-                    task_id=task_id,
-                    dataset=dataset,
-                    source=self.source,
-                    bash_command=bash_command,
-                    do_xcom_push=True,
-                    **kwargs
-                )
+                self._create_async_gcloud_job(task_id, command, dataset, **kwargs)
             else:
-                container_overrides: Dict[str, Any] = {
-                    "env": [
-                        {"name": key, "value": value} for key, value in self.sl_env_vars.items()
-                    ]
-                }
-                container_overrides["args"] = arguments
-                job_overrides = {"container_overrides": [container_overrides]}
-                return CloudRunJobOperator(
-                    task_id=task_id,
-                    dataset=dataset,
-                    source=self.source,
-                    project_id=self.project_id,
-                    job_name=self.cloud_run_job_name,
-                    region=self.cloud_run_job_region,
-                    overrides=job_overrides,
-                    mode=CloudRunMode.SYNC,
-                    impersonation_chain=self.impersonate_service_account,
-                    **kwargs
-                )
+                self._create_async_native_job(task_id, arguments, dataset, **kwargs)
+        return task_completion_sensors
+
+    def _create_sync_job(self, task_id, command, arguments, dataset, **kwargs):
+        """Create a synchronous Cloud Run job."""
+        if self.use_gcloud:
+            bash_command = self._build_gcloud_command(command, wait=True)
+            if kwargs.get('do_xcom_push', False):
+                bash_command = _wrap_bash_for_xcom(bash_command)
+            kwargs.pop('do_xcom_push', None)
+            return StarlakeBashOperator(
+                task_id=task_id,
+                dataset=dataset,
+                source=self.source,
+                bash_command=bash_command,
+                do_xcom_push=True,
+                **kwargs
+            )
+        else:
+            return CloudRunJobOperator(
+                task_id=task_id,
+                dataset=dataset,
+                source=self.source,
+                project_id=self.project_id,
+                job_name=self.cloud_run_job_name,
+                region=self.cloud_run_job_region,
+                overrides=self._build_container_overrides(arguments),
+                mode=CloudRunMode.SYNC,
+                impersonation_chain=self.impersonate_service_account,
+                **kwargs
+            )
+
+    def _create_async_gcloud_job(self, task_id, command, dataset, **kwargs):
+        """Create an async Cloud Run job using gcloud CLI with completion sensors."""
+        kwargs.update({'do_xcom_push': True})
+        job_task = BashOperator(
+            task_id=task_id,
+            bash_command=self._build_gcloud_command(command, wait=False),
+            **kwargs
+        )
+        completion_sensor = GCloudRunJobCompletionSensor(
+            task_id=f'{task_id}_check_completion',
+            dataset=dataset if self.retry_on_failure else None,
+            source=self.source,
+            project_id=self.project_id,
+            cloud_run_job_region=self.cloud_run_job_region,
+            source_task_id=job_task.task_id,
+            retry_on_failure=self.retry_on_failure,
+            poke_interval=self.cloud_run_async_poke_interval,
+            impersonate_service_account=self.impersonate_service_account,
+            **kwargs
+        )
+        if self.retry_on_failure:
+            job_task >> completion_sensor
+        else:
+            source_task_id = job_task.task_id
+            bash_command = (f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}')}}}} --region {self.cloud_run_job_region} --project {self.project_id} --format='value(status.failedCount, status.cancelledCounts)' {self.impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -z \"$value\"")
+            if kwargs.get('do_xcom_push', False):
+                bash_command = _wrap_bash_for_xcom(bash_command)
+            job_status = StarlakeBashOperator(
+                task_id=f'{task_id}_get_completion_status',
+                dataset=dataset,
+                source=self.source,
+                bash_command=bash_command,
+                **kwargs
+            )
+            job_task >> completion_sensor >> job_status
+
+    def _create_async_native_job(self, task_id, arguments, dataset, **kwargs):
+        """Create an async Cloud Run job using native API with completion sensor."""
+        job_task = CloudRunJobOperator(
+            task_id=task_id,
+            dataset=None,
+            source=self.source,
+            project_id=self.project_id,
+            job_name=self.cloud_run_job_name,
+            region=self.cloud_run_job_region,
+            overrides=self._build_container_overrides(arguments),
+            mode=CloudRunMode.ASYNC,
+            impersonation_chain=self.impersonate_service_account,
+            **kwargs
+        )
+        completion_sensor = CloudRunJobCompletionSensor(
+            task_id=f'{task_id}_check_completion',
+            dataset=dataset,
+            source=self.source,
+            source_task_id=job_task.task_id,
+            impersonation_chain=self.impersonate_service_account,
+            **kwargs
+        )
+        job_task >> completion_sensor
 
 class GCloudRunJobCompletionSensor(StarlakeDatasetMixin, BashSensor):
     '''
     This sensor checks the completion of a cloud run job using gcloud.
     '''
-    def __init__(self, 
-                 *, 
-                 task_id: str, 
+    def __init__(self,
+                 *,
+                 task_id: str,
                  dataset: Optional[Union[StarlakeDataset, str]],
                  source: Optional[str],
-                 project_id: str, 
-                 cloud_run_job_region: str, 
-                 source_task_id: str, 
-                 retry_on_failure: bool=None, 
-                 impersonate_service_account: str=None, 
+                 project_id: str,
+                 cloud_run_job_region: str,
+                 source_task_id: str,
+                 retry_on_failure: bool=None,
+                 impersonate_service_account: str=None,
                  **kwargs
         ) -> None:
         if retry_on_failure:
@@ -309,21 +300,8 @@ class GCloudRunJobCompletionSensor(StarlakeDatasetMixin, BashSensor):
             bash_command=(f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}')}}}}  --region {cloud_run_job_region} --project {project_id} --format='value(status.completionTime, status.cancelledCounts)' {impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -n \"$value\"")
 
         if kwargs.get('do_xcom_push', False) and retry_on_failure:
-            bash_command=f"""
-            set -e
-            bash -c '
-            {bash_command.replace("'", '"')}
-            return_code=$?
+            bash_command = _wrap_bash_for_xcom(bash_command)
 
-            # Push the return code to XCom
-            echo $return_code
-
-            # Exit with the captured return code if non-zero
-            # if [ $return_code -ne 0 ]; then
-            #     exit $return_code
-            # fi
-            '
-            """
         super().__init__(
             task_id=task_id,
             dataset=dataset,
@@ -340,7 +318,7 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
 
     def __init__(
         self,
-        task_id: str, 
+        task_id: str,
         dataset: Optional[Union[StarlakeDataset, str]],
         source: Optional[str],
         mode: CloudRunMode = CloudRunMode.SYNC,
@@ -352,8 +330,8 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
             task_id=task_id,
             dataset=dataset,
             source=source,
-            gcp_conn_id=gcp_conn_id, 
-            impersonation_chain=impersonation_chain, 
+            gcp_conn_id=gcp_conn_id,
+            impersonation_chain=impersonation_chain,
             **kwargs
         )
         self.mode = mode
@@ -396,7 +374,7 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
     def __init__(
         self,
         *,
-        task_id: str, 
+        task_id: str,
         dataset: Optional[Union[StarlakeDataset, str]],
         source: Optional[str],
         source_task_id: str,
@@ -408,7 +386,7 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
             task_id=task_id,
             dataset=dataset,
             source=source,
-            mode="reschedule", 
+            mode="reschedule",
             **kwargs
         )
         self.source_task_id = source_task_id
