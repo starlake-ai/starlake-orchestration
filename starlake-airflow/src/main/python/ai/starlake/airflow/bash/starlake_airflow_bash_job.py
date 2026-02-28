@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 
+import os
+
 from typing import Optional, Union
 
 from ai.starlake.dataset import StarlakeDataset
@@ -74,17 +76,9 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         Returns:
             dict: The os environment variables to use.
         """
-        import os
-        env_vars = dict()
-        # Add all env vars if sl_include_env_vars is * or _
-        if self.sl_included_env_vars == ['*'] or self.sl_included_env_vars == ['_']:
-            env_vars = os.environ.copy()
-        else:
-            # Add the SL_ environment variables from the os environment variables
-            for key in self.sl_included_env_vars:
-                if key in os.environ:
-                    env_vars[key] = os.environ[key]
-        return env_vars
+        if self.sl_included_env_vars in (['*'], ['_']):
+            return os.environ.copy()
+        return {key: os.environ[key] for key in self.sl_included_env_vars if key in os.environ}
 
     @classmethod
     def sl_execution_environment(cls) -> Union[StarlakeExecutionEnvironment, str]:
@@ -94,6 +88,36 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
             StarlakeExecutionEnvironment: The execution environment to use.
         """
         return StarlakeExecutionEnvironment.SHELL
+
+    def _merge_options(self, arguments: list) -> list:
+        """Merge sl_env_vars into the --options argument.
+
+        If --options exists in arguments, merges sl_env_vars into it.
+        Otherwise, appends --options with all sl_env_vars.
+        """
+        for index, arg in enumerate(arguments):
+            if arg == "--options" and len(arguments) > index + 1:
+                opts = arguments[index + 1]
+                if opts.strip():
+                    temp = self.sl_env_vars.copy()
+                    temp.update({
+                        key: value
+                        for opt in opts.split(",")
+                        if "=" in opt
+                        for key, value in [opt.split("=")]
+                    })
+                    options = ",".join(f"{key}={value}" for key, value in temp.items())
+                    for opt in opts.split(","):
+                        if "=" not in opt:
+                            options += f",{opt}"
+                else:
+                    options = ",".join(f"{key}={value}" for key, value in self.sl_env_vars.items())
+                arguments[index + 1] = options
+                return arguments
+
+        arguments.append("--options")
+        arguments.append(",".join(f"{key}={value}" for key, value in self.sl_env_vars.items()))
+        return arguments
 
     def sl_job(self, task_id: str, arguments: list, spark_config: Optional[StarlakeSparkConfig] = None, dataset: Optional[Union[StarlakeDataset, str]]= None, task_type: Optional[TaskType] = None, **kwargs) -> BaseOperator:
         """Overrides StarlakeAirflowJob.sl_job()
@@ -109,40 +133,12 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         Returns:
             BaseOperator: The Airflow task.
         """
-        found = False
-
-        env = {**self.sl_os_env_vars.copy(), **self.sl_env_vars.copy()} # Copy the current sl env variables
+        env = {**self.sl_os_env_vars, **self.sl_env_vars}
 
         arguments = self._inject_scheduled_date(arguments, task_type, kwargs)
+        arguments = self._merge_options(arguments)
 
-        for index, arg in enumerate(arguments):
-            if arg == "--options" and arguments.__len__() > index + 1:
-                opts = arguments[index+1]
-                if opts.strip().__len__() > 0:
-                    temp = self.sl_env_vars.copy() # Copy the current sl env variables
-                    temp.update({
-                        key: value
-                        for opt in opts.split(",")
-                        if "=" in opt  # Only process valid key=value pairs
-                        for key, value in [opt.split("=")]
-                    })
-                    options = ",".join([f"{key}={value}" for i, (key, value) in enumerate(temp.items())])
-                    for opt in opts.split(","):
-                        if "=" not in opt:
-                            options += f",{opt}"
-                else:
-                    options = ",".join([f"{key}={value}" for i, (key, value) in enumerate(self.sl_env_vars.items())]) # Add/overwrite with sl env variables
-                arguments[index+1] = options
-                found = True
-                break
-
-        if not found:
-            arguments.append("--options")
-            arguments.append(",".join([f"{key}={value}" for key, value in self.sl_env_vars.items()])) # Add/overwrite with sl env variables
-
-        preload = False
-        if task_type and task_type==TaskType.PRELOAD:
-            preload = True
+        preload = task_type == TaskType.PRELOAD
 
         command = __class__.get_context_var("SL_STARLAKE_PATH", "starlake", self.options) + f" {' '.join(arguments)}"
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
