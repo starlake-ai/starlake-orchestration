@@ -41,7 +41,6 @@ from airflow.utils.context import Context
 from airflow.sdk import TaskGroup
 
 from google.cloud.run_v2.types import Execution
-from google.longrunning import operations_pb2
 
 class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
     """Airflow Starlake Cloud Run Job."""
@@ -156,6 +155,7 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         hook: CloudRunHook = CloudRunHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
+            transport="rest",
         )
         self.operation = hook.execute_job(
             region=self.region,
@@ -200,18 +200,23 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
         self.impersonation_chain = impersonation_chain
 
     def poke(self, context: Context):
+        from google.auth.transport.requests import AuthorizedSession
         hook = CloudRunHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
         )
-        operation_name = self.xcom_pull(context, task_ids=self.source_task_id)
-        operation_request = operations_pb2.GetOperationRequest(name=operation_name)
-        operation: operations_pb2.Operation = hook.get_conn().get_operation(
-            operation_request
+        operation_name = context['ti'].xcom_pull(task_ids=self.source_task_id)
+        session = AuthorizedSession(hook.get_credentials())
+        response = session.get(
+            f"https://run.googleapis.com/v2/{operation_name}",
+            timeout=120,
         )
-        if operation.done:
-            if operation.error.code != 0:
-                error_msg = f"{operation.error.message} [{operation.error.code}]"
+        response.raise_for_status()
+        result = response.json()
+        if result.get("done", False):
+            error = result.get("error")
+            if error and (error.get("code", 0) != 0 or error.get("message", "")):
+                error_msg = f"{error.get('message', 'Unknown error')} [{error.get('code', 'Unknown')}]"
                 if self.retry_on_failure:
                     raise AirflowException(error_msg)
                 if self.do_xcom_push:
