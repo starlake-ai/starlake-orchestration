@@ -1056,14 +1056,13 @@ class AbstractOrchestration(Generic[U, T, GT, E]):
 class OrchestrationFactory:
     _registry = {}
 
-    _initialized = False
+    _pending_modules: list = []
+
+    _scanned = False
 
     @classmethod
-    def register_orchestrations_from_package(cls, package_name: str = "ai.starlake") -> None:
-        """
-        Dynamically load all classes implementing AbstractOrchestration from the given root package, including sub-packages,
-        and register them in the OrchestrationRegistry.
-        """
+    def _scan_modules(cls, package_name: str = "ai.starlake") -> None:
+        """Scan filesystem for potential orchestration modules without importing them."""
         print(f"Registering orchestrations from package {package_name}")
         package = importlib.import_module(package_name)
         package_path = os.path.dirname(package.__file__)
@@ -1078,21 +1077,38 @@ class OrchestrationFactory:
 
             for file in files:
                 if file.endswith(".py") and file != "__init__.py":
-                    module_name = os.path.splitext(file)[0]
-                    full_module_name = f"{module_prefix}.{module_name}"
+                    mod_name = os.path.splitext(file)[0]
+                    full_module_name = f"{module_prefix}.{mod_name}"
+                    cls._pending_modules.append(full_module_name)
 
-                    try:
-                        module = importlib.import_module(full_module_name)
-                    except ImportError as e:
-                        print(f"Failed to import module {full_module_name}: {e}")
-                        continue
-                    except AttributeError as e:
-                        print(f"Failed to import module {full_module_name}: {e}")
-                        continue
+        cls._scanned = True
 
-                    for name, obj in inspect.getmembers(module, inspect.isclass):
-                        if issubclass(obj, AbstractOrchestration) and obj is not AbstractOrchestration:
-                            OrchestrationFactory.register_orchestration(obj)
+    @classmethod
+    def _import_and_register(cls, full_module_name: str) -> None:
+        """Import a single module and register any orchestration classes found."""
+        try:
+            module = importlib.import_module(full_module_name)
+        except ImportError as e:
+            print(f"Failed to import module {full_module_name}: {e}")
+            return
+        except AttributeError as e:
+            print(f"Failed to import module {full_module_name}: {e}")
+            return
+
+        for name, obj in inspect.getmembers(module, inspect.isclass):
+            if issubclass(obj, AbstractOrchestration) and obj is not AbstractOrchestration:
+                cls.register_orchestration(obj)
+
+    @classmethod
+    def register_orchestrations_from_package(cls, package_name: str = "ai.starlake") -> None:
+        """
+        Dynamically load all classes implementing AbstractOrchestration from the given root package, including sub-packages,
+        and register them in the OrchestrationRegistry.
+        """
+        if not cls._scanned:
+            cls._scan_modules(package_name)
+        while cls._pending_modules:
+            cls._import_and_register(cls._pending_modules.pop(0))
 
     @classmethod
     def register_orchestration(cls, orchestration_class: Type[AbstractOrchestration]):
@@ -1104,10 +1120,19 @@ class OrchestrationFactory:
 
     @classmethod
     def create_orchestration(cls, job: IStarlakeJob[T, E], **kwargs) -> AbstractOrchestration[U, T, GT, E]:
-        if not cls._initialized:
-            cls.register_orchestrations_from_package()
-            cls._initialized = True
+        if not cls._scanned:
+            cls._scan_modules()
+
         orchestrator = job.sl_orchestrator()
-        if orchestrator not in cls._registry:
-            raise ValueError(f"Unknown orchestrator type: {orchestrator}")
-        return cls._registry[orchestrator](job, **kwargs)
+
+        # Return immediately if the requested orchestration is already registered
+        if orchestrator in cls._registry:
+            return cls._registry[orchestrator](job, **kwargs)
+
+        # Lazily import pending modules until we find the requested orchestration
+        while cls._pending_modules:
+            cls._import_and_register(cls._pending_modules.pop(0))
+            if orchestrator in cls._registry:
+                return cls._registry[orchestrator](job, **kwargs)
+
+        raise ValueError(f"Unknown orchestrator type: {orchestrator}")

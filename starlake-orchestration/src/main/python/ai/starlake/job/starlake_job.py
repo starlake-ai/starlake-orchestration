@@ -646,14 +646,13 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
 class StarlakeJobFactory:
     _registry = {}
 
-    _initialized = False
+    _pending_modules: list = []
+
+    _scanned = False
 
     @classmethod
-    def register_jobs_from_package(cls, package_name: str = "ai.starlake") -> None:
-        """
-        Dynamically load all classes implementing IStarlakeJob from the given root package, including sub-packages,
-        and register them in the StarlakeJobRegistry.
-        """
+    def _scan_modules(cls, package_name: str = "ai.starlake") -> None:
+        """Scan filesystem for potential job modules without importing them."""
         print(f"Registering jobs from package {package_name}")
         package = importlib.import_module(package_name)
         package_path = os.path.dirname(package.__file__)
@@ -668,22 +667,38 @@ class StarlakeJobFactory:
 
             for file in files:
                 if file.endswith(".py") and file != "__init__.py":
-                    module_name = os.path.splitext(file)[0]
-                    full_module_name = f"{module_prefix}.{module_name}"
+                    mod_name = os.path.splitext(file)[0]
+                    full_module_name = f"{module_prefix}.{mod_name}"
+                    cls._pending_modules.append(full_module_name)
 
-                    try:
-                        module = importlib.import_module(full_module_name)
-                    except ImportError as e:
-                        print(f"Failed to import module {full_module_name}: {e}")
-                        continue
-                    except AttributeError as e:
-                        print(f"Failed to import module {full_module_name}: {e}")
-                        continue
+        cls._scanned = True
 
-                    for name, obj in inspect.getmembers(module, inspect.isclass):
-                        if issubclass(obj, IStarlakeJob) and obj is not IStarlakeJob:
-                            StarlakeJobFactory.register_job(obj)
+    @classmethod
+    def _import_and_register(cls, full_module_name: str) -> None:
+        """Import a single module and register any job classes found."""
+        try:
+            module = importlib.import_module(full_module_name)
+        except ImportError as e:
+            print(f"Failed to import module {full_module_name}: {e}")
+            return
+        except AttributeError as e:
+            print(f"Failed to import module {full_module_name}: {e}")
+            return
 
+        for name, obj in inspect.getmembers(module, inspect.isclass):
+            if issubclass(obj, IStarlakeJob) and obj is not IStarlakeJob:
+                cls.register_job(obj)
+
+    @classmethod
+    def register_jobs_from_package(cls, package_name: str = "ai.starlake") -> None:
+        """
+        Dynamically load all classes implementing IStarlakeJob from the given root package, including sub-packages,
+        and register them in the StarlakeJobRegistry.
+        """
+        if not cls._scanned:
+            cls._scan_modules(package_name)
+        while cls._pending_modules:
+            cls._import_and_register(cls._pending_modules.pop(0))
 
     @classmethod
     def register_job(cls, job_class: Type[IStarlakeJob]) -> None:
@@ -700,11 +715,21 @@ class StarlakeJobFactory:
 
     @classmethod
     def create_job(cls, filename: str, module_name: str, orchestrator: Union[StarlakeOrchestrator, str], execution_environment: Union[StarlakeExecutionEnvironment, str], options: dict, **kwargs) -> IStarlakeJob:
-        if not cls._initialized:
-            cls.register_jobs_from_package()
-            cls._initialized = True
+        if not cls._scanned:
+            cls._scan_modules()
+
+        # Return immediately if the requested job is already registered
         executions: dict = cls._registry.get(orchestrator, {})
         job: Type[IStarlakeJob] = executions.get(execution_environment, None)
-        if job is None:
-            raise ValueError(f"Execution environment {execution_environment} for orchestrator {orchestrator} not found in registry")
-        return job(filename=filename, module_name=module_name, options=options, **kwargs)
+        if job is not None:
+            return job(filename=filename, module_name=module_name, options=options, **kwargs)
+
+        # Lazily import pending modules until we find the requested job
+        while cls._pending_modules:
+            cls._import_and_register(cls._pending_modules.pop(0))
+            executions = cls._registry.get(orchestrator, {})
+            job = executions.get(execution_environment, None)
+            if job is not None:
+                return job(filename=filename, module_name=module_name, options=options, **kwargs)
+
+        raise ValueError(f"Execution environment {execution_environment} for orchestrator {orchestrator} not found in registry")
