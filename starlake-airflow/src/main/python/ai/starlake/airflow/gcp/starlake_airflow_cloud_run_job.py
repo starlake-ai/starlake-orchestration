@@ -155,7 +155,7 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         hook: CloudRunHook = CloudRunHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
-            transport="rest",
+            # transport="rest",
         )
         self.operation = hook.execute_job(
             region=self.region,
