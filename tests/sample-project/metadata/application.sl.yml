@@ -1,0 +1,23 @@
+---
+version: 1
+application:
+  connectionRef: "duckdb"
+
+  audit:
+    sink:
+      connectionRef: "duckdb"
+
+  connections:
+    duckdb:
+      type: "jdbc"
+      options:
+        url: "jdbc:duckdb:{{SL_ROOT}}/datasets/duckdb.db"
+        driver: "org.duckdb.DuckDBDriver"
+
+  dagRef:
+    load: "{{LOAD_DAG_REF}}"
+    transform: "{{TRANSFORM_DAG_REF}}"
+
+  schedulePresets:
+    hourly: "0 * * * *"
+    daily: "0 0 * * *"

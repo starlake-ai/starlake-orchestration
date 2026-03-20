@@ -1,0 +1,23 @@
+[project]
+name = "starlake-orchestration-tests"
+version = "0.1.0"
+description = "Test suite for starlake-orchestration"
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "duckdb>=0.9.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "airflow: Airflow orchestrator tests",
+    "dagster: Dagster orchestrator tests",
+    "snowflake: Snowflake orchestrator tests",
+    "integration: Integration tests requiring Starlake CLI",
+    "smoke: Smoke tests for infrastructure validation",
+]

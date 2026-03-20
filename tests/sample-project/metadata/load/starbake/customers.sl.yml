@@ -1,0 +1,29 @@
+---
+version: 1
+table:
+  name: "customers"
+  pattern: "customers.*.csv"
+  attributes:
+  - name: "id"
+    type: "long"
+    array: false
+  - name: "first_name"
+    type: "string"
+    array: false
+  - name: "last_name"
+    type: "string"
+    array: false
+  - name: "email"
+    type: "string"
+    array: false
+  - name: "join_date"
+    type: "date"
+    array: false
+  metadata:
+    format: "DSV"
+    array: false
+    withHeader: true
+    separator: ","
+    writeStrategy:
+      type: "APPEND"
+  comment: "Customer reference data (daily schedule, inherited from domain)"

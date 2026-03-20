@@ -1,0 +1,32 @@
+---
+version: 1
+table:
+  name: "orders"
+  pattern: "orders.*.csv"
+  attributes:
+  - name: "order_id"
+    type: "long"
+    array: false
+  - name: "customer_id"
+    type: "long"
+    array: false
+    foreignKey: "starbake.customers.id"
+  - name: "product_id"
+    type: "long"
+    array: false
+    foreignKey: "starbake.products.product_id"
+  - name: "quantity"
+    type: "long"
+    array: false
+  - name: "order_date"
+    type: "date"
+    array: false
+  metadata:
+    format: "DSV"
+    array: false
+    withHeader: true
+    separator: ","
+    writeStrategy:
+      type: "APPEND"
+    schedule: "hourly"
+  comment: "Transactional order records linking customers to products (hourly schedule)"
