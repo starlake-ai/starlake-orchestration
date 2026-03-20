@@ -1,0 +1,8 @@
+---
+version: 1
+task:
+  name: "order_summary"
+  domain: "kpi"
+  table: "order_summary"
+  writeStrategy:
+    type: "OVERWRITE"

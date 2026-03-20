@@ -1,0 +1,8 @@
+---
+version: 1
+task:
+  name: "top_customers"
+  domain: "kpi"
+  table: "top_customers"
+  writeStrategy:
+    type: "OVERWRITE"
