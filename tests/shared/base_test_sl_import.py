@@ -51,7 +51,7 @@ class BaseTestSlImport(BaseTestOrchestration):
         task = job.sl_import(
             task_id="import_starbake_customers",
             domain="starbake",
-            tables={"customers", "orders"},
+            tables=["customers", "orders"],
         )
         assert task is not None
         args = self.get_task_arguments(task)

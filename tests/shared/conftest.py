@@ -91,10 +91,16 @@ def starlake_cli() -> str:
 
 @pytest.fixture(scope="session")
 def java_home() -> str:
-    """Return JAVA_HOME resolved from system env, .env, or .env.example."""
-    value = os.environ.get("JAVA_HOME", _DOT_ENV.get("JAVA_HOME", ""))
+    """Return JAVA_HOME resolved from system env, .env(.example), or built-in default."""
+    value = _env_var("JAVA_HOME")
     if value and Path(value).is_dir():
         return value
+    logger.warning(
+        "JAVA_HOME is not set or points to a non-existent directory (%s). "
+        "All tests requiring the Starlake CLI will be skipped. "
+        "Set JAVA_HOME in system env or .env (see .env.example).",
+        value or "<empty>",
+    )
     pytest.skip(
         "JAVA_HOME not set or points to a non-existent directory — "
         "set it in system env or .env (see .env.example)"
