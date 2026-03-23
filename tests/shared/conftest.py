@@ -20,7 +20,8 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Generator, Tuple
+from types import MappingProxyType
+from typing import Generator, Mapping, Tuple
 
 import duckdb
 import pytest
@@ -34,7 +35,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_DOT_ENV = dotenv_values(_PROJECT_ROOT / ".env")
+_DOT_ENV_PATH = _PROJECT_ROOT / ".env"
+_DOT_ENV = dotenv_values(_DOT_ENV_PATH) if _DOT_ENV_PATH.is_file() else dotenv_values(_PROJECT_ROOT / ".env.example")
 
 # Defaults used when neither .env nor system env defines a variable.
 _DEFAULTS = {
@@ -47,10 +49,13 @@ _REQUIRED_VARS = {"SL_ENV", "SL_VERSION"}
 
 
 def _env_var(name: str) -> str:
-    """Resolve a variable: system env > .env > built-in default."""
+    """Resolve a variable: system env > .env(.example) > built-in default."""
     value = os.environ.get(name, _DOT_ENV.get(name, _DEFAULTS.get(name, "")))
     if not value and name in _REQUIRED_VARS:
-        logger.warning("Environment variable %s resolved to empty string", name)
+        raise EnvironmentError(
+            f"Required variable {name} is empty. "
+            f"Set it in system env, .env, or .env.example"
+        )
     return value
 
 
@@ -86,32 +91,30 @@ def starlake_cli() -> str:
 
 @pytest.fixture(scope="session")
 def java_home() -> str:
-    """Return JAVA_HOME resolved from system env, .env, or well-known path."""
-    value = _env_var("JAVA_HOME")
+    """Return JAVA_HOME resolved from system env, .env, or .env.example."""
+    value = os.environ.get("JAVA_HOME", _DOT_ENV.get("JAVA_HOME", ""))
     if value and Path(value).is_dir():
         return value
-    # Fallback: well-known macOS path for Java 17
-    java_17 = "/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home"
-    if Path(java_17).is_dir():
-        return java_17
-    pytest.skip("Java 17 not found — required for Starlake CLI")
-    return ""
+    pytest.skip(
+        "JAVA_HOME not set or points to a non-existent directory — "
+        "set it in system env or .env (see .env.example)"
+    )
 
 
 @pytest.fixture(scope="session")
-def starlake_env(sample_project_path: Path, java_home: str) -> dict:
+def starlake_env(sample_project_path: Path, java_home: str) -> Mapping[str, str]:
     """Shared environment variables for running Starlake CLI commands.
 
-    Contains only common variables.  Orchestrator-specific variables
-    (e.g. LOAD_DAG_REF, TRANSFORM_DAG_REF) should be added by each
-    orchestrator test module.
+    Returns an immutable mapping.  Orchestrator-specific variables
+    (e.g. LOAD_DAG_REF, TRANSFORM_DAG_REF) should be added by copying
+    via ``dict(starlake_env)`` in each orchestrator test module.
     """
     env = os.environ.copy()
     env["SL_ROOT"] = str(sample_project_path)
     env["SL_ENV"] = _env_var("SL_ENV")
     env["SL_VERSION"] = _env_var("SL_VERSION")
     env["JAVA_HOME"] = java_home
-    return env
+    return MappingProxyType(env)
 
 
 @pytest.fixture(scope="session")
@@ -139,7 +142,7 @@ def duckdb_connection(
 
 @pytest.fixture(scope="function")
 def isolated_project(
-    sample_project_path: Path, tmp_path: Path, starlake_env: dict
+    sample_project_path: Path, tmp_path: Path, starlake_env: Mapping[str, str]
 ) -> Tuple[Path, dict]:
     """Copy the sample project to a temp directory for write isolation.
 

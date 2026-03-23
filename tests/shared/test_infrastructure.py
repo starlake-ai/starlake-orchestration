@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Mapping
 
 import duckdb
 import pytest
@@ -40,7 +41,7 @@ class TestStarlakeCli:
     @pytest.mark.smoke
     @pytest.mark.integration
     def test_dag_generate_succeeds(
-        self, starlake_cli: str, starlake_env: dict, tmp_path: Path
+        self, starlake_cli: str, starlake_env: Mapping[str, str], tmp_path: Path
     ) -> None:
         """Run ``starlake dag-generate`` against the sample project."""
         output_dir = tmp_path / "generated-dags"
