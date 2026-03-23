@@ -17,9 +17,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any, List, Optional
 
-from ai.starlake.orchestration import AbstractOrchestration
+from ai.starlake.orchestration import (
+    AbstractOrchestration,
+    AbstractPipeline,
+    StarlakeDependencies,
+    StarlakeSchedule,
+)
 
 
 class BaseTestOrchestration(ABC):
@@ -31,8 +36,15 @@ class BaseTestOrchestration(ABC):
     """
 
     @abstractmethod
-    def create_orchestration(self) -> AbstractOrchestration:
-        """Each orchestrator provides its concrete orchestration."""
+    def create_orchestration(
+        self, options: Optional[dict] = None
+    ) -> AbstractOrchestration:
+        """Each orchestrator provides its concrete orchestration.
+
+        Args:
+            options: Optional dict forwarded to the job constructor
+                     (e.g. ``{"dataset_triggering_strategy": "all"}``).
+        """
 
     @abstractmethod
     def get_task_arguments(self, task: Any) -> List[str]:
@@ -49,6 +61,23 @@ class BaseTestOrchestration(ABC):
 
         E.g. ``task.task_id`` for Airflow, ``task.name`` for Dagster.
         """
+
+    def create_test_pipeline(
+        self,
+        schedule: Optional[StarlakeSchedule] = None,
+        dependencies: Optional[StarlakeDependencies] = None,
+        options: Optional[dict] = None,
+    ) -> AbstractPipeline:
+        """Create a pipeline through the concrete orchestration.
+
+        At least one of *schedule* or *dependencies* must be provided —
+        ``AbstractPipeline`` raises ``ValueError`` otherwise.
+        """
+        orchestration = self.create_orchestration(options=options)
+        return orchestration.sl_create_pipeline(
+            schedule=schedule,
+            dependencies=dependencies,
+        )
 
     def get_arg_value(self, args: List[str], flag: str) -> str:
         """Return the value following *flag* in *args*.
