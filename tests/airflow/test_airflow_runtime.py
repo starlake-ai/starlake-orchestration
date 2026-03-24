@@ -28,16 +28,11 @@ Prerequisites: Apache Airflow 2.x, Starlake CLI, Java 17+.
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-from pathlib import Path
-from typing import Dict, List, Tuple
-
 from datetime import datetime, timezone
 
-import duckdb
 import pytest
+
+from tests.shared.conftest import get_duckdb, restore_env, set_env
 
 try:
     import airflow
@@ -67,101 +62,14 @@ EXECUTION_DATE = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 # ===================================================================
-# Module-scoped fixtures — expensive setup runs ONCE per module
+# Module-scoped fixtures — Airflow-specific DAG loading and execution
 # ===================================================================
-
-@pytest.fixture(scope="module")
-def runtime_env(
-    sample_project_path, starlake_cli, starlake_env, java_home, tmp_path_factory
-):
-    """Module-scoped isolated project with incoming data and env vars."""
-    project = tmp_path_factory.mktemp("runtime_project")
-    isolated = project / "sample-project"
-    shutil.copytree(sample_project_path, isolated)
-
-    # Stage incoming data for the IMPORTED pre-load strategy
-    incoming = isolated / "datasets" / "incoming" / "starbake"
-    incoming.mkdir(parents=True, exist_ok=True)
-    for csv in (isolated / "datasets" / "starbake").glob("*.csv"):
-        shutil.copy2(csv, incoming / csv.name)
-    (incoming / "ack").touch(exist_ok=True)
-
-    env = dict(starlake_env)
-    env["SL_ROOT"] = str(isolated)
-    env["LOAD_DAG_REF"] = "airflow_load_shell"
-    env["TRANSFORM_DAG_REF"] = "airflow_transform_shell"
-    env["JAVA_HOME"] = java_home
-    starlake_dir = str(Path(starlake_cli).parent)
-    full_path = starlake_dir + os.pathsep + env.get(
-        "PATH", os.environ.get("PATH", "")
-    )
-    env["PATH"] = full_path
-
-    # Inject PATH and JAVA_HOME into the ``sl_env_var`` option of each
-    # Airflow DAG config so they are included in the BashOperator's env
-    # dict (SubprocessHook replaces os.environ with the task env dict).
-    import json as _json
-    dags_dir = isolated / "metadata" / "dags"
-    for yml in dags_dir.glob("airflow_*.sl.yml"):
-        content = yml.read_text()
-        # The sl_env_var value is an escaped JSON string in the YAML:
-        #   sl_env_var: "{\"SL_ROOT\": \"...\", \"SL_ENV\": \"DUCKDB\"}"
-        # Add JAVA_HOME and PATH as additional keys in the JSON dict.
-        java_esc = java_home.replace('\\', '\\\\').replace('"', '\\"')
-        path_esc = full_path.replace('\\', '\\\\').replace('"', '\\"')
-        content = content.replace(
-            '\\\"SL_ENV\\\": \\\"DUCKDB\\\"',
-            '\\\"SL_ENV\\\": \\\"DUCKDB\\\", '
-            f'\\\"JAVA_HOME\\\": \\\"{java_esc}\\\", '
-            f'\\\"PATH\\\": \\\"{path_esc}\\\"',
-        )
-        yml.write_text(content)
-
-    return isolated, env, starlake_cli
-
-
-@pytest.fixture(scope="module")
-def runtime_dags(runtime_env, tmp_path_factory):
-    """Generate DAG files once for the module."""
-    isolated, env, starlake_cli = runtime_env
-    out = tmp_path_factory.mktemp("runtime_dags")
-    result = subprocess.run(
-        [starlake_cli, "dag-generate", "--outputDir", str(out)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, (
-        f"dag-generate failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-    return out, isolated, env
-
-
-def _set_env(env):
-    """Set os.environ from dict, return restore map."""
-    original = {}
-    for k, v in env.items():
-        original[k] = os.environ.get(k)
-        os.environ[k] = v
-    return original
-
-
-def _restore_env(original):
-    """Restore os.environ from snapshot."""
-    for k, v in original.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
-
-
 
 @pytest.fixture(scope="module")
 def load_pipelines_loaded(runtime_dags, airflow_home):
     """Load generated load DAGs and register them in Airflow metadata DB."""
     dags_dir, isolated, env = runtime_dags
-    orig = _set_env(env)
+    orig = set_env(env)
     try:
         from airflow.configuration import initialize_config
         initialize_config().load_test_config()
@@ -180,14 +88,14 @@ def load_pipelines_loaded(runtime_dags, airflow_home):
             DAG.bulk_write_to_db([p.dag])
         return pls, isolated, env
     finally:
-        _restore_env(orig)
+        restore_env(orig)
 
 
 @pytest.fixture(scope="module")
 def transform_pipelines_loaded(runtime_dags, airflow_home):
     """Load generated transform DAGs and register in Airflow metadata DB."""
     dags_dir, isolated, env = runtime_dags
-    orig = _set_env(env)
+    orig = set_env(env)
     try:
         from airflow.configuration import initialize_config
         initialize_config().load_test_config()
@@ -206,14 +114,14 @@ def transform_pipelines_loaded(runtime_dags, airflow_home):
             DAG.bulk_write_to_db([p.dag])
         return pls, isolated, env
     finally:
-        _restore_env(orig)
+        restore_env(orig)
 
 
 @pytest.fixture(scope="module")
 def executed_load_dags(load_pipelines_loaded):
     """Execute all load DAGs once via dag.test() — shared by load tests."""
     pls, isolated, env = load_pipelines_loaded
-    orig = _set_env(env)
+    orig = set_env(env)
     try:
         from airflow.configuration import initialize_config
         initialize_config().load_test_config()
@@ -230,7 +138,7 @@ def executed_load_dags(load_pipelines_loaded):
             results.append((p, dr))
         return results, isolated, env
     finally:
-        _restore_env(orig)
+        restore_env(orig)
 
 
 @pytest.fixture(scope="module")
@@ -238,7 +146,7 @@ def executed_transform_dags(executed_load_dags, transform_pipelines_loaded):
     """Execute all transform DAGs after load — shared by transform tests."""
     _, isolated, env = executed_load_dags
     pls, _, _ = transform_pipelines_loaded
-    orig = _set_env(env)
+    orig = set_env(env)
     try:
         from airflow.configuration import initialize_config
         initialize_config().load_test_config()
@@ -255,12 +163,7 @@ def executed_transform_dags(executed_load_dags, transform_pipelines_loaded):
             results.append((p, dr))
         return results, isolated, env
     finally:
-        _restore_env(orig)
-
-
-def _get_duckdb(project_path):
-    """Open a read-only DuckDB connection to the project's database."""
-    return duckdb.connect(str(project_path / "datasets" / "duckdb.db"), read_only=True)
+        restore_env(orig)
 
 
 # ===================================================================
@@ -281,7 +184,7 @@ class TestAirflowRuntimeLoad:
     def test_load_dag_populates_duckdb_tables(self, executed_load_dags):
         """After execution, DuckDB has the expected tables and row counts."""
         _, isolated, _ = executed_load_dags
-        conn = _get_duckdb(isolated)
+        conn = get_duckdb(isolated)
         try:
             customers = conn.execute(
                 "SELECT count(*) FROM starbake.customers"
@@ -339,7 +242,7 @@ class TestAirflowRuntimeTransform:
                 f"Transform DAG {pipeline.pipeline_id} ended in {dr.state}"
             )
 
-        conn = _get_duckdb(isolated)
+        conn = get_duckdb(isolated)
         try:
             order_summary = conn.execute(
                 "SELECT count(*) FROM kpi.order_summary"

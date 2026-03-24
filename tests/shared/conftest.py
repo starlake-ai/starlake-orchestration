@@ -19,9 +19,10 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from types import MappingProxyType
-from typing import Generator, Mapping, Tuple
+from typing import Dict, Generator, Mapping, Tuple
 
 import duckdb
 import pytest
@@ -165,3 +166,118 @@ def isolated_project(
     env = dict(starlake_env)
     env["SL_ROOT"] = str(isolated_path)
     return isolated_path, env
+
+
+# ---------------------------------------------------------------------------
+# Runtime test utilities — used by orchestrator runtime integration tests
+# ---------------------------------------------------------------------------
+
+
+def set_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Set os.environ from *env* dict, return a restore map.
+
+    The restore map captures the previous value (or ``None`` if the key
+    did not exist) so that :func:`restore_env` can undo the changes.
+    """
+    original = {}  # type: Dict[str, str]
+    for k, v in env.items():
+        original[k] = os.environ.get(k)
+        os.environ[k] = v
+    return original
+
+
+def restore_env(original: Dict[str, str]) -> None:
+    """Restore os.environ from a snapshot produced by :func:`set_env`."""
+    for k, v in original.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
+def get_duckdb(project_path: Path) -> duckdb.DuckDBPyConnection:
+    """Open a read-only DuckDB connection to *project_path*/datasets/duckdb.db."""
+    return duckdb.connect(
+        str(project_path / "datasets" / "duckdb.db"), read_only=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runtime fixtures — module-scoped, parameterised via ``runtime_config``
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def runtime_env(
+    runtime_config,
+    sample_project_path,
+    starlake_cli,
+    starlake_env,
+    java_home,
+    tmp_path_factory,
+):
+    """Module-scoped isolated project with incoming data and env vars.
+
+    Requires a ``runtime_config`` fixture (provided by each orchestrator
+    conftest) returning a dict with keys:
+
+    - ``load_dag_ref``  — e.g. ``"airflow_load_shell"``
+    - ``transform_dag_ref`` — e.g. ``"airflow_transform_shell"``
+    - ``dag_config_glob`` — e.g. ``"airflow_*.sl.yml"``
+    """
+    project = tmp_path_factory.mktemp("runtime_project")
+    isolated = project / "sample-project"
+    shutil.copytree(sample_project_path, isolated)
+
+    # Stage incoming data for the IMPORTED pre-load strategy
+    incoming = isolated / "datasets" / "incoming" / "starbake"
+    incoming.mkdir(parents=True, exist_ok=True)
+    for csv in (isolated / "datasets" / "starbake").glob("*.csv"):
+        shutil.copy2(csv, incoming / csv.name)
+    (incoming / "ack").touch(exist_ok=True)
+
+    env = dict(starlake_env)
+    env["SL_ROOT"] = str(isolated)
+    env["LOAD_DAG_REF"] = runtime_config["load_dag_ref"]
+    env["TRANSFORM_DAG_REF"] = runtime_config["transform_dag_ref"]
+    env["JAVA_HOME"] = java_home
+    starlake_dir = str(Path(starlake_cli).parent)
+    full_path = starlake_dir + os.pathsep + env.get(
+        "PATH", os.environ.get("PATH", "")
+    )
+    env["PATH"] = full_path
+
+    # Inject PATH and JAVA_HOME into the ``sl_env_var`` option of each
+    # DAG config so they are available inside the operator's env dict.
+    dags_dir = isolated / "metadata" / "dags"
+    for yml in dags_dir.glob(runtime_config["dag_config_glob"]):
+        content = yml.read_text()
+        java_esc = java_home.replace('\\', '\\\\').replace('"', '\\"')
+        path_esc = full_path.replace('\\', '\\\\').replace('"', '\\"')
+        content = content.replace(
+            '\\\"SL_ENV\\\": \\\"DUCKDB\\\"',
+            '\\\"SL_ENV\\\": \\\"DUCKDB\\\", '
+            f'\\\"JAVA_HOME\\\": \\\"{java_esc}\\\", '
+            f'\\\"PATH\\\": \\\"{path_esc}\\\"',
+        )
+        yml.write_text(content)
+
+    return isolated, env, starlake_cli
+
+
+@pytest.fixture(scope="module")
+def runtime_dags(runtime_env, tmp_path_factory):
+    """Generate DAG files once for the module via ``starlake dag-generate``."""
+    isolated, env, starlake_cli = runtime_env
+    out = tmp_path_factory.mktemp("runtime_dags")
+    result = subprocess.run(
+        [starlake_cli, "dag-generate", "--outputDir", str(out)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"dag-generate failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    return out, isolated, env

@@ -155,3 +155,17 @@ def _mock_airflow_api(monkeypatch):
     monkeypatch.setattr(_requests_mod, "post", _mock_post)
     monkeypatch.setattr(_requests_mod, "get", _mock_get)
     monkeypatch.setattr(_requests_mod, "delete", _mock_delete)
+
+
+# ---------------------------------------------------------------------------
+# Runtime config — consumed by shared ``runtime_env`` / ``runtime_dags``
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def runtime_config():
+    """Airflow-specific runtime configuration for shared runtime fixtures."""
+    return {
+        "load_dag_ref": "airflow_load_shell",
+        "transform_dag_ref": "airflow_transform_shell",
+        "dag_config_glob": "airflow_*.sl.yml",
+    }
