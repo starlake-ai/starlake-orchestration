@@ -51,10 +51,15 @@ from ai.starlake.orchestration.starlake_dependencies import StarlakeDependencies
 
 _STUB_MODULE_NAME = "tests.orchestration._stub_caller"
 
-if _STUB_MODULE_NAME not in sys.modules:
+
+@pytest.fixture(autouse=True, scope="session")
+def _register_stub_module():
+    """Inject a fake caller module into sys.modules for the test session."""
     _stub_mod = types.ModuleType(_STUB_MODULE_NAME)
     _stub_mod.__file__ = __file__
     sys.modules[_STUB_MODULE_NAME] = _stub_mod
+    yield
+    sys.modules.pop(_STUB_MODULE_NAME, None)
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +171,5 @@ def stub_schedule():
     )
 
 
-@pytest.fixture(autouse=True)
-def _clean_context_stack():
-    """Ensure TaskGroupContext stack is clean before/after each test."""
-    TaskGroupContext._context_stack.clear()
-    yield
-    TaskGroupContext._context_stack.clear()
+# _clean_context_stack is provided by tests/conftest.py (root) as an
+# autouse fixture — no need to duplicate it here.

@@ -26,6 +26,8 @@ from __future__ import annotations
 # would auto-discover tests/shared/conftest.py AND load it again
 # via the pytest_plugins directive).
 
+import pytest
+
 from tests.shared.conftest import (  # noqa: F401
     sample_project_path,
     starlake_cli,
@@ -34,3 +36,16 @@ from tests.shared.conftest import (  # noqa: F401
     duckdb_connection,
     isolated_project,
 )
+
+
+# ---------------------------------------------------------------------------
+# TaskGroupContext cleanup — prevent context bleed between tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _clean_context_stack():
+    """Ensure TaskGroupContext stack is clean before/after each test."""
+    from ai.starlake.orchestration import TaskGroupContext
+    TaskGroupContext._context_stack.clear()
+    yield
+    TaskGroupContext._context_stack.clear()

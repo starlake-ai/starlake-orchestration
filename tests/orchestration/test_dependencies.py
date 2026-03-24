@@ -219,7 +219,8 @@ class TestStarlakeCronPeriodEnum:
 
 class TestStarlakeJobFactory:
     def test_register_and_create(self, monkeypatch):
-        monkeypatch.setattr(StarlakeJobFactory, "_registry", StarlakeJobFactory._registry.copy())
+        import copy
+        monkeypatch.setattr(StarlakeJobFactory, "_registry", copy.deepcopy(StarlakeJobFactory._registry))
         monkeypatch.setattr(StarlakeJobFactory, "_initialized", True)
         StarlakeJobFactory.register_job(StubJob)
         assert "STUB" in StarlakeJobFactory._registry
@@ -254,7 +255,8 @@ class TestStarlakeJobFactory:
 
 class TestOrchestrationFactory:
     def test_register_and_create(self, monkeypatch, stub_job):
-        monkeypatch.setattr(OrchestrationFactory, "_registry", OrchestrationFactory._registry.copy())
+        import copy
+        monkeypatch.setattr(OrchestrationFactory, "_registry", copy.deepcopy(OrchestrationFactory._registry))
         monkeypatch.setattr(OrchestrationFactory, "_initialized", True)
         OrchestrationFactory.register_orchestration(StubOrchestration)
         assert "STUB" in OrchestrationFactory._registry
