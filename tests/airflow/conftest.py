@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -73,20 +72,7 @@ def _register_airflow_stub_module():
     sys.modules.pop(_AIRFLOW_TEST_MODULE_NAME, None)
 
 
-# ---------------------------------------------------------------------------
-# Airflow-specific environment variables
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True, scope="session")
-def airflow_env(sample_project_path):
-    """Inject SL_ROOT and other required env vars for Airflow tests."""
-    original_sl_root = os.environ.get("SL_ROOT")
-    os.environ["SL_ROOT"] = str(sample_project_path)
-    yield
-    if original_sl_root is not None:
-        os.environ["SL_ROOT"] = original_sl_root
-    else:
-        os.environ.pop("SL_ROOT", None)
+# SL_ROOT is set by the shared ``sl_root_env`` fixture (tests/conftest.py).
 
 
 # ---------------------------------------------------------------------------

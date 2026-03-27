@@ -29,6 +29,7 @@ from __future__ import annotations
 import pytest
 
 from tests.shared.conftest import (  # noqa: F401
+    sl_root_env,
     sample_project_path,
     starlake_cli,
     java_home,

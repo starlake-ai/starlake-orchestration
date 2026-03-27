@@ -24,8 +24,7 @@ import pytest
 from ai.starlake.orchestration import AbstractPipeline
 
 
-# Mark all tests in this module — they require both the Starlake CLI
-# and a working Java runtime, which may not be available in CI.
+# Mark all tests — they require Starlake CLI + Java runtime.
 pytestmark = [
     pytest.mark.integration,
 ]
@@ -44,7 +43,7 @@ def generated_python_files(runtime_dags):
 # 3.2  dag-generate produces valid Python files
 # ------------------------------------------------------------------
 
-class TestAirflowIntegration:
+class TestDagsterIntegration:
 
     def test_dag_generate_produces_valid_python(self, generated_python_files):
         """Verify that dag-generate produced Python files that parse cleanly."""
@@ -56,10 +55,10 @@ class TestAirflowIntegration:
                 pytest.fail(f"Generated file {py_file.name} has syntax error: {exc}")
 
     # ------------------------------------------------------------------
-    # 3.3  load_pipelines returns Airflow pipelines
+    # 3.3  load_pipelines returns Dagster pipelines
     # ------------------------------------------------------------------
 
-    def test_load_pipelines_returns_airflow_pipelines(
+    def test_load_pipelines_returns_dagster_pipelines(
         self, generated_python_files, runtime_dags
     ):
         """Import generated DAGs via load_pipelines() and validate types."""
@@ -97,6 +96,9 @@ class TestAirflowIntegration:
                 continue
             for p in pipelines:
                 p.dry_run()
+
+    # pipeline.run() is NOT tested here — actual Starlake CLI execution
+    # is covered by the runtime tests in test_dagster_runtime.py.
 
     # ------------------------------------------------------------------
     # 3.5  pipeline properties populated

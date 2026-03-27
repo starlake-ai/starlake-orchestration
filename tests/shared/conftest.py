@@ -65,6 +65,22 @@ def _env_var(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True, scope="session")
+def sl_root_env(sample_project_path):
+    """Set SL_ROOT in os.environ for the test session.
+
+    All orchestrator tests need SL_ROOT pointing at the sample project
+    so that ``IStarlakeJob.__init__()`` can resolve project paths.
+    """
+    original = os.environ.get("SL_ROOT")
+    os.environ["SL_ROOT"] = str(sample_project_path)
+    yield
+    if original is not None:
+        os.environ["SL_ROOT"] = original
+    else:
+        os.environ.pop("SL_ROOT", None)
+
+
 @pytest.fixture(scope="session")
 def sample_project_path() -> Path:
     """Path to the shared sample Starlake project used by all tests."""
