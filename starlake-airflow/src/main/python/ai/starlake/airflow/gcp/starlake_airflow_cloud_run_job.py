@@ -214,15 +214,22 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
         response.raise_for_status()
         result = response.json()
         if result.get("done", False):
+            # Check for operation-level errors (e.g. permission denied, invalid job)
             error = result.get("error")
             if error and (error.get("code", 0) != 0 or error.get("message", "")):
                 error_msg = f"{error.get('message', 'Unknown error')} [{error.get('code', 'Unknown')}]"
-                if self.retry_on_failure:
-                    raise AirflowException(error_msg)
-                if self.do_xcom_push:
-                    self.log.error(error_msg)
-                    return PokeReturnValue(True, False)
-                else:
-                    raise AirflowException(error_msg)
+                raise AirflowException(error_msg)
+            # Check for execution-level failures (e.g. container exited with non-zero code)
+            execution = result.get("response", {})
+            failed_count = int(execution.get("failedCount", 0))
+            cancelled_count = int(execution.get("cancelledCount", 0))
+            if failed_count > 0 or cancelled_count > 0:
+                conditions = execution.get("conditions", [])
+                error_message = next(
+                    (c.get("message", "") for c in conditions if c.get("type") == "Completed"),
+                    "Unknown error"
+                )
+                error_msg = f"Cloud Run job execution failed: {error_message} [failed={failed_count}, cancelled={cancelled_count}]"
+                raise AirflowException(error_msg)
             return PokeReturnValue(True, True)
         return PokeReturnValue(False, False)
