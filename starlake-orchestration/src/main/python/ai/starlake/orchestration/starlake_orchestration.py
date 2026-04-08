@@ -1062,7 +1062,9 @@ class OrchestrationFactory:
 
     @classmethod
     def _scan_modules(cls, package_name: str = "ai.starlake") -> None:
-        """Scan filesystem for potential orchestration modules without importing them."""
+        """Scan filesystem for potential orchestration modules without importing them.
+        Only collects files ending in '_orchestration.py' since all AbstractOrchestration
+        implementations follow this naming convention."""
         print(f"Registering orchestrations from package {package_name}")
         package = importlib.import_module(package_name)
         package_path = os.path.dirname(package.__file__)
@@ -1076,7 +1078,7 @@ class OrchestrationFactory:
                 module_prefix = f"{package_name}.{relative_path.replace(os.path.sep, '.')}"
 
             for file in files:
-                if file.endswith(".py") and file != "__init__.py":
+                if file.endswith("_orchestration.py"):
                     mod_name = os.path.splitext(file)[0]
                     full_module_name = f"{module_prefix}.{mod_name}"
                     cls._pending_modules.append(full_module_name)
@@ -1122,6 +1124,9 @@ class OrchestrationFactory:
     def create_orchestration(cls, job: IStarlakeJob[T, E], **kwargs) -> AbstractOrchestration[U, T, GT, E]:
         if not cls._scanned:
             cls._scan_modules()
+            # Prioritize modules matching the requested orchestrator
+            orch_str = str(job.sl_orchestrator())
+            cls._pending_modules.sort(key=lambda m: (0 if orch_str in m else 1, m))
 
         orchestrator = job.sl_orchestrator()
 

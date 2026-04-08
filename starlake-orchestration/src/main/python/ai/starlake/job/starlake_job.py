@@ -652,7 +652,9 @@ class StarlakeJobFactory:
 
     @classmethod
     def _scan_modules(cls, package_name: str = "ai.starlake") -> None:
-        """Scan filesystem for potential job modules without importing them."""
+        """Scan filesystem for potential job modules without importing them.
+        Only collects files ending in '_job.py' since all IStarlakeJob
+        implementations follow this naming convention."""
         print(f"Registering jobs from package {package_name}")
         package = importlib.import_module(package_name)
         package_path = os.path.dirname(package.__file__)
@@ -666,7 +668,7 @@ class StarlakeJobFactory:
                 module_prefix = f"{package_name}.{relative_path.replace(os.path.sep, '.')}"
 
             for file in files:
-                if file.endswith(".py") and file != "__init__.py":
+                if file.endswith("_job.py"):
                     mod_name = os.path.splitext(file)[0]
                     full_module_name = f"{module_prefix}.{mod_name}"
                     cls._pending_modules.append(full_module_name)
@@ -717,6 +719,9 @@ class StarlakeJobFactory:
     def create_job(cls, filename: str, module_name: str, orchestrator: Union[StarlakeOrchestrator, str], execution_environment: Union[StarlakeExecutionEnvironment, str], options: dict, **kwargs) -> IStarlakeJob:
         if not cls._scanned:
             cls._scan_modules()
+            # Prioritize modules matching the requested orchestrator
+            orch_str = str(orchestrator)
+            cls._pending_modules.sort(key=lambda m: (0 if orch_str in m else 1, m))
 
         # Return immediately if the requested job is already registered
         executions: dict = cls._registry.get(orchestrator, {})
