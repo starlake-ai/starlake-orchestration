@@ -230,7 +230,7 @@ The following options are available for all concrete factory classes derived fro
 | ------------------------------ | ---- | ----------------------------------------------------------------------------------- |
 | **default_pool**         | str  | pool of slots to use (`default_pool` by default)                                  |
 | **sl_env_var**           | str  | optional starlake environment variables passed as an encoded json string            |
-| **retries**              | int  | optional number of retries to attempt before failing a task (`1` by default)      |
+| **retries**              | int  | optional number of retries to attempt before failing a task (`0` by default)      |
 | **retry_delay**          | int  | optional delay between retries in seconds (`300` by default)                      |
 | **pre_load_strategy**    | str  | one of `none` (default), `imported`, `pending` or `ack`                     |
 | **global_ack_file_path** | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default) |
@@ -250,9 +250,10 @@ Setting `pre_load_not_ready_sentinel_path` in DagInfo `options` opts the DAG int
 options:
   # Point at a parent prefix — orchestration appends <domain>/<run_id>.notready automatically.
   pre_load_not_ready_sentinel_path: "gs://my-bucket/_sl/preload"
-  # Tune the "wait for files" window. Defaults (retries=1, ~10s between
-  # retries on Cloud Run) give only ~20s total — almost certainly too short
-  # for real-world file arrival.
+  # Tune the "wait for files" window. Defaults (retries=0, no retries at all)
+  # mean the task fails immediately on the first "not ready" signal — you
+  # MUST set retries > 0 for the sentinel feature to provide any waiting
+  # window at all.
   # On the Airflow Cloud Run runner, retry_delay is overridden per-task by
   # retry_delay_in_seconds, so THAT is the option to tune (not retry_delay).
   # Example below: 12 retries × 5 min = ~1h polling window.

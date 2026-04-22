@@ -172,7 +172,7 @@ The following options can be specified in all concrete factory classes:
 | name                     | type | description                                                                               |
 | ------------------------ | ---- | ----------------------------------------------------------------------------------------- |
 | **sl_env_var**           | str  | optional starlake environment variables passed as an encoded json string                  |
-| **retries**           | int  | optional number of retries to attempt before failing an op (`1` by default)                    |
+| **retries**           | int  | optional number of retries to attempt before failing an op (`0` by default)                    |
 | **retry_delay**           | int  | optional delay between retries in seconds (`300` by default)                    |
 | **pre_load_strategy**    | str  | one of `none` (default), `imported`, `pending` or `ack`                                   |
 | **global_ack_file_path** | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default)         |

@@ -136,7 +136,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         try:
             self.retries = int(__class__.get_context_var(var_name='retries', options=self.options))
         except (MissingEnvironmentVariable, ValueError):
-            self.retries = 1
+            self.retries = 0
         try:
             self.retry_delay = int(__class__.get_context_var(var_name='retry_delay', options=self.options))
         except (MissingEnvironmentVariable, ValueError):
