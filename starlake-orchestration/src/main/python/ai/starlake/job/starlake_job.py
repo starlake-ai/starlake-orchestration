@@ -426,7 +426,13 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             task_id = kwargs.get('task_id', self.__class__.get_sl_pre_load_task_id(domain, pre_load_strategy, **kwargs))
 
             kwargs.pop("task_id", None)
-            
+
+            from ai.starlake.sentinel import resolve_sentinel_path
+            sentinel_path = resolve_sentinel_path(options=self.options, domain=domain)
+            if sentinel_path is not None:
+                arguments.extend(["--notReadySentinel", sentinel_path])
+                kwargs['sentinel_path'] = sentinel_path
+
             if pre_load_strategy == StarlakePreLoadStrategy.ACK:
 
                 def current_dt():
