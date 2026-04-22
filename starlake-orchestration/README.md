@@ -235,8 +235,46 @@ The following options are available for all concrete factory classes derived fro
 | **pre_load_strategy**    | str  | one of `none` (default), `imported`, `pending` or `ack`                     |
 | **global_ack_file_path** | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default) |
 | **ack_wait_timeout**     | int  | timeout in seconds to wait for the ack file(`1 hour` by default)                  |
+| **pre_load_not_ready_sentinel_path** | str | optional GCS path for the opt-in "not ready" sentinel (unset = feature off). See section below. |
 
 These options allow you to customize the behavior of the pipeline and the orchestration tasks it defines, providing flexibility for retries, acknowledgment handling, and preload strategies.
+
+##### Pre-load "not ready" sentinel (opt-in, Cloud Run only)
+
+When the pre-load step runs in a Cloud Run job, exiting with code 1 is ambiguous: it can mean "the files I'm waiting for aren't here yet" (a routine poll) OR "something actually broke" (a real failure). By default the orchestration layer treats both identically — the Cloud Run console shows red "Failed" executions for every "not ready" poll, and distinguishing the two requires reading logs.
+
+Setting `pre_load_not_ready_sentinel_path` in DagInfo `options` opts the DAG into a sentinel-based contract that disambiguates these two cases:
+
+```yaml
+# my-load-dag.sl.yml
+options:
+  pre_load_not_ready_sentinel_path: "gs://my-bucket/_sl/preload/{domain}/{{ run_id }}.notready"
+  # Recommended: tune retries to create the "wait for files" window.
+  # e.g. retries=12 × retry_delay=300 (5 min) = ~1 hour polling window.
+  retries: "12"
+  retry_delay: "300"
+```
+
+The `{domain}` placeholder is substituted at DAG-generation time; `{{ run_id }}` is an Airflow Jinja placeholder that keeps concurrent DAG runs from racing on the same sentinel object.
+
+When set, the orchestration layer:
+
+1. Appends `--notReadySentinel <resolved-path>` to the Cloud Run container arguments. The Starlake Scala CLI (≥ the version with `PreLoadCmd` sentinel support) writes a zero-byte marker at that path **only when the pre-load decides files aren't yet ready**, and exits `0`. Genuine crashes still exit non-zero and never write the sentinel.
+2. After the Cloud Run task succeeds, the Airflow `CloudRunJobCompletionSensor` (or the Dagster Cloud Run op) checks GCS for the sentinel. If it's present, the sensor deletes it and raises `AirflowException` (respectively `dagster.Failure`) so the orchestrator's task-retry machinery re-runs the whole TaskGroup after `retry_delay` — that's how "wait for files" is expressed.
+3. If the sentinel is absent, the sensor passes and downstream load tasks run.
+
+What you gain:
+
+- **Clean Cloud Run console.** Only genuine crashes show up red; routine "files not here yet" polls all show green executions.
+- **Unambiguous "real error" signal.** Any non-zero Cloud Run exit now unambiguously means a crash / config error — no retry-vs-fail heuristics.
+- **Cross-runner orchestrator contract.** Airflow and Dagster consume the same sentinel; one DagInfo option drives both.
+
+Recommended hygiene:
+
+- Add a GCS lifecycle rule on the `_sl/preload/` prefix (e.g., delete-after-7-days) as a safety net for orphan sentinels — the sensor normally deletes on detection, but a failed orchestrator restart could leave one behind.
+- The sentinel feature is currently Cloud Run only. Fargate / Dataproc runners fall through to the legacy behavior (exit 1 on "not ready" just like before). Extending to those runners is a follow-up change.
+
+The matching Scala-side change in `ai.starlake.job.ingest.PreLoadCmd` is what actually writes the sentinel; it must be present in the version of the Starlake CLI that runs inside your Cloud Run container. Earlier CLI versions will simply reject the unknown `--notReadySentinel` flag.
 
 ### 4. Abstract Classes
 
