@@ -47,6 +47,25 @@ def resolve_sentinel_path(options: dict, domain: str) -> Optional[str]:
     return template.replace('{domain}', domain)
 
 
+def substitute_airflow_placeholders(value: Optional[str], run_id: str) -> Optional[str]:
+    """Substitute Airflow-style Jinja placeholders at op/task execution time.
+
+    Airflow templates fields like ``{{ run_id }}`` automatically at task-render
+    time. Dagster has no equivalent Jinja layer, so without help a Dagster op
+    would see the literal string ``{{ run_id }}`` and write/check a sentinel at
+    a fixed path — defeating the per-run uniqueness that keeps concurrent DAG
+    runs from racing.
+
+    This helper lets the Dagster op apply the same substitution at execution
+    time using ``context.run_id``. Both runners then produce the same concrete
+    path from the same user-facing placeholder syntax, so the README's
+    ``gs://.../{{ run_id }}.notready`` template works uniformly.
+    """
+    if value is None:
+        return None
+    return value.replace("{{ run_id }}", run_id)
+
+
 def consume_sentinel(
     sentinel_path: Optional[str],
     exists_fn: Optional[Callable[[str, str], bool]],

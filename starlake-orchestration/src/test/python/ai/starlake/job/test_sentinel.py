@@ -4,6 +4,7 @@ import pytest
 from ai.starlake.sentinel import (
     parse_gcs_uri,
     resolve_sentinel_path,
+    substitute_airflow_placeholders,
 )
 
 
@@ -71,3 +72,35 @@ def test_parse_gcs_uri_rejects_non_gs_scheme():
 def test_parse_gcs_uri_rejects_bucket_only():
     with pytest.raises(ValueError, match="missing object name"):
         parse_gcs_uri("gs://bucket")
+
+
+# --- substitute_airflow_placeholders -----------------------------------------
+
+def test_substitute_airflow_placeholders_none_is_passthrough():
+    assert substitute_airflow_placeholders(None, "some-run-id") is None
+
+
+def test_substitute_airflow_placeholders_substitutes_run_id():
+    result = substitute_airflow_placeholders(
+        "gs://b/_sl/preload/sales/{{ run_id }}.notready",
+        "scheduled__2026-04-22T06-00-00",
+    )
+    assert result == "gs://b/_sl/preload/sales/scheduled__2026-04-22T06-00-00.notready"
+
+
+def test_substitute_airflow_placeholders_no_placeholder_returns_verbatim():
+    # If the path doesn't reference {{ run_id }}, it's unchanged.
+    result = substitute_airflow_placeholders(
+        "gs://b/fixed/path.notready",
+        "some-run-id",
+    )
+    assert result == "gs://b/fixed/path.notready"
+
+
+def test_substitute_airflow_placeholders_multiple_occurrences():
+    # All occurrences substituted, in case a template reuses {{ run_id }}.
+    result = substitute_airflow_placeholders(
+        "gs://b/{{ run_id }}/log-{{ run_id }}.notready",
+        "xyz",
+    )
+    assert result == "gs://b/xyz/log-xyz.notready"

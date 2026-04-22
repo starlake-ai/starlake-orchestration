@@ -131,14 +131,27 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
             if dataset:
                 assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset))
 
+            # Mirror Airflow's {{ run_id }} substitution so the Scala CLI receives
+            # the same concrete sentinel path the sensor below will check. Without
+            # this, the CLI would write to a literal "{{ run_id }}" path that we'd
+            # never poll for. Scoped to the --notReadySentinel value to avoid
+            # accidentally touching other args that legitimately contain braces.
+            local_arguments = list(arguments)
+            if sentinel_path:
+                from ai.starlake.sentinel import substitute_airflow_placeholders
+                resolved_path = substitute_airflow_placeholders(sentinel_path, context.run_id)
+                for i, a in enumerate(local_arguments):
+                    if a == sentinel_path:
+                        local_arguments[i] = resolved_path
+
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
             from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             tmp_arguments.append(f"\'{logical_datetime}\'")
-            command = arguments[0]
-            command_with_arguments = [command] + tmp_arguments + arguments[1:]
+            command = local_arguments[0]
+            command_with_arguments = [command] + tmp_arguments + local_arguments[1:]
 
             if transform:
                 opts = command_with_arguments[-1].split(",")
@@ -194,8 +207,17 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                 # files aren't yet ready. Delete the sentinel and raise Failure
                 # so Dagster's retry policy re-runs this op.
                 if sentinel_path:
-                    from ai.starlake.sentinel import consume_sentinel
+                    from ai.starlake.sentinel import consume_sentinel, substitute_airflow_placeholders
                     from google.cloud import storage
+
+                    # Dagster has no Jinja layer, so we explicitly apply the
+                    # same {{ run_id }} substitution Airflow does at render time.
+                    # Without this, concurrent Dagster runs would collide on a
+                    # single sentinel object (literal "{{ run_id }}" in the path).
+                    resolved_sentinel_path = substitute_airflow_placeholders(
+                        sentinel_path, context.run_id
+                    )
+
                     storage_client = storage.Client()
 
                     def _exists(bucket: str, obj: str) -> bool:
@@ -204,11 +226,11 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                     def _delete(bucket: str, obj: str) -> None:
                         storage_client.bucket(bucket).blob(obj).delete()
 
-                    if not consume_sentinel(sentinel_path, _exists, _delete):
+                    if not consume_sentinel(resolved_sentinel_path, _exists, _delete):
                         raise Failure(
                             description=(
                                 f"pre-load: files not ready (sentinel consumed at "
-                                f"{sentinel_path}); Dagster will retry this op"
+                                f"{resolved_sentinel_path}); Dagster will retry this op"
                             )
                         )
 

@@ -255,7 +255,9 @@ options:
   retry_delay: "300"
 ```
 
-The `{domain}` placeholder is substituted at DAG-generation time; `{{ run_id }}` is an Airflow Jinja placeholder that keeps concurrent DAG runs from racing on the same sentinel object.
+The `{domain}` placeholder is substituted at DAG-generation time. `{{ run_id }}` is resolved at task-execution time — by Airflow's Jinja templating for the Airflow runner, and by an explicit substitution from `OpExecutionContext.run_id` for the Dagster runner. Both runners produce the same concrete path, so the same template string works on both.
+
+Per-run uniqueness (`{{ run_id }}`) is strongly recommended: without it, concurrent DAG runs collide on the same sentinel object and the "not ready" signal gets misattributed.
 
 When set, the orchestration layer:
 
