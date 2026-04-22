@@ -250,10 +250,14 @@ Setting `pre_load_not_ready_sentinel_path` in DagInfo `options` opts the DAG int
 options:
   # Point at a parent prefix — orchestration appends <domain>/<run_id>.notready automatically.
   pre_load_not_ready_sentinel_path: "gs://my-bucket/_sl/preload"
-  # Recommended: tune retries to create the "wait for files" window.
-  # e.g. retries=12 × retry_delay=300 (5 min) = ~1 hour polling window.
+  # Tune the "wait for files" window. Defaults (retries=1, ~10s between
+  # retries on Cloud Run) give only ~20s total — almost certainly too short
+  # for real-world file arrival.
+  # On the Airflow Cloud Run runner, retry_delay is overridden per-task by
+  # retry_delay_in_seconds, so THAT is the option to tune (not retry_delay).
+  # Example below: 12 retries × 5 min = ~1h polling window.
   retries: "12"
-  retry_delay: "300"
+  retry_delay_in_seconds: "300"
 ```
 
 The user supplies only a parent prefix (any GCS URI pointing at the "folder" where sentinels should live). Orchestration automatically appends `<domain>/<run_id>.notready`, producing concrete paths like `gs://my-bucket/_sl/preload/sales/scheduled__2026-04-22T06-00-00.notready`. The domain and per-run id are not user-editable — this eliminates two common footguns: forgetting to scope per-domain (so two domains collide on one object) and forgetting to scope per-run (so concurrent runs collide). The run id is resolved at task-execution time — by Airflow's Jinja templating on the Airflow runner, and by an explicit substitution from `OpExecutionContext.run_id` on the Dagster runner. Both runners produce identical paths.
