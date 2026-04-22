@@ -115,6 +115,12 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
         else:
             retry_policy = None
 
+        # Captured via closure into the op below. When set (via sl_pre_load when
+        # pre_load_not_ready_sentinel_path is configured in DagInfo options),
+        # we consult GCS after a successful gcloud exit to distinguish
+        # "files not ready, retry" from "ready, proceed".
+        sentinel_path: Optional[str] = kwargs.get("sentinel_path")
+
         @op(
             name=task_id,
             ins=ins,
@@ -182,6 +188,30 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                 else:
                     raise Failure(description=value)
             else:
+                # gcloud exited 0. If a sentinel was requested (opt-in via
+                # pre_load_not_ready_sentinel_path on DagInfo options), check
+                # for the sentinel: if present, the Scala pre-load decided
+                # files aren't yet ready. Delete the sentinel and raise Failure
+                # so Dagster's retry policy re-runs this op.
+                if sentinel_path:
+                    from ai.starlake.sentinel import consume_sentinel
+                    from google.cloud import storage
+                    storage_client = storage.Client()
+
+                    def _exists(bucket: str, obj: str) -> bool:
+                        return storage_client.bucket(bucket).blob(obj).exists()
+
+                    def _delete(bucket: str, obj: str) -> None:
+                        storage_client.bucket(bucket).blob(obj).delete()
+
+                    if not consume_sentinel(sentinel_path, _exists, _delete):
+                        raise Failure(
+                            description=(
+                                f"pre-load: files not ready (sentinel consumed at "
+                                f"{sentinel_path}); Dagster will retry this op"
+                            )
+                        )
+
                 for asset in assets:
                     yield AssetMaterialization(asset_key=asset.path, description=kwargs.get("description", f"Starlake command {command} execution succeeded"))
                 if dataset:
