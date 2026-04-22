@@ -100,6 +100,9 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'retry_delay': timedelta(seconds=self.retry_delay_in_seconds)})
         arguments = self._inject_scheduled_date(arguments, task_type, kwargs)
+        # sentinel_path is for the completion sensor, not the Cloud Run operator —
+        # pop it so it doesn't get forwarded to CloudRunExecuteJobOperator (which rejects unknown kwargs).
+        sentinel_path = kwargs.pop('sentinel_path', None)
 
         with TaskGroup(group_id=f'{task_id}_wait') as task_completion_sensors:
             job_task = CloudRunJobOperator(
@@ -121,6 +124,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                 retry_on_failure=self.retry_on_failure,
                 poke_interval=self.cloud_run_async_poke_interval,
                 impersonation_chain=self.cloud_run_service_account or None,
+                sentinel_path=sentinel_path,
                 **kwargs
             )
             job_task >> completion_sensor
@@ -173,7 +177,7 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
 
 class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
 
-    template_fields = ("gcp_conn_id", "impersonation_chain")
+    template_fields = ("gcp_conn_id", "impersonation_chain", "sentinel_path")
 
     def __init__(
         self,
@@ -185,6 +189,7 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
         retry_on_failure: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Union[str, Sequence[str], None] = None,
+        sentinel_path: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(
@@ -198,6 +203,7 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
         self.retry_on_failure = retry_on_failure
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
+        self.sentinel_path = sentinel_path
 
     def poke(self, context: Context):
         from google.auth.transport.requests import AuthorizedSession
@@ -231,5 +237,26 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
                 )
                 error_msg = f"Cloud Run job execution failed: {error_message} [failed={failed_count}, cancelled={cancelled_count}]"
                 raise AirflowException(error_msg)
+            # Cloud Run exited 0. If a sentinel was requested for this task (opt-in,
+            # via DagInfo option pre_load_not_ready_sentinel_path), consult it: if
+            # present it means the pre-load step decided the files were not yet
+            # ready, so we raise AirflowException and let Airflow's task-retry
+            # machinery loop until the files arrive (or retries exhaust).
+            from ai.starlake.sentinel import consume_sentinel
+            from airflow.providers.google.cloud.hooks.gcs import GCSHook
+            gcs_hook = GCSHook(
+                gcp_conn_id=self.gcp_conn_id,
+                impersonation_chain=self.impersonation_chain,
+            )
+            should_proceed = consume_sentinel(
+                sentinel_path=self.sentinel_path,
+                exists_fn=lambda b, o: gcs_hook.exists(bucket_name=b, object_name=o),
+                delete_fn=lambda b, o: gcs_hook.delete(bucket_name=b, object_name=o),
+            )
+            if not should_proceed:
+                raise AirflowException(
+                    f"pre-load: files not ready (sentinel consumed at {self.sentinel_path}); "
+                    f"Airflow will retry this task"
+                )
             return PokeReturnValue(True, True)
         return PokeReturnValue(False, False)

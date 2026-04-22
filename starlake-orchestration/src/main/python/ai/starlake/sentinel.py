@@ -24,7 +24,7 @@ pulling in the full orchestration dependency chain at test-collection time:
 ``ai.starlake.job.__init__`` eagerly imports croniter / pytz / etc., which
 would force every test that touches these pure helpers to install the full stack.
 """
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 
 def resolve_sentinel_path(options: dict, domain: str) -> Optional[str]:
@@ -45,6 +45,34 @@ def resolve_sentinel_path(options: dict, domain: str) -> Optional[str]:
     if not template:
         return None
     return template.replace('{domain}', domain)
+
+
+def consume_sentinel(
+    sentinel_path: Optional[str],
+    exists_fn: Optional[Callable[[str, str], bool]],
+    delete_fn: Optional[Callable[[str, str], None]],
+) -> bool:
+    """Check-and-consume the 'not ready' sentinel after a successful pre-load.
+
+    Returns True if the load may proceed (no sentinel configured, or sentinel
+    is absent). Returns False if the sentinel is present — caller should then
+    raise their platform-appropriate exception (``AirflowException`` for the
+    Airflow sensor, ``dagster.Failure`` for the Dagster op) so the orchestrator's
+    retry machinery can convert "not ready" into "wait and re-run".
+
+    The helper deletes the sentinel on detection so the next retry starts fresh.
+
+    ``exists_fn`` and ``delete_fn`` are injected (bucket, object_name) → ... callables,
+    keeping this module platform-neutral (no GCS SDK import, no AirflowException
+    import) and trivially unit-testable.
+    """
+    if sentinel_path is None:
+        return True
+    bucket, obj = parse_gcs_uri(sentinel_path)
+    if exists_fn(bucket, obj):
+        delete_fn(bucket, obj)
+        return False
+    return True
 
 
 def parse_gcs_uri(uri: str) -> Tuple[str, str]:
