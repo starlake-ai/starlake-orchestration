@@ -22,36 +22,29 @@ in the Airflow sensor and the Dagster op, which call these functions.
 Located at ``ai.starlake.sentinel`` (not under ``ai.starlake.job``) to avoid
 pulling in the full orchestration dependency chain at test-collection time:
 ``ai.starlake.job.__init__`` eagerly imports croniter / pytz / etc., which
-would force every test that touches these helpers to install the full stack.
+would force every test that touches these pure helpers to install the full stack.
 """
-from enum import Enum
 from typing import Optional, Tuple
 
 
-class SentinelDecision(Enum):
-    """Outcome of checking the sentinel after a successful pre-load task."""
-    READY = "ready"
-    NOT_READY = "not_ready"
+def resolve_sentinel_path(options: dict, domain: str) -> Optional[str]:
+    """Return the sentinel path if the feature is enabled for this DAG, else None.
 
+    Feature is opt-in via a single DagInfo option:
+      pre_load_not_ready_sentinel_path: <path>
+    If this option is set to a non-empty value, the feature is ON and the path
+    is used. If missing or empty, the feature is OFF and this function returns
+    None (caller skips all sentinel wiring).
 
-def derive_sentinel_path(
-    sl_datasets: str,
-    domain: str,
-    override: Optional[str],
-) -> str:
-    """Produce the sentinel path to pass to --notReadySentinel and to the sensor.
-
-    The default path includes a ``{{ run_id }}`` Jinja placeholder that Airflow
-    resolves at render time, making concurrent DAG runs safe without coordination.
-
-    If ``override`` is provided it wins verbatim, except for a single ``{domain}``
-    placeholder that we substitute here (Airflow's Jinja would not, since
-    ``domain`` is not in its context). Other placeholders like ``{{ run_id }}``
-    pass through unchanged for Airflow to template.
+    A ``{domain}`` placeholder in the path is substituted here. Other placeholders
+    — most importantly ``{{ run_id }}`` — pass through unchanged so Airflow can
+    template them at task-render time, which is what makes concurrent DAG runs
+    safe without coordination.
     """
-    if override is not None:
-        return override.replace("{domain}", domain)
-    return f"{sl_datasets.rstrip('/')}/_sl/preload/{domain}/{{{{ run_id }}}}.notready"
+    template = options.get('pre_load_not_ready_sentinel_path', '')
+    if not template:
+        return None
+    return template.replace('{domain}', domain)
 
 
 def parse_gcs_uri(uri: str) -> Tuple[str, str]:
@@ -65,8 +58,3 @@ def parse_gcs_uri(uri: str) -> Tuple[str, str]:
     if not obj:
         raise ValueError(f"missing object name in gs:// URI: {uri}")
     return bucket, obj
-
-
-def decide_from_existence(sentinel_exists: bool) -> SentinelDecision:
-    """Map a raw existence check to the semantic decision."""
-    return SentinelDecision.NOT_READY if sentinel_exists else SentinelDecision.READY

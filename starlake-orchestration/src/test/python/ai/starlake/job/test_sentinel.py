@@ -1,50 +1,52 @@
-"""Unit tests for ai.starlake.job.sentinel — pure helpers, no cloud I/O."""
+"""Unit tests for ai.starlake.sentinel — pure helpers, no cloud I/O."""
 import pytest
 
 from ai.starlake.sentinel import (
-    derive_sentinel_path,
     parse_gcs_uri,
-    SentinelDecision,
-    decide_from_existence,
+    resolve_sentinel_path,
 )
 
 
-# --- derive_sentinel_path ----------------------------------------------------
+# --- resolve_sentinel_path ---------------------------------------------------
 
-def test_derive_sentinel_path_default_template():
-    path = derive_sentinel_path(
-        sl_datasets="gs://my-bucket/datasets",
+def test_resolve_sentinel_path_missing_option_returns_none():
+    assert resolve_sentinel_path(options={}, domain="sales") is None
+
+
+def test_resolve_sentinel_path_empty_string_returns_none():
+    # Airflow options often come through as empty strings when unset.
+    assert resolve_sentinel_path(
+        options={"pre_load_not_ready_sentinel_path": ""},
         domain="sales",
-        override=None,
-    )
-    assert path == "gs://my-bucket/datasets/_sl/preload/sales/{{ run_id }}.notready"
+    ) is None
 
 
-def test_derive_sentinel_path_strips_trailing_slash_from_sl_datasets():
-    path = derive_sentinel_path(
-        sl_datasets="gs://my-bucket/datasets/",
+def test_resolve_sentinel_path_non_empty_returns_template_verbatim():
+    # The {{ run_id }} placeholder is preserved for Airflow to template at render time.
+    path = resolve_sentinel_path(
+        options={"pre_load_not_ready_sentinel_path": "gs://b/preload/{{ run_id }}.flag"},
         domain="sales",
-        override=None,
     )
-    assert path == "gs://my-bucket/datasets/_sl/preload/sales/{{ run_id }}.notready"
+    assert path == "gs://b/preload/{{ run_id }}.flag"
 
 
-def test_derive_sentinel_path_honors_override():
-    path = derive_sentinel_path(
-        sl_datasets="gs://my-bucket/datasets",
+def test_resolve_sentinel_path_substitutes_domain_placeholder():
+    # {domain} is substituted here (not an Airflow Jinja variable).
+    path = resolve_sentinel_path(
+        options={"pre_load_not_ready_sentinel_path": "gs://b/{domain}/{{ run_id }}.flag"},
         domain="sales",
-        override="gs://other-bucket/my-sentinels/{{ run_id }}.flag",
     )
-    assert path == "gs://other-bucket/my-sentinels/{{ run_id }}.flag"
+    assert path == "gs://b/sales/{{ run_id }}.flag"
 
 
-def test_derive_sentinel_path_substitutes_domain_in_override():
-    path = derive_sentinel_path(
-        sl_datasets="gs://my-bucket/datasets",
+def test_resolve_sentinel_path_handles_non_gs_schemes():
+    # s3://, hdfs://, file:// — the pure helper doesn't care about scheme;
+    # scheme-specific logic belongs to the callers (Airflow sensor, Dagster op).
+    path = resolve_sentinel_path(
+        options={"pre_load_not_ready_sentinel_path": "s3://b/{domain}/sentinel.flag"},
         domain="sales",
-        override="gs://b/{domain}/x.flag",
     )
-    assert path == "gs://b/sales/x.flag"
+    assert path == "s3://b/sales/sentinel.flag"
 
 
 # --- parse_gcs_uri -----------------------------------------------------------
@@ -69,13 +71,3 @@ def test_parse_gcs_uri_rejects_non_gs_scheme():
 def test_parse_gcs_uri_rejects_bucket_only():
     with pytest.raises(ValueError, match="missing object name"):
         parse_gcs_uri("gs://bucket")
-
-
-# --- decide_from_existence ---------------------------------------------------
-
-def test_decide_from_existence_present():
-    assert decide_from_existence(True) is SentinelDecision.NOT_READY
-
-
-def test_decide_from_existence_absent():
-    assert decide_from_existence(False) is SentinelDecision.READY
