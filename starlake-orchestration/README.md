@@ -235,7 +235,7 @@ The following options are available for all concrete factory classes derived fro
 | **pre_load_strategy**    | str  | one of `none` (default), `imported`, `pending` or `ack`                     |
 | **global_ack_file_path** | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default) |
 | **ack_wait_timeout**     | int  | timeout in seconds to wait for the ack file(`1 hour` by default)                  |
-| **pre_load_not_ready_sentinel_path** | str | optional GCS path for the opt-in "not ready" sentinel (unset = feature off). See section below. |
+| **pre_load_not_ready_sentinel_path** | str | optional parent prefix for the opt-in "not ready" sentinel; orchestration auto-appends `<domain>/<run_id>.notready` (unset = feature off). See section below. |
 
 These options allow you to customize the behavior of the pipeline and the orchestration tasks it defines, providing flexibility for retries, acknowledgment handling, and preload strategies.
 
@@ -248,16 +248,15 @@ Setting `pre_load_not_ready_sentinel_path` in DagInfo `options` opts the DAG int
 ```yaml
 # my-load-dag.sl.yml
 options:
-  pre_load_not_ready_sentinel_path: "gs://my-bucket/_sl/preload/{domain}/{{ run_id }}.notready"
+  # Point at a parent prefix — orchestration appends <domain>/<run_id>.notready automatically.
+  pre_load_not_ready_sentinel_path: "gs://my-bucket/_sl/preload"
   # Recommended: tune retries to create the "wait for files" window.
   # e.g. retries=12 × retry_delay=300 (5 min) = ~1 hour polling window.
   retries: "12"
   retry_delay: "300"
 ```
 
-The `{domain}` placeholder is substituted at DAG-generation time. `{{ run_id }}` is resolved at task-execution time — by Airflow's Jinja templating for the Airflow runner, and by an explicit substitution from `OpExecutionContext.run_id` for the Dagster runner. Both runners produce the same concrete path, so the same template string works on both.
-
-Per-run uniqueness (`{{ run_id }}`) is strongly recommended: without it, concurrent DAG runs collide on the same sentinel object and the "not ready" signal gets misattributed.
+The user supplies only a parent prefix (any GCS URI pointing at the "folder" where sentinels should live). Orchestration automatically appends `<domain>/<run_id>.notready`, producing concrete paths like `gs://my-bucket/_sl/preload/sales/scheduled__2026-04-22T06-00-00.notready`. The domain and per-run id are not user-editable — this eliminates two common footguns: forgetting to scope per-domain (so two domains collide on one object) and forgetting to scope per-run (so concurrent runs collide). The run id is resolved at task-execution time — by Airflow's Jinja templating on the Airflow runner, and by an explicit substitution from `OpExecutionContext.run_id` on the Dagster runner. Both runners produce identical paths.
 
 When set, the orchestration layer:
 

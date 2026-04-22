@@ -28,23 +28,29 @@ from typing import Callable, Optional, Tuple
 
 
 def resolve_sentinel_path(options: dict, domain: str) -> Optional[str]:
-    """Return the sentinel path if the feature is enabled for this DAG, else None.
+    """Return the full sentinel path if the feature is enabled for this DAG, else None.
 
     Feature is opt-in via a single DagInfo option:
-      pre_load_not_ready_sentinel_path: <path>
-    If this option is set to a non-empty value, the feature is ON and the path
-    is used. If missing or empty, the feature is OFF and this function returns
-    None (caller skips all sentinel wiring).
+      pre_load_not_ready_sentinel_path: <prefix>
+    The user supplies only a *prefix* — any GCS/S3/HDFS/file URI pointing at
+    the parent "folder" where sentinels should live. This function appends the
+    domain and a ``{{ run_id }}`` Jinja placeholder automatically, producing:
 
-    A ``{domain}`` placeholder in the path is substituted here. Other placeholders
-    — most importantly ``{{ run_id }}`` — pass through unchanged so Airflow can
-    template them at task-render time, which is what makes concurrent DAG runs
-    safe without coordination.
+      <prefix>/<domain>/{{ run_id }}.notready
+
+    Rationale: domain and per-run uniqueness are not things users should have
+    to remember to include. Auto-appending keeps users from shooting themselves
+    in the foot (same-bucket collisions across domains, concurrent-run races
+    from a forgotten run_id). ``{{ run_id }}`` stays as a Jinja placeholder so
+    Airflow substitutes it at task-render time; Dagster substitutes it in the
+    op via ``substitute_airflow_placeholders(path, context.run_id)``.
+
+    Returns None when the option is missing or empty (feature off).
     """
-    template = options.get('pre_load_not_ready_sentinel_path', '')
-    if not template:
+    prefix = options.get('pre_load_not_ready_sentinel_path', '')
+    if not prefix:
         return None
-    return template.replace('{domain}', domain)
+    return f"{prefix.rstrip('/')}/{domain}/{{{{ run_id }}}}.notready"
 
 
 def substitute_airflow_placeholders(value: Optional[str], run_id: str) -> Optional[str]:

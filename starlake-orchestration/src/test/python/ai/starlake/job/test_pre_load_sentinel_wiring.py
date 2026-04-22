@@ -47,8 +47,9 @@ def test_sl_pre_load_omits_sentinel_flag_when_option_empty():
 
 
 def test_sl_pre_load_emits_sentinel_flag_when_option_set():
+    # User supplies only a prefix — sl_pre_load appends <domain>/{{ run_id }}.notready.
     job = _make_capturing_job(options={
-        "pre_load_not_ready_sentinel_path": "gs://b/{domain}/{{ run_id }}.flag",
+        "pre_load_not_ready_sentinel_path": "gs://my-bucket/sentinels",
     })
     job.sl_pre_load(domain="sales", tables={"customers"},
                     pre_load_strategy=StarlakePreLoadStrategy.IMPORTED)
@@ -56,8 +57,7 @@ def test_sl_pre_load_emits_sentinel_flag_when_option_set():
     assert "--notReadySentinel" in args
     idx = args.index("--notReadySentinel")
     path = args[idx + 1]
-    # {domain} substituted, {{ run_id }} preserved for Airflow to template.
-    assert path == "gs://b/sales/{{ run_id }}.flag"
+    assert path == "gs://my-bucket/sentinels/sales/{{ run_id }}.notready"
     # Same path propagated to downstream kwargs so the sensor / op can consume it.
     assert job.captured_kwargs.get("sentinel_path") == path
 
@@ -66,7 +66,7 @@ def test_sl_pre_load_sentinel_applies_to_ack_strategy():
     # ACK strategy has its own code path (with globalAckFilePath). Sentinel wiring
     # sits OUTSIDE that branch, so it must be present for ACK as well.
     job = _make_capturing_job(options={
-        "pre_load_not_ready_sentinel_path": "gs://b/{domain}/sentinel.flag",
+        "pre_load_not_ready_sentinel_path": "gs://b/sentinels",
     })
     job.sl_pre_load(domain="d", tables={"t"},
                     pre_load_strategy=StarlakePreLoadStrategy.ACK)
@@ -77,7 +77,7 @@ def test_sl_pre_load_sentinel_applies_to_ack_strategy():
 
 def test_sl_pre_load_sentinel_applies_to_pending_strategy():
     job = _make_capturing_job(options={
-        "pre_load_not_ready_sentinel_path": "gs://b/{domain}/sentinel.flag",
+        "pre_load_not_ready_sentinel_path": "gs://b/sentinels",
     })
     job.sl_pre_load(domain="d", tables={"t"},
                     pre_load_strategy=StarlakePreLoadStrategy.PENDING)

@@ -9,6 +9,9 @@ from ai.starlake.sentinel import (
 
 
 # --- resolve_sentinel_path ---------------------------------------------------
+#
+# Contract: user supplies only a prefix. The helper appends "<domain>/{{ run_id }}.notready"
+# automatically so users can't forget domain-scoping or per-run uniqueness.
 
 def test_resolve_sentinel_path_missing_option_returns_none():
     assert resolve_sentinel_path(options={}, domain="sales") is None
@@ -22,32 +25,37 @@ def test_resolve_sentinel_path_empty_string_returns_none():
     ) is None
 
 
-def test_resolve_sentinel_path_non_empty_returns_template_verbatim():
-    # The {{ run_id }} placeholder is preserved for Airflow to template at render time.
+def test_resolve_sentinel_path_appends_domain_and_run_id_to_prefix():
     path = resolve_sentinel_path(
-        options={"pre_load_not_ready_sentinel_path": "gs://b/preload/{{ run_id }}.flag"},
+        options={"pre_load_not_ready_sentinel_path": "gs://my-bucket/sentinels"},
         domain="sales",
     )
-    assert path == "gs://b/preload/{{ run_id }}.flag"
+    assert path == "gs://my-bucket/sentinels/sales/{{ run_id }}.notready"
 
 
-def test_resolve_sentinel_path_substitutes_domain_placeholder():
-    # {domain} is substituted here (not an Airflow Jinja variable).
+def test_resolve_sentinel_path_strips_trailing_slash_from_prefix():
     path = resolve_sentinel_path(
-        options={"pre_load_not_ready_sentinel_path": "gs://b/{domain}/{{ run_id }}.flag"},
+        options={"pre_load_not_ready_sentinel_path": "gs://my-bucket/sentinels/"},
         domain="sales",
     )
-    assert path == "gs://b/sales/{{ run_id }}.flag"
+    assert path == "gs://my-bucket/sentinels/sales/{{ run_id }}.notready"
 
 
 def test_resolve_sentinel_path_handles_non_gs_schemes():
-    # s3://, hdfs://, file:// — the pure helper doesn't care about scheme;
-    # scheme-specific logic belongs to the callers (Airflow sensor, Dagster op).
+    # s3://, hdfs://, file:// — resolve_sentinel_path is scheme-agnostic.
+    # Scheme-specific I/O happens in the Airflow sensor / Dagster op.
     path = resolve_sentinel_path(
-        options={"pre_load_not_ready_sentinel_path": "s3://b/{domain}/sentinel.flag"},
+        options={"pre_load_not_ready_sentinel_path": "s3://my-bucket/sentinels"},
         domain="sales",
     )
-    assert path == "s3://b/sales/sentinel.flag"
+    assert path == "s3://my-bucket/sentinels/sales/{{ run_id }}.notready"
+
+
+def test_resolve_sentinel_path_different_domains_produce_different_paths():
+    # Domain scoping is automatic — two domains sharing the same prefix still
+    # get distinct paths without any user action.
+    opts = {"pre_load_not_ready_sentinel_path": "gs://b/s"}
+    assert resolve_sentinel_path(opts, "sales") != resolve_sentinel_path(opts, "marketing")
 
 
 # --- parse_gcs_uri -----------------------------------------------------------
