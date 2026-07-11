@@ -41,7 +41,7 @@ _DOT_ENV = dotenv_values(_DOT_ENV_PATH) if _DOT_ENV_PATH.is_file() else dotenv_v
 
 # Defaults used when neither .env nor system env defines a variable.
 _DEFAULTS = {
-    "SL_VERSION": "1.5.7",
+    "SL_VERSION": "1.5.11",
     "SL_ENV": "DUCKDB",
 }
 
