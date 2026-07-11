@@ -165,9 +165,16 @@ def _register_snowflake_stub_module():
 
 @pytest.fixture(autouse=True, scope="session")
 def _mock_zip_selected_packages():
-    """Prevent actual package zipping — return a dummy path."""
+    """Prevent actual package zipping — return a dummy path.
+
+    ``StarlakeSnowflakeJob`` binds the name via
+    ``from ai.starlake.helper import zip_selected_packages``, so the patch
+    must target the name as imported *into the job module*; patching
+    ``ai.starlake.helper.zip_selected_packages`` would not intercept the
+    already-bound reference and the real (slow, /tmp-leaking) zipping runs.
+    """
     with patch(
-        "ai.starlake.helper.zip_selected_packages",
+        "ai.starlake.snowflake.starlake_snowflake_job.zip_selected_packages",
         return_value="/tmp/fake_ai.zip",
     ):
         yield

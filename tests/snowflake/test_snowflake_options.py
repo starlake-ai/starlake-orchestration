@@ -201,6 +201,9 @@ class TestSnowflakeStartOp:
             most_frequent_datasets=None,
         )
         assert task is not None
+        # start_op must gate the DAG on all predecessors having produced a
+        # return value — verify the actual condition, not just task existence.
+        assert task.condition == "SYSTEM$GET_PREDECESSOR_RETURN_VALUE() <> ''"
 
 
 # ------------------------------------------------------------------

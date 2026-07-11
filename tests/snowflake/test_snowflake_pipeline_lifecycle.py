@@ -72,34 +72,40 @@ class TestSnowflakePipelineLifecycle(SnowflakeTestMixin, BaseTestPipelineLifecyc
             "SNOWFLAKE_USER": "test_user",
             "SNOWFLAKE_PASSWORD": "test_pass",
         })
-        return session_patch, op_patch, env_patch
+        return session_patch, op_patch, env_patch, mock_op
 
     def test_pipeline_deploy(self):
-        """Call pipeline.deploy() with mocked session, verify no exception."""
+        """deploy() delegates to DAGOperation.deploy(dag, mode=or_replace)."""
+        from snowflake.core._common import CreateMode
         pipeline = self._make_pipeline()
         with pipeline:
             self._populate_pipeline(pipeline)
-        session_p, op_p, env_p = self._mock_session_and_op(pipeline)
+        session_p, op_p, env_p, mock_op = self._mock_session_and_op(pipeline)
         with session_p, op_p, env_p:
             result = pipeline.deploy()
             assert result is None
+            # The whole point of deploy() is to push the built DAG to Snowflake.
+            mock_op.deploy.assert_called_once_with(
+                pipeline.dag, mode=CreateMode.or_replace
+            )
 
     def test_pipeline_delete(self):
-        """Call pipeline.delete() with mocked session, verify no exception."""
+        """delete() delegates to DAGOperation.delete(pipeline_id)."""
         pipeline = self._make_pipeline()
         with pipeline:
             self._populate_pipeline(pipeline)
-        session_p, op_p, env_p = self._mock_session_and_op(pipeline)
+        session_p, op_p, env_p, mock_op = self._mock_session_and_op(pipeline)
         with session_p, op_p, env_p:
             result = pipeline.delete()
             assert result is None
+            mock_op.delete.assert_called_once_with(pipeline.pipeline_id)
 
     def test_pipeline_run(self):
         """Call pipeline.run() in DRY_RUN mode with mocked session."""
         pipeline = self._make_pipeline()
         with pipeline:
             self._populate_pipeline(pipeline)
-        session_p, op_p, env_p = self._mock_session_and_op(pipeline)
+        session_p, op_p, env_p, _ = self._mock_session_and_op(pipeline)
         with session_p, op_p, env_p:
             pipeline.run(mode=StarlakeExecutionMode.DRY_RUN)
 
@@ -108,7 +114,7 @@ class TestSnowflakePipelineLifecycle(SnowflakeTestMixin, BaseTestPipelineLifecyc
         pipeline = self._make_pipeline()
         with pipeline:
             self._populate_pipeline(pipeline)
-        session_p, op_p, env_p = self._mock_session_and_op(pipeline)
+        session_p, op_p, env_p, _ = self._mock_session_and_op(pipeline)
         with session_p, op_p, env_p:
             with patch.object(pipeline, "run", wraps=pipeline.run) as spy_run:
                 pipeline.dry_run()
