@@ -76,6 +76,10 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
         transform = task_type == TaskType.TRANSFORM
         params = kwargs.get('params', dict())
 
+        # static sl_options sections to publish on the materialization (see
+        # DagsterLogicalDatetimeConfig.sl_options for the runtime counterpart)
+        extra = kwargs.pop("extra", None)
+
         assets: List[AssetKey] = kwargs.get("assets", [])
 
         ins=kwargs.get("ins", {})
@@ -123,6 +127,14 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
                     for key, value in [opt.split("=")]
                 })
                 opts.extend(transform_opts)
+                # runtime sl_options carried by the run (sensor RunRequest or manual
+                # launch) — appended last so they override the static ones (starlake
+                # keeps the last occurrence of a duplicate key): precedence
+                # static < 'all' < task-specific.
+                runtime_options = StarlakeDagsterUtils.get_sl_options(context, config, task_id)
+                if runtime_options:
+                    env.update({key: str(value) for key, value in runtime_options.items()})
+                    opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
                 command_with_arguments[-1] = ",".join(opts)
                 # Update the fargate arguments and environment
                 fargate.arguments = command_with_arguments
@@ -172,7 +184,7 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
                 for asset in assets:
                     yield AssetMaterialization(asset_key=asset.path, description=kwargs.get("description", f"Starlake command {command} execution succeeded"))
                 if dataset:
-                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, **kwargs)
+                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, extra=extra, **kwargs)
 
                 yield Output(value=output, output_name=out)
 

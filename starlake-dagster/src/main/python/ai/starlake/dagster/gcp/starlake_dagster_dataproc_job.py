@@ -187,6 +187,10 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
         transform = task_type == TaskType.TRANSFORM
         params = kwargs.get('params', dict())
 
+        # static sl_options sections to publish on the materialization (see
+        # DagsterLogicalDatetimeConfig.sl_options for the runtime counterpart)
+        extra = kwargs.pop("extra", None)
+
         assets: List[AssetKey] = kwargs.get("assets", [])
 
         ins=kwargs.get("ins", {})
@@ -227,6 +231,13 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 opts = command_with_arguments[-1].split(",")
                 transform_opts = StarlakeDagsterUtils.get_transform_options(context, config, params).split(',')
                 opts.extend(transform_opts)
+                # runtime sl_options carried by the run (sensor RunRequest or manual
+                # launch) — appended last so they override the static ones (starlake
+                # keeps the last occurrence of a duplicate key): precedence
+                # static < 'all' < task-specific.
+                runtime_options = StarlakeDagsterUtils.get_sl_options(context, config, task_id)
+                if runtime_options:
+                    opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
                 command_with_arguments[-1] = ",".join(opts)
                 job = job_details.get("job", {})
                 spark_job = job.get("spark_job", {})
@@ -259,7 +270,7 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 for asset in assets:
                     yield AssetMaterialization(asset_key=asset.path, description=f"Spark job {job_id} submitted to Dataproc cluster {self.__dataproc__.cluster_name}")
                 if dataset:
-                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, **kwargs)
+                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, extra=extra, **kwargs)
 
                 yield Output(value=job_id, output_name=out)
 

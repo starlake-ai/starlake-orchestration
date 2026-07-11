@@ -13,3 +13,4 @@ dag:
     packages: "croniter,python-dateutil,snowflake-snowpark-python"
     warehouse: "COMPUTE_WH"
     retry_delay: "10"
+    sl_incoming_file_stage: "@incoming_stage"
