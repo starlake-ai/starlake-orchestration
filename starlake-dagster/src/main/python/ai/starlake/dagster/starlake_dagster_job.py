@@ -174,6 +174,13 @@ class DagsterLogicalDatetimeConfig(Config):
     logical_datetime: Optional[str]
     previous_logical_datetime: Optional[str] = None
     dry_run: bool = False
+    # Runtime starlake --options carried by the triggering asset materializations
+    # (StarlakeParameters.OPTIONS_PARAMETER), JSON-encoded as a dict of sections:
+    # {"all": {key: value}, "<domain.task>": {key: value}} — the "all" section
+    # applies to every node of the run, a task-keyed section only to that node
+    # (precedence: static options < "all" < task-specific). Populated by the
+    # pipeline sensor's RunRequest, or manually at launch (recovery escape hatch).
+    sl_options: Optional[str] = None
 
 class StarlakeDagsterUtils:
 
@@ -287,6 +294,31 @@ class StarlakeDagsterUtils:
             StarlakeParameters.SCHEDULED_DATE_PARAMETER.value: MetadataValue.timestamp(logical_datetime),
             StarlakeParameters.DRY_RUN_PARAMETER.value: MetadataValue.bool(config.dry_run),
         })
+        # sl_options carried downstream: static sections passed by the caller via
+        # the `extra` kwarg, overridden by the run-level sections (config.sl_options)
+        # so a run relays the options it was itself triggered with.
+        extra = kwargs.get("extra", None) or {}
+        event_options: dict = {}
+        if isinstance(extra, dict):
+            static_options = extra.get(StarlakeParameters.OPTIONS_PARAMETER.value, None)
+            if isinstance(static_options, dict):
+                for section, opts in static_options.items():
+                    if isinstance(opts, dict):
+                        event_options.setdefault(section, {}).update(opts)
+        if config.sl_options:
+            import json
+            try:
+                run_options = json.loads(config.sl_options)
+            except (TypeError, ValueError):
+                run_options = None
+            if isinstance(run_options, dict):
+                for section, opts in run_options.items():
+                    if isinstance(opts, dict):
+                        event_options.setdefault(section, {}).update(opts)
+        if event_options:
+            metadata.update({
+                StarlakeParameters.OPTIONS_PARAMETER.value: MetadataValue.json(event_options),
+            })
         tags = kwargs.get("tags", {})
         partition = cls.quote_datetime(partition_key)
         tags.update({
@@ -330,6 +362,82 @@ class StarlakeDagsterUtils:
             List[AssetMaterialization]: The asset materializations.
         """
         return [cls.get_materialization(context, config, dataset, **kwargs) for dataset in datasets]
+
+    @classmethod
+    def collect_sl_options(cls, materializations) -> dict:
+        """Merge the sl_options sections carried by asset materializations
+        (StarlakeParameters.OPTIONS_PARAMETER in their metadata).
+
+        Merging is fail-loud: the same key carried with different values by two
+        materializations raises (conflicting run variables must stop the run,
+        not silently pick one).
+
+        Args:
+            materializations: An iterable of AssetMaterialization (None entries
+                are skipped).
+
+        Returns:
+            dict: The merged sections {"all": {...}, "<domain.task>": {...}}.
+        """
+        import json
+        sections: dict = {}
+        for mat in materializations or []:
+            if not mat:
+                continue
+            metadata = getattr(mat, "metadata", None) or {}
+            value = metadata.get(StarlakeParameters.OPTIONS_PARAMETER.value, None)
+            raw = getattr(value, "value", value)  # MetadataValue.json -> dict
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+            if not isinstance(raw, dict):
+                continue
+            for section, opts in raw.items():
+                if not isinstance(opts, dict):
+                    continue
+                merged = sections.setdefault(section, {})
+                for key, v in opts.items():
+                    if key in merged and str(merged[key]) != str(v):
+                        raise ValueError(
+                            f"Conflicting values for {StarlakeParameters.OPTIONS_PARAMETER.value}['{section}']['{key}'] across triggering materializations "
+                            f"({getattr(mat, 'asset_key', None)}): '{merged[key]}' != '{v}'. Conflicting run variables must be run one by one, "
+                            f"passing {StarlakeParameters.OPTIONS_PARAMETER.value} in the run config."
+                        )
+                    merged[key] = v
+        return sections
+
+    @classmethod
+    def get_sl_options(cls, context: Optional[OpExecutionContext], config: DagsterLogicalDatetimeConfig, name: Optional[str] = None) -> dict:
+        """Resolve the runtime starlake --options applying to a node.
+
+        Reads the sections carried by the run (config.sl_options, set by the
+        pipeline sensor or manually at launch — falling back to the run tag)
+        and merges the 'all' section with the section keyed by the node name
+        (precedence: 'all' < task-specific).
+
+        Returns:
+            dict: The options to append to the command's --options (appended
+            last, they override the static ones — starlake keeps the last
+            occurrence of a duplicate key).
+        """
+        import json
+        raw = config.sl_options
+        if not raw and context:
+            try:
+                raw = context.get_tag(StarlakeParameters.OPTIONS_PARAMETER.value)
+            except Exception:
+                raw = None
+        if not raw:
+            return {}
+        sections = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(sections, dict):
+            return {}
+        options = dict(sections.get("all", {}))
+        if name and isinstance(sections.get(name), dict):
+            options.update(sections.get(name))
+        return options
 
     @classmethod
     def get_transform_options(cls, context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, params: dict = dict(), **kwargs) -> str:
