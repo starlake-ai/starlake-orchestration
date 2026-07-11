@@ -472,13 +472,15 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
     def graphs(self) -> Optional[Set[TreeNodeMixin]]:
         return self.__graphs
 
-    def __create_task(self, task_id: str, task_name: str, task_type: str, task_sink: Optional[str]) -> T:
+    def __create_task(self, task_id: str, task_name: str, task_type: str, task_sink: Optional[str], dataset: Optional[StarlakeDataset] = None, inlets: Optional[List[StarlakeDataset]] = None) -> T:
         """Create a task.
         Args:
             task_id (str): The task id.
             task_name (str): The task name.
             task_type (str): The task type.
             task_sink (Optional[str]): The task sink.
+            dataset (Optional[StarlakeDataset]): The dataset.
+            inlets (Optional[List[StarlakeDataset]]): The inputs.
         Returns:
             T: The task.
         """
@@ -490,6 +492,8 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 transform_name=task_name,
                 sink=task_sink,
                 params={'sink': task_sink},
+                dataset=dataset,
+                inlets=inlets,
             )
             self.__inner_tasks[task_id] = task
             return task
@@ -501,6 +505,8 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
                 task_id=task_id, 
                 domain=domain, 
                 table=table,
+                dataset=dataset,
+                inlets=inlets,
             )
             self.__inner_tasks[task_id] = task
             return task
@@ -513,7 +519,17 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             task_type = dependency.dependency_type
             task_id = f"{sanitize_id(dependency.name)}_{task_type}"
             task_sink = dependency.sink
-            return self.__create_task(task_id, task_name, task_type, task_sink)
+            dataset = dependency.to_dataset(
+                sl_schedule_parameter_name=self.sl_schedule_parameter_name, 
+                sl_schedule_format=self.sl_schedule_format
+            )
+            inlets = []
+            for dep in dependency.dependencies:
+                inlets.append(dep.to_dataset(
+                    sl_schedule_parameter_name=self.sl_schedule_parameter_name, 
+                    sl_schedule_format=self.sl_schedule_format
+                ))
+            return self.__create_task(task_id, task_name, task_type, task_sink, dataset=dataset, inlets=inlets)
         else:
             raise ValueError(f"Unsupported dependency type: {type(dependency)}")
 
