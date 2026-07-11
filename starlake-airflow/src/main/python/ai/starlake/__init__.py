@@ -14,4 +14,4 @@
 # limitations under the License.
 #
 
-# package ai.starlake
+# package starlake
