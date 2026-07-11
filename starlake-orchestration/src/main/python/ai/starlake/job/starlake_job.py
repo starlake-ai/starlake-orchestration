@@ -357,6 +357,10 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             task_id (str): The optional task id.
             domain (str): The required domain to import.
             tables (set): The optional tables to import.
+            options (dict, optional): Additional starlake --options for the stage
+                command (e.g. {"incoming_dir": "..."} to redirect the incoming
+                directory for this stage only). Appended after the defaults so
+                they take precedence.
 
         Returns:
             T: The scheduler task.
@@ -370,7 +374,11 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         self.__add_event(tmp_domain, **kwargs)
         task_id = f"import_{tmp_domain}" if not task_id else task_id
         kwargs.pop("task_id", None)
-        arguments = [TaskType.STAGE.value, "--domains", domain, "--tables", ",".join(tables), "--options", "SL_RUN_MODE=main,SL_LOG_LEVEL=info"]
+        stage_options = {"SL_RUN_MODE": "main", "SL_LOG_LEVEL": "info"}
+        extra_options = kwargs.pop("options", None)
+        if extra_options:
+            stage_options.update(extra_options)
+        arguments = [TaskType.STAGE.value, "--domains", domain, "--tables", ",".join(tables), "--options", ",".join(f"{key}={value}" for key, value in stage_options.items())]
         return self.sl_job(task_id=task_id, arguments=arguments, task_type=TaskType.STAGE, **kwargs)
 
     @classmethod

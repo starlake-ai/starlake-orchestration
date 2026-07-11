@@ -115,6 +115,8 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         user_defined_macros["ts_as_datetime"] = ts_as_datetime
         user_defined_macros["sl_scheduled_dataset"] = sl_scheduled_dataset
         user_defined_macros["sl_scheduled_date"] = sl_scheduled_date
+        from ai.starlake.airflow import sl_options_from_events
+        user_defined_macros["sl_options_from_events"] = sl_options_from_events
 
         user_defined_filters = kwargs.get('user_defined_filters', job.caller_globals.get('user_defined_filters', None))
         kwargs.pop('user_defined_filters', None)

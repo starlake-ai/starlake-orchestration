@@ -85,6 +85,10 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
 
         env = {**self.sl_os_env_vars.copy(), **self.sl_env_vars.copy()} # Copy the current sl env variables
 
+        # explicit --scheduledDate override (e.g. a per-run file date pulled from an
+        # XCom template) — popped unconditionally: BaseOperator would reject the kwarg
+        scheduled_date = kwargs.pop('scheduled_date', None)
+
         if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
             arguments = [] if not arguments else arguments
             params: dict = kwargs.get('params', dict())
@@ -93,7 +97,10 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
             kwargs.update({'params': params})
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+            if scheduled_date:
+                tmp_arguments.append(f"\'{scheduled_date}\'")
+            else:
+                tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
 

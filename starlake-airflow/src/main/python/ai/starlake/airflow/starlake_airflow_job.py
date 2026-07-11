@@ -63,10 +63,57 @@ DEFAULT_DAG_ARGS = {
     'start_date': datetime(2023, 1, 1),
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 1, 
+    'retries': 1,
     'retry_delay': timedelta(minutes=5),
     'max_active_runs': 1,
 }
+
+def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Optional[str] = None) -> str:
+    """Jinja macro rendering the runtime starlake --options fragment carried by the
+    triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in the event
+    extra, as a dict of sections: {"all": {key: value}, "<domain.task>": {key: value}}).
+    The 'all' section applies to every transformation of the triggered pipeline; the
+    section keyed by the transformation name only to that one. The fragment is
+    appended last to the command's --options, whose duplicate keys are resolved
+    last-wins by starlake — hence the precedence: static options < 'all' < task-specific.
+    Merging is fail-loud: the same key carried with different values by coalesced
+    events raises (conflicting run variables must stop the run, not silently pick
+    one). dag_run.conf[StarlakeParameters.OPTIONS_PARAMETER] overrides events — the
+    manual-recovery escape hatch. Returns 'key=value[,key=value...]', or
+    'sl_options_applied=0' when nothing applies (never empty, so the fragment is
+    always a valid --options token)."""
+    sections: dict = {}
+    for uri, events in (triggering_dataset_events or {}).items():
+        for event in events or []:
+            extra = getattr(event, "extra", None) or {}
+            event_sections = extra.get(StarlakeParameters.OPTIONS_PARAMETER.value) or {}
+            if not isinstance(event_sections, dict):
+                continue
+            for section, opts in event_sections.items():
+                if not isinstance(opts, dict):
+                    continue
+                merged = sections.setdefault(section, {})
+                for key, value in opts.items():
+                    if key in merged and str(merged[key]) != str(value):
+                        from airflow.exceptions import AirflowException
+                        raise AirflowException(
+                            f"Conflicting values for {StarlakeParameters.OPTIONS_PARAMETER.value}['{section}']['{key}'] across triggering dataset events ({uri}): "
+                            f"'{merged[key]}' != '{value}'. Coalesced events carry different run variables — re-trigger the runs one by one, "
+                            f"passing dag_run.conf['{StarlakeParameters.OPTIONS_PARAMETER.value}']."
+                        )
+                    merged[key] = value
+    conf = getattr(dag_run, "conf", None) or {}
+    conf_sections = conf.get(StarlakeParameters.OPTIONS_PARAMETER.value) or {}
+    if isinstance(conf_sections, dict):
+        for section, opts in conf_sections.items():
+            if isinstance(opts, dict):
+                sections.setdefault(section, {}).update(opts)
+    options = dict(sections.get("all", {}))
+    if name:
+        options.update(sections.get(name, {}))
+    if not options:
+        return "sl_options_applied=0"
+    return ",".join(f"{key}={value}" for key, value in options.items())
 
 def __check_version__(version: str) -> bool:
     """
@@ -703,18 +750,27 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         """Overrides IStarlakeJob.sl_transform()
         Generate the Airflow task that will run the starlake `transform` command.
 
+        The transform options are extended at runtime with the sl_options carried
+        by the triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in
+        the event extra): the 'all' section applies to every transformation, the
+        section keyed by the transformation name only to this one. See
+        sl_options_from_events for the merge/precedence/fail-loud semantics.
+        (`triggering_dataset_events` is in the template context since Airflow 2.5.)
+
         Args:
             task_id (str): The optional task id ({transform_name} by default).
             transform_name (str): The transform to run.
             transform_options (str): The optional transform options to use.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
             dataset (Optional[Union[StarlakeDataset, str]]): The optional dataset to materialize.
-        
+
         Returns:
             BaseOperator: The Airflow task.
         """
         kwargs.update({'doc': kwargs.get('doc', f'Run {transform_name} transform.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
+        runtime_options = "{{sl_options_from_events(triggering_dataset_events, dag_run, '" + transform_name + "')}}"
+        transform_options = ",".join(filter(None, [transform_options, runtime_options]))
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset,  **kwargs)
 
     def dummy_op(self, task_id, events: Optional[List[Dataset]] = None, task_type: Optional[TaskType] = TaskType.EMPTY, **kwargs) -> BaseOperator :
@@ -763,7 +819,10 @@ class StarlakeDatasetMixin:
         params: dict = kwargs.get("params", dict())
         # cron: Optional[str] = params.get('cron', None)
         outlets: list = kwargs.get("outlets", [])
-        extra = dict()
+        # popped: BaseOperator would reject the unknown kwarg. extra is a template
+        # field (see below) so Jinja/XCom values inside it (e.g. runtime sl_options)
+        # are rendered before pre_execute copies it onto the outlet events.
+        extra = kwargs.pop("extra", dict())
         extra.update({"source": source})
         if dataset:
             if isinstance(dataset, StarlakeDataset):
@@ -799,7 +858,7 @@ class StarlakeDatasetMixin:
                 self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts))}}"
             outlets.append(Dataset(uri=uri, extra=extra))
             kwargs["outlets"] = outlets
-            self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date",)
+            self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date", "extra",)
         else:
             self.scheduled_dataset = None
             self.scheduled_date = None
@@ -844,6 +903,11 @@ class StarlakeDatasetMixin:
             print(f"add 'sl_scheduled_date' to context")
             from ai.starlake.common import sl_scheduled_date
             context['sl_scheduled_date'] = sl_scheduled_date
+
+        __sl_options_from_events = dag.user_defined_macros.get('sl_options_from_events', None) if dag.user_defined_macros else None
+        if not __sl_options_from_events:
+            print(f"add 'sl_options_from_events' to context")
+            context['sl_options_from_events'] = sl_options_from_events
 
         return super().render_template_fields(context, jinja_env)
 

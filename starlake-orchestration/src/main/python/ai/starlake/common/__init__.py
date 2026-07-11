@@ -67,6 +67,11 @@ class StarlakeParameters(str, Enum):
     DATA_INTERVAL_START_PARAMETER = f"{__SL_PREFIX}data_interval_start"
     DATA_INTERVAL_END_PARAMETER = f"{__SL_PREFIX}data_interval_end"
     DRY_RUN_PARAMETER = f"{__SL_PREFIX}dry_run"
+    # Runtime starlake --options carried by dataset events, as a dict of sections:
+    # {"all": {key: value}, "<domain.task>": {key: value}} — the "all" section
+    # applies to every task of the triggered pipeline, a task-specific section
+    # only to that task (precedence: static options < "all" < task-specific).
+    OPTIONS_PARAMETER = f"{__SL_PREFIX}options"
 
     def __str__(self):
         return self.value
