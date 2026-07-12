@@ -1000,6 +1000,14 @@ class StarlakeDatasetMixin:
         self.task_id = task_id
         params: dict = kwargs.get("params", dict())
         # cron: Optional[str] = params.get('cron', None)
+        inlets: list = kwargs.get("inlets", [])
+        if inlets:
+            # Airflow 2's lineage hook JSON-serializes inlets to XCom in post_execute;
+            # raw StarlakeDataset objects are not serializable (Dataset, an attrs class, is)
+            kwargs["inlets"] = [
+                AirflowDataset.to_event(inlet) if isinstance(inlet, StarlakeDataset) else inlet
+                for inlet in inlets
+            ]
         outlets: list = kwargs.get("outlets", [])
         # popped: BaseOperator would reject the unknown kwarg. extra is a template
         # field (see below) so Jinja/XCom values inside it (e.g. runtime sl_options)

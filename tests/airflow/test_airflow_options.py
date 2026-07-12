@@ -166,6 +166,25 @@ class TestStarlakeAirflowBashJob:
         options_value = tokens[tokens.index("--options") + 1]
         assert "PATH=/opt/with space/bin:/usr/bin" in options_value
 
+    def test_sl_transform_converts_starlake_dataset_inlets(self):
+        """StarlakeDataset inlets are converted to Airflow Datasets so Airflow 2's
+        lineage hook can JSON-serialize them to XCom in post_execute."""
+        from airflow.datasets import Dataset
+        from ai.starlake.dataset import StarlakeDataset
+
+        job = StarlakeAirflowBashJob(
+            filename="test_inlets.py",
+            module_name=_AIRFLOW_TEST_MODULE_NAME,
+            options={},
+        )
+        operator = job.sl_transform(
+            task_id="transform_task",
+            transform_name="kpi.order_summary",
+            inlets=[StarlakeDataset(name="starbake.orders", cron="0 * * * *")],
+        )
+        assert operator.inlets
+        assert all(isinstance(inlet, Dataset) for inlet in operator.inlets)
+
 
 # ------------------------------------------------------------------
 # 4.4  AirflowDataset.to_event produces Dataset instances
