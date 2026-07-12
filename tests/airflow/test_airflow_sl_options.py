@@ -94,9 +94,10 @@ class TestSlTransformInjection:
         cmd = task.bash_command
         fragment = "{{sl_options_from_events(triggering_dataset_events, dag_run, 'd.t')}}"
         assert fragment in cmd
-        # the fragment must be part of the --options value, appended last
+        # the fragment must be part of the (quoted) --options value, appended last
         options_value = cmd.split("--options", 1)[1].strip()
-        assert options_value.endswith(fragment)
+        assert options_value.startswith('"') and options_value.endswith('"')
+        assert options_value.strip('"').endswith(fragment)
 
     def test_static_transform_options_precede_the_fragment(self, airflow_job):
         task = airflow_job.sl_transform(task_id=None, transform_name="d.t", transform_options="k=v")
