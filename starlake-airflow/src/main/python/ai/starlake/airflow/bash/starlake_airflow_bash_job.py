@@ -121,13 +121,16 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
                             options += f",{opt}"
                 else:
                     options = ",".join([f"{key}={value}" for i, (key, value) in enumerate(self.sl_env_vars.items())]) # Add/overwrite with sl env variables
-                arguments[index+1] = options
+                # double quotes so values containing spaces survive bash -c word
+                # splitting, including inside the single-quoted do_xcom_push wrapper
+                arguments[index+1] = f'"{options}"'
                 found = True
                 break
 
         if not found:
             arguments.append("--options")
-            arguments.append(",".join([f"{key}={value}" for key, value in self.sl_env_vars.items()])) # Add/overwrite with sl env variables
+            options = ",".join([f"{key}={value}" for key, value in self.sl_env_vars.items()]) # Add/overwrite with sl env variables
+            arguments.append(f'"{options}"')
 
         preload = False
         if task_type and task_type==TaskType.PRELOAD:

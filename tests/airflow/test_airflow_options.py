@@ -140,6 +140,32 @@ class TestStarlakeAirflowBashJob:
         from ai.starlake.job import StarlakeOrchestrator
         assert StarlakeAirflowBashJob.sl_orchestrator() == StarlakeOrchestrator.AIRFLOW
 
+    def test_sl_job_quotes_options_value(self):
+        """The --options value is quoted so env var values containing spaces
+        (e.g. a PATH with 'Application Support') survive bash -c word splitting."""
+        import json
+        import shlex
+        from ai.starlake.job import TaskType
+
+        job = StarlakeAirflowBashJob(
+            filename="test_options_quoting.py",
+            module_name=_AIRFLOW_TEST_MODULE_NAME,
+            options={
+                "sl_env_var": json.dumps({
+                    "SL_ROOT": "/tmp/project",
+                    "PATH": "/opt/with space/bin:/usr/bin",
+                })
+            },
+        )
+        operator = job.sl_job(
+            task_id="transform_task",
+            arguments=["transform", "--name", "kpi.order_summary"],
+            task_type=TaskType.TRANSFORM,
+        )
+        tokens = shlex.split(operator.bash_command)
+        options_value = tokens[tokens.index("--options") + 1]
+        assert "PATH=/opt/with space/bin:/usr/bin" in options_value
+
 
 # ------------------------------------------------------------------
 # 4.4  AirflowDataset.to_event produces Dataset instances
