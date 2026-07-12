@@ -15,32 +15,26 @@
 #
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from airflow.configuration import conf
-from airflow.sdk.bases.hook import BaseHook
 
+from ai.starlake.airflow.compat import (
+    BaseHook,
+    airflow_version,
+    api_prefix,
+    supports_assets,
+    supports_datasets,
+    supports_inlet_events,
+)
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Version helpers
-# ---------------------------------------------------------------------------
-
-
-
-
-def api_prefix() -> str:
-    """
-    Airflow 2.x → /api/v1
-    Airflow 3.x → /api/v2
-    """
-    return "/api/v2"
 
 
 # ---------------------------------------------------------------------------
@@ -63,20 +57,42 @@ def to_dotdict(obj: Any) -> Any:
     return obj
 
 
+def _as_datetime(value: Any) -> datetime:
+    """Parse an API timestamp (ISO 8601, possibly 'Z'-suffixed) into an aware datetime."""
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 # ---------------------------------------------------------------------------
-# Airflow API Client (supports Airflow 3)
+# Airflow API Client (supports Airflow 2 & 3)
 # ---------------------------------------------------------------------------
 
 class StarlakeAirflowApiClient(BaseHook):
     """
-    Client for interacting with the Airflow API (v2).
-    
-    This client handles:
-    - Authentication via JWT (if configured).
-    - Querying dataset events (AssetEvents).
-    - Triggering DAGs via the REST API.
-    
-    It abstracts away the differences between Airflow versions (now focused on v2/Airflow 3).
+    Client for interacting with the Airflow's public API (v1/v2).
+
+    - Airflow 2.x:
+        * Basic Auth (username/password from Airflow connection);
+          requires ``airflow.api.auth.backend.basic_auth`` in ``[api] auth_backends``
+        * Datasets
+        * API prefix: /api/v1
+
+    - Airflow 3.x:
+        * Bearer JWT token (POST /auth/token)
+        * Assets instead of datasets
+        * API prefix: /api/v2
+
+    Features:
+        * Automatic version detection
+        * Automatic authentication mode
+        * Automatic endpoint selection (datasets vs assets)
+        * Retry logic
+        * DotDict responses
     """
 
     def __init__(
@@ -85,8 +101,10 @@ class StarlakeAirflowApiClient(BaseHook):
             timeout: int = 30,
             max_retries: int = 3,
     ) -> None:
-
+        super().__init__()
         self.timeout = timeout
+        self._supports_datasets = supports_datasets()
+        self._supports_assets = supports_assets()
 
 
         # Base URL from airflow.cfg
@@ -112,8 +130,12 @@ class StarlakeAirflowApiClient(BaseHook):
         self.session.mount("https://", adapter)
 
         # Authentication mode
-        # Airflow 3.x → JWT Bearer
-        self._configure_bearer_auth()
+        if self._supports_assets:
+            # Airflow 3.x → JWT Bearer
+            self._configure_bearer_auth()
+        else:
+            # Airflow 2.x → Basic Auth
+            self.session.auth = (self.conn.login, self.conn.password)
 
     # -----------------------------------------------------------------------
     # Authentication for Airflow 3.x
@@ -215,9 +237,29 @@ class StarlakeAirflowApiClient(BaseHook):
     def list_dag_runs(self, dag_id: str, **params) -> List[DotDict]:
         """
         List DagRuns for a given DAG.
+
+        ``data_interval_end_gt/gte/lte`` filters are passed through to the
+        Airflow 3.x API and applied client-side on Airflow 2.x (the v1 API
+        rejects unknown query parameters).
         """
+        params = dict(params)
+        di_gt = di_gte = di_lte = None
+        if not self._supports_assets:
+            di_gt = params.pop("data_interval_end_gt", None)
+            di_gte = params.pop("data_interval_end_gte", None)
+            di_lte = params.pop("data_interval_end_lte", None)
         resp = self._get(f"dags/{dag_id}/dagRuns", params=params)
-        return resp.dag_runs
+        runs = (resp.dag_runs if resp else None) or []
+        if di_gt is not None:
+            gt = _as_datetime(di_gt)
+            runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) > gt]
+        if di_gte is not None:
+            gte = _as_datetime(di_gte)
+            runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) >= gte]
+        if di_lte is not None:
+            lte = _as_datetime(di_lte)
+            runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) <= lte]
+        return runs
 
     def get_dag_run(self, dag_id: str, dag_run_id: str) -> DotDict:
         return self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}")
@@ -228,7 +270,7 @@ class StarlakeAirflowApiClient(BaseHook):
 
     def list_task_instances(self, dag_id: str, dag_run_id: str, **params) -> List[DotDict]:
         resp = self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances", params=params)
-        return resp.task_instances
+        return (resp.task_instances if resp else None) or []
 
     def list_dag_task_instances(self, dag_id: str, **params) -> List[DotDict]:
         """
@@ -236,21 +278,59 @@ class StarlakeAirflowApiClient(BaseHook):
         Ideally uses /dags/{dag_id}/dagRuns/~/taskInstances if available.
         """
         resp = self._get(f"dags/{dag_id}/dagRuns/~/taskInstances", params=params)
-        return resp.task_instances
+        return (resp.task_instances if resp else None) or []
 
     # -----------------------------------------------------------------------
-    # Assets (Airflow 3.x)
+    # Datasets (Airflow 2.4+) / Assets (Airflow 3.x)
     # -----------------------------------------------------------------------
     def get_dataset_by_uri(self, uri: str) -> Optional[DotDict]:
         """
         Unified interface for dataset (Airflow 2.4+) and asset (Airflow 3.x) by URI.
         """
-        return self._get(f"assets/{uri}")
+        if self._supports_assets:
+            # Airflow 3.x → assets are fetched by numeric id; resolve the URI
+            # through the uri_pattern filter and match exactly
+            resp = self._get("assets", params={"uri_pattern": uri})
+            assets = (resp.assets if resp else None) or []
+            return next((asset for asset in assets if asset.uri == uri), None)
+
+        if self._supports_datasets:
+            # Airflow 2.4+ → datasets are fetched by their percent-encoded URI
+            return self._get(f"datasets/{quote(uri, safe='')}")
+
+        raise RuntimeError("Datasets are not supported on this Airflow version.")
 
     def list_events(self, **params) -> List[DotDict]:
         """
         Unified interface for dataset events (Airflow 2.4+) and asset events (Airflow 3.x).
-        """
-        resp = self._get("assets/events", params=params)
-        return resp.events
 
+        Accepts either ``asset_id`` or ``dataset_id`` and translates it to the
+        parameter expected by the underlying API. ``timestamp_gte``/``timestamp_lte``
+        are supported natively by the Airflow 3.x API and applied client-side on
+        Airflow 2.x (the v1 API has no timestamp filters).
+        """
+        params = dict(params)
+        if self._supports_assets:
+            # Airflow 3.x → assets
+            if "dataset_id" in params:
+                params["asset_id"] = params.pop("dataset_id")
+            resp = self._get("assets/events", params=params)
+            return ((resp.asset_events if resp else None) or [])
+
+        if self._supports_datasets:
+            # Airflow 2.4+ → datasets
+            if "asset_id" in params:
+                params["dataset_id"] = params.pop("asset_id")
+            timestamp_gte = params.pop("timestamp_gte", None)
+            timestamp_lte = params.pop("timestamp_lte", None)
+            resp = self._get("datasets/events", params=params)
+            events = (resp.dataset_events if resp else None) or []
+            if timestamp_gte is not None:
+                gte = _as_datetime(timestamp_gte)
+                events = [e for e in events if e.timestamp and _as_datetime(e.timestamp) >= gte]
+            if timestamp_lte is not None:
+                lte = _as_datetime(timestamp_lte)
+                events = [e for e in events if e.timestamp and _as_datetime(e.timestamp) <= lte]
+            return events
+
+        raise RuntimeError("Datasets are not supported on this Airflow version.")

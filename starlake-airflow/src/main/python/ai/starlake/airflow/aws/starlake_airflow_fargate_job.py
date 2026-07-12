@@ -24,15 +24,11 @@ from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
 
 from ai.starlake.aws import StarlakeFargateHelper
 
-from airflow.sdk.bases.operator import BaseOperator
+from ai.starlake.airflow.compat import BaseOperator, PokeReturnValue, TaskGroup
 
 from airflow.providers.amazon.aws.operators.ecs import EcsRunTaskOperator
 from airflow.providers.amazon.aws.sensors.ecs import EcsTaskStateSensor
 from airflow.providers.amazon.aws.hooks.ecs import EcsTaskStates
-
-from airflow.sdk.bases.sensor import PokeReturnValue
-
-from airflow.sdk import TaskGroup
 
 import logging
 

@@ -22,11 +22,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, Starla
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
 
-from airflow.sdk.bases.operator import BaseOperator
-
-from airflow.providers.standard.operators.bash import BashOperator
-
-from airflow.providers.standard.operators.python import PythonOperator
+from ai.starlake.airflow.compat import BaseOperator, BashOperator, PythonOperator
 
 class StarlakeAirflowBashJob(StarlakeAirflowJob):
     """Airflow Starlake Bash Job."""

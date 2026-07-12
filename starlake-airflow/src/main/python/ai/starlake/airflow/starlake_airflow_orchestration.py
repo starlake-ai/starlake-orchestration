@@ -28,13 +28,9 @@ from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, S
 
 from airflow import DAG
 
-from airflow.sdk import Asset as Dataset   # Airflow 3.x
-
-from airflow.sdk.bases.operator import BaseOperator
+from ai.starlake.airflow.compat import BaseOperator, Dataset, TaskGroup, get_current_context
 
 from airflow.utils.context import Context
-
-from airflow.sdk import TaskGroup
 
 from airflow.utils.state import DagRunState
 
@@ -91,7 +87,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         def ts_as_datetime(ts, context: Context = None):
             from datetime import datetime
             if not context:
-                from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
             sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
@@ -107,7 +102,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         from datetime import datetime
         def sl_dates(cron_expr: str, start_time: datetime, context: Context = None) -> str:
             if not context:
-                from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
             sl_data_interval_start = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value)

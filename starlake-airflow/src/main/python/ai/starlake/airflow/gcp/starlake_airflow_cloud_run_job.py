@@ -32,18 +32,19 @@ from ai.starlake.airflow.bash import StarlakeBashOperator
 
 from airflow.exceptions import AirflowException
 
-from airflow.sdk.bases.operator import BaseOperator
-
-from airflow.providers.standard.operators.bash import BashOperator
+from ai.starlake.airflow.compat import (
+    BaseOperator,
+    BaseSensorOperator,
+    BashOperator,
+    BashSensor,
+    PokeReturnValue,
+    TaskGroup,
+)
 
 from airflow.providers.google.cloud.hooks.cloud_run import CloudRunHook
 from airflow.providers.google.cloud.operators.cloud_run import  CloudRunExecuteJobOperator
 
-from airflow.sdk.bases.sensor import BaseSensorOperator, PokeReturnValue
-from airflow.providers.standard.sensors.bash import BashSensor
-
 from airflow.utils.context import Context
-from airflow.sdk import TaskGroup
 
 from google.cloud.run_v2.types import Execution
 from google.longrunning import operations_pb2

@@ -33,22 +33,20 @@ from ai.starlake.job.starlake_job import StarlakeOrchestrator
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
 
-from airflow.sdk import Asset as Dataset
-from airflow.models.asset import AssetEvent, AssetModel
-
+from ai.starlake.airflow.compat import (
+    BaseOperator,
+    Dataset,
+    EmptyOperator,
+    ShortCircuitOperator,
+    TaskGroup,
+    get_current_context,
+    supports_assets,
+    supports_inlet_events,
+)
 
 from airflow.models import DagRun, TaskInstance
-from airflow.models.serialized_dag import SerializedDagModel
-
-from airflow.sdk.bases.operator import BaseOperator
-
-from airflow.providers.standard.operators.empty import EmptyOperator
-
-from airflow.providers.standard.operators.python import ShortCircuitOperator
 
 from airflow.utils.context import Context
-
-from airflow.sdk import TaskGroup
 
 import logging
 
@@ -112,29 +110,6 @@ def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Option
     if not options:
         return "sl_options_applied=0"
     return ",".join(f"{key}={value}" for key, value in options.items())
-
-def __check_version__(version: str) -> bool:
-    """
-    Check if the current version is compatible with the given version.
-    """
-    from packaging.version import parse
-    import airflow
-
-    current_version = parse(airflow.__version__)
-
-    return current_version >= parse(version)
-
-def supports_inlet_events():
-    """
-    Check if the current environment supports inlet events.
-    """
-    return __check_version__("2.10.0")
-
-def supports_assets():
-    """
-    Check if the current environment supports assets.
-    """
-    return __check_version__("3.0.0")
 
 class AirflowDataset(AbstractEvent[Dataset]):
     @classmethod
@@ -259,16 +234,17 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
                 if not context:
-                    from airflow.operators.python import get_current_context
                     context = get_current_context()
 
                 ti = context["task_instance"]
                 template_ctx = ti.get_template_context()
 
-                # Airflow 3.x: triggering_asset_events
+                # Airflow 3.x: triggering_asset_events / Airflow 2.4+: triggering_dataset_events
                 triggering_dataset_events = []
                 if "triggering_asset_events" in template_ctx:
                     triggering_dataset_events = template_ctx["triggering_asset_events"]
+                elif "triggering_dataset_events" in template_ctx:
+                    triggering_dataset_events = template_ctx["triggering_dataset_events"]
 
                 if not triggering_dataset_events:
                     # No triggering assets
@@ -281,7 +257,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         continue
 
                     for event in events:
-                        if type(event).__name__ != "AssetEvent":
+                        if type(event).__name__ not in ("AssetEvent", "DatasetEvent"):
                             continue
 
                         extra = event.extra or {}
@@ -462,13 +438,13 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
                 params_events: Dict[str, Any] = {
                     "timestamp_lte": ts.isoformat(),
-                    "order_by": ["timestamp"],
+                    "order_by": "timestamp",
                     "limit": 1000,
                 }
 
                 params_events["asset_id"] = dataset_or_asset_id
 
-                events: List[DotDict] = client.list_events(params=params_events)
+                events: List[DotDict] = client.list_events(**params_events)
 
                 if not events:
                     logging.info(
@@ -500,7 +476,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 dag_run_index: Dict[tuple, DotDict] = {}
 
                 dr_params_base: Dict[str, Any] = {
-                    "order_by": ["data_interval_end", "start_date"],
+                    "order_by": "data_interval_end",
                     "limit": 1000,
                 }
 
@@ -1082,7 +1058,6 @@ class StarlakeDatasetMixin:
             def ts_as_datetime(ts, context: Context = None):
                 from datetime import datetime
                 if not context:
-                    from airflow.operators.python import get_current_context
                     context = get_current_context()
                 ti: TaskInstance = context["task_instance"]
                 sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
@@ -1120,7 +1095,6 @@ class StarlakeDatasetMixin:
     
     def pre_execute(self, context: Context):
         if not context:
-            from airflow.operators.python import get_current_context
             context = get_current_context()
 
         ti: TaskInstance = context.get('ti')
