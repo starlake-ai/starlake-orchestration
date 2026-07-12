@@ -74,13 +74,17 @@ def _as_datetime(value: Any) -> datetime:
 
 class StarlakeAirflowApiClient(BaseHook):
     """
-    Client for interacting with the Airflow's public API (v1/v2).
+    Client for querying Airflow metadata (datasets/assets, events, DAG runs,
+    task instances).
 
     - Airflow 2.x:
-        * Basic Auth (username/password from Airflow connection);
-          requires ``airflow.api.auth.backend.basic_auth`` in ``[api] auth_backends``
+        * Metadata database queried directly by default (server-side filters,
+          no page-size cap, no webserver dependency)
+        * REST /api/v1 as fallback when the database is unreachable:
+          Basic Auth (username/password from the optional ``airflow_api``
+          connection); requires ``airflow.api.auth.backend.basic_auth``
+          in ``[api] auth_backends``
         * Datasets
-        * API prefix: /api/v1
 
     - Airflow 3.x:
         * Bearer JWT token (POST /auth/token)
@@ -105,7 +109,7 @@ class StarlakeAirflowApiClient(BaseHook):
         self.timeout = timeout
         self._supports_datasets = supports_datasets()
         self._supports_assets = supports_assets()
-
+        self._db_available: Optional[bool] = None
 
         # Base URL from airflow.cfg
         base = conf.get("webserver", "base_url").rstrip("/")
@@ -113,7 +117,19 @@ class StarlakeAirflowApiClient(BaseHook):
         self.api_base_url = f"{base}{api_prefix()}"
 
         # Airflow connection (username/password)
-        self.conn = BaseHook.get_connection(conn_id)
+        try:
+            self.conn = BaseHook.get_connection(conn_id)
+        except Exception as e:
+            if self._supports_assets:
+                raise
+            # Airflow 2.x works database-first: the connection is only
+            # needed by the REST fallback
+            log.info(
+                "Airflow connection '%s' not found (%s); the REST API fallback will be unauthenticated",
+                conn_id,
+                e,
+            )
+            self.conn = None
 
         # HTTP session with retry strategy
         self.session = requests.Session()
@@ -133,7 +149,7 @@ class StarlakeAirflowApiClient(BaseHook):
         if self._supports_assets:
             # Airflow 3.x → JWT Bearer
             self._configure_bearer_auth()
-        else:
+        elif self.conn:
             # Airflow 2.x → Basic Auth
             self.session.auth = (self.conn.login, self.conn.password)
 
@@ -231,25 +247,213 @@ class StarlakeAirflowApiClient(BaseHook):
         return self._request("GET", path, params=params)
 
     # -----------------------------------------------------------------------
+    # Airflow 2.x metadata database access
+    # -----------------------------------------------------------------------
+    # On Airflow 2 tasks run with direct access to the metadata database (the
+    # platform's own execution model). The database supports the server-side
+    # filters the v1 REST API lacks (timestamp, data_interval_end, end_date_lt,
+    # order_by/task_id on task instances) and is not subject to the API
+    # page-size cap ([api] maximum_page_limit, default 100). It is therefore
+    # used by default, with the REST API kept as fallback. On Airflow 3 the
+    # Task SDK has no database access and the /api/v2 REST API is always used.
+
+    @property
+    def db_available(self) -> bool:
+        """Whether the Airflow 2 metadata database is reachable (probed once)."""
+        if self._supports_assets:
+            return False
+        if self._db_available is None:
+            try:
+                from sqlalchemy import text
+
+                from airflow.utils.session import create_session
+                with create_session() as session:
+                    session.execute(text("SELECT 1"))
+                self._db_available = True
+            except Exception as e:
+                log.warning(
+                    "Airflow metadata database not reachable (%s); falling back to the REST API",
+                    e,
+                )
+                self._db_available = False
+        return self._db_available
+
+    @staticmethod
+    def _iso(value: Any) -> Optional[str]:
+        if value is None or isinstance(value, str):
+            return value
+        return value.isoformat()
+
+    @staticmethod
+    def _order_query(query, model, order_by) -> Any:
+        """Apply one or more '[-]column' order clauses to a SQLAlchemy query."""
+        fields = order_by if isinstance(order_by, (list, tuple)) else [order_by] if order_by else []
+        for field in fields:
+            field = str(field)
+            column = getattr(model, field.lstrip("-"), None)
+            if column is not None:
+                query = query.order_by(column.desc() if field.startswith("-") else column.asc())
+        return query
+
+    def _dag_run_to_dotdict(self, run) -> DotDict:
+        return DotDict({
+            "dag_id": run.dag_id,
+            "run_id": run.run_id,
+            "dag_run_id": run.run_id,
+            "state": str(run.state) if run.state is not None else None,
+            "execution_date": self._iso(run.execution_date),
+            "logical_date": self._iso(run.execution_date),
+            "start_date": self._iso(run.start_date),
+            "end_date": self._iso(run.end_date),
+            "data_interval_start": self._iso(run.data_interval_start),
+            "data_interval_end": self._iso(run.data_interval_end),
+        })
+
+    def _event_to_dotdict(self, event) -> DotDict:
+        dataset = getattr(event, "dataset", None)
+        return DotDict({
+            "id": event.id,
+            "dataset_id": event.dataset_id,
+            "dataset_uri": dataset.uri if dataset is not None else None,
+            "extra": to_dotdict(event.extra) if event.extra else {},
+            "source_dag_id": event.source_dag_id,
+            "source_task_id": event.source_task_id,
+            "source_run_id": event.source_run_id,
+            "source_map_index": event.source_map_index,
+            "timestamp": self._iso(event.timestamp),
+        })
+
+    def _task_instance_to_dotdict(self, ti) -> DotDict:
+        return DotDict({
+            "dag_id": ti.dag_id,
+            "dag_run_id": ti.run_id,
+            "task_id": ti.task_id,
+            "state": str(ti.state) if ti.state is not None else None,
+            "start_date": self._iso(ti.start_date),
+            "end_date": self._iso(ti.end_date),
+        })
+
+    def _get_dataset_by_uri_db(self, uri: str) -> Optional[DotDict]:
+        from airflow.models.dataset import DatasetModel
+        from airflow.utils.session import create_session
+        with create_session() as session:
+            row = session.query(DatasetModel).filter(DatasetModel.uri == uri).one_or_none()
+            if not row:
+                return None
+            return DotDict({
+                "id": row.id,
+                "uri": row.uri,
+                "extra": to_dotdict(row.extra) if row.extra else {},
+            })
+
+    def _list_events_db(self, **params) -> List[DotDict]:
+        from sqlalchemy.orm import joinedload
+
+        from airflow.models.dataset import DatasetEvent
+        from airflow.utils.session import create_session
+        with create_session() as session:
+            query = session.query(DatasetEvent).options(joinedload(DatasetEvent.dataset))
+            if params.get("dataset_id") is not None:
+                query = query.filter(DatasetEvent.dataset_id == params["dataset_id"])
+            if params.get("timestamp_gte") is not None:
+                query = query.filter(DatasetEvent.timestamp >= _as_datetime(params["timestamp_gte"]))
+            if params.get("timestamp_lte") is not None:
+                query = query.filter(DatasetEvent.timestamp <= _as_datetime(params["timestamp_lte"]))
+            query = self._order_query(query, DatasetEvent, params.get("order_by", "timestamp"))
+            if params.get("limit"):
+                query = query.limit(int(params["limit"]))
+            return [self._event_to_dotdict(row) for row in query.all()]
+
+    def _list_dag_runs_db(self, dag_id: str, **params) -> List[DotDict]:
+        from airflow.models import DagRun
+        from airflow.utils.session import create_session
+        with create_session() as session:
+            query = session.query(DagRun).filter(DagRun.dag_id == dag_id)
+            state = params.get("state")
+            if state is not None:
+                states = [str(s) for s in (state if isinstance(state, (list, tuple)) else [state])]
+                query = query.filter(DagRun.state.in_(states))
+            if params.get("end_date_lt") is not None:
+                query = query.filter(DagRun.end_date < _as_datetime(params["end_date_lt"]))
+            if params.get("end_date_lte") is not None:
+                query = query.filter(DagRun.end_date <= _as_datetime(params["end_date_lte"]))
+            if params.get("data_interval_end_gt") is not None:
+                query = query.filter(DagRun.data_interval_end > _as_datetime(params["data_interval_end_gt"]))
+            if params.get("data_interval_end_gte") is not None:
+                query = query.filter(DagRun.data_interval_end >= _as_datetime(params["data_interval_end_gte"]))
+            if params.get("data_interval_end_lte") is not None:
+                query = query.filter(DagRun.data_interval_end <= _as_datetime(params["data_interval_end_lte"]))
+            query = self._order_query(query, DagRun, params.get("order_by"))
+            if params.get("limit"):
+                query = query.limit(int(params["limit"]))
+            return [self._dag_run_to_dotdict(row) for row in query.all()]
+
+    def _list_task_instances_db(self, dag_id: str, dag_run_id: Optional[str] = None, **params) -> List[DotDict]:
+        from airflow.models import TaskInstance
+        from airflow.utils.session import create_session
+        with create_session() as session:
+            query = session.query(TaskInstance).filter(TaskInstance.dag_id == dag_id)
+            if dag_run_id is not None:
+                query = query.filter(TaskInstance.run_id == dag_run_id)
+            if params.get("task_id") is not None:
+                query = query.filter(TaskInstance.task_id == params["task_id"])
+            state = params.get("state")
+            if state is not None:
+                states = [str(s) for s in (state if isinstance(state, (list, tuple)) else [state])]
+                query = query.filter(TaskInstance.state.in_(states))
+            if params.get("end_date_lte") is not None:
+                query = query.filter(TaskInstance.end_date <= _as_datetime(params["end_date_lte"]))
+            query = self._order_query(query, TaskInstance, params.get("order_by"))
+            if params.get("limit"):
+                query = query.limit(int(params["limit"]))
+            return [self._task_instance_to_dotdict(row) for row in query.all()]
+
+    # -----------------------------------------------------------------------
     # DAG Runs
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _first_order_by(order_by) -> Optional[str]:
+        """The REST APIs accept a single order_by field; keep the first one."""
+        if isinstance(order_by, (list, tuple)):
+            return str(order_by[0]) if order_by else None
+        return order_by
+
+    @staticmethod
+    def _alias_run_ids(run: DotDict) -> DotDict:
+        """Expose both run_id (v2/database naming) and dag_run_id (v1 naming)."""
+        if run.get("run_id") is None and run.get("dag_run_id") is not None:
+            run["run_id"] = run["dag_run_id"]
+        elif run.get("dag_run_id") is None and run.get("run_id") is not None:
+            run["dag_run_id"] = run["run_id"]
+        return run
 
     def list_dag_runs(self, dag_id: str, **params) -> List[DotDict]:
         """
         List DagRuns for a given DAG.
 
-        ``data_interval_end_gt/gte/lte`` filters are passed through to the
-        Airflow 3.x API and applied client-side on Airflow 2.x (the v1 API
-        rejects unknown query parameters).
+        On Airflow 2 the metadata database is queried by default. The REST
+        fallback applies ``data_interval_end_gt/gte/lte`` and ``end_date_lt``
+        filters client-side on the v1 API (which rejects unknown query
+        parameters).
         """
         params = dict(params)
-        di_gt = di_gte = di_lte = None
+        if self.db_available:
+            try:
+                return self._list_dag_runs_db(dag_id, **params)
+            except Exception as e:
+                log.warning("Metadata database query failed (%s); falling back to the REST API", e)
+        order_by = self._first_order_by(params.pop("order_by", None))
+        if order_by is not None:
+            params["order_by"] = order_by
+        di_gt = di_gte = di_lte = ed_lt = None
         if not self._supports_assets:
             di_gt = params.pop("data_interval_end_gt", None)
             di_gte = params.pop("data_interval_end_gte", None)
             di_lte = params.pop("data_interval_end_lte", None)
+            ed_lt = params.pop("end_date_lt", None)
         resp = self._get(f"dags/{dag_id}/dagRuns", params=params)
-        runs = (resp.dag_runs if resp else None) or []
+        runs = [self._alias_run_ids(r) for r in ((resp.dag_runs if resp else None) or [])]
         if di_gt is not None:
             gt = _as_datetime(di_gt)
             runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) > gt]
@@ -259,6 +463,9 @@ class StarlakeAirflowApiClient(BaseHook):
         if di_lte is not None:
             lte = _as_datetime(di_lte)
             runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) <= lte]
+        if ed_lt is not None:
+            lt = _as_datetime(ed_lt)
+            runs = [r for r in runs if r.end_date and _as_datetime(r.end_date) < lt]
         return runs
 
     def get_dag_run(self, dag_id: str, dag_run_id: str) -> DotDict:
@@ -269,16 +476,54 @@ class StarlakeAirflowApiClient(BaseHook):
     # -----------------------------------------------------------------------
 
     def list_task_instances(self, dag_id: str, dag_run_id: str, **params) -> List[DotDict]:
+        if self.db_available:
+            try:
+                return self._list_task_instances_db(dag_id, dag_run_id, **params)
+            except Exception as e:
+                log.warning("Metadata database query failed (%s); falling back to the REST API", e)
+        params = self._rest_task_instance_params(params)
+        task_id = params.pop("task_id", None)
         resp = self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances", params=params)
-        return (resp.task_instances if resp else None) or []
+        instances = (resp.task_instances if resp else None) or []
+        if task_id is not None:
+            instances = [ti for ti in instances if ti.task_id == task_id]
+        return instances
 
     def list_dag_task_instances(self, dag_id: str, **params) -> List[DotDict]:
         """
-        List IDs of task instances for a given DAG across all runs.
-        Ideally uses /dags/{dag_id}/dagRuns/~/taskInstances if available.
+        List task instances for a given DAG across all runs.
         """
+        if self.db_available:
+            try:
+                return self._list_task_instances_db(dag_id, **params)
+            except Exception as e:
+                log.warning("Metadata database query failed (%s); falling back to the REST API", e)
+        params = self._rest_task_instance_params(params)
+        task_id = params.pop("task_id", None)
         resp = self._get(f"dags/{dag_id}/dagRuns/~/taskInstances", params=params)
-        return (resp.task_instances if resp else None) or []
+        instances = (resp.task_instances if resp else None) or []
+        if task_id is not None:
+            instances = [ti for ti in instances if ti.task_id == task_id]
+        return instances
+
+    def _rest_task_instance_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Adapt task-instance filters for the REST APIs.
+
+        The v1 API has no ``order_by`` and no ``task_id`` filter on the
+        taskInstances endpoints: ``order_by`` is dropped (callers only
+        membership-test the results) and ``task_id`` is filtered client-side.
+        """
+        params = dict(params)
+        if self._supports_assets:
+            order_by = self._first_order_by(params.pop("order_by", None))
+            if order_by is not None:
+                params["order_by"] = order_by
+        else:
+            params.pop("order_by", None)
+        state = params.get("state")
+        if state is not None:
+            params["state"] = [str(s) for s in (state if isinstance(state, (list, tuple)) else [state])]
+        return params
 
     # -----------------------------------------------------------------------
     # Datasets (Airflow 2.4+) / Assets (Airflow 3.x)
@@ -295,6 +540,11 @@ class StarlakeAirflowApiClient(BaseHook):
             return next((asset for asset in assets if asset.uri == uri), None)
 
         if self._supports_datasets:
+            if self.db_available:
+                try:
+                    return self._get_dataset_by_uri_db(uri)
+                except Exception as e:
+                    log.warning("Metadata database query failed (%s); falling back to the REST API", e)
             # Airflow 2.4+ → datasets are fetched by their percent-encoded URI
             return self._get(f"datasets/{quote(uri, safe='')}")
 
@@ -321,6 +571,11 @@ class StarlakeAirflowApiClient(BaseHook):
             # Airflow 2.4+ → datasets
             if "asset_id" in params:
                 params["dataset_id"] = params.pop("asset_id")
+            if self.db_available:
+                try:
+                    return self._list_events_db(**params)
+                except Exception as e:
+                    log.warning("Metadata database query failed (%s); falling back to the REST API", e)
             timestamp_gte = params.pop("timestamp_gte", None)
             timestamp_lte = params.pop("timestamp_lte", None)
             resp = self._get("datasets/events", params=params)

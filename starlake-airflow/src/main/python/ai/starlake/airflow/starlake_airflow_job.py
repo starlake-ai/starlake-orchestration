@@ -346,7 +346,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     ti_params["task_id"] = leaf
 
                     # Use new method to list task instances across all runs
-                    ti_list = client.list_dag_task_instances(dag_id, params=ti_params)
+                    ti_list = client.list_dag_task_instances(dag_id, **ti_params)
 
                     skipped_run_ids = {ti.dag_run_id for ti in ti_list}
 
@@ -366,7 +366,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         ti_list = client.list_task_instances(
                             dag_id,
                             dag_run_id,
-                            params=ti_params,
+                            **ti_params,
                         )
 
                         if any(ti.task_id in leaf_task_ids for ti in ti_list):
