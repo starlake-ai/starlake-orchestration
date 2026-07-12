@@ -112,6 +112,52 @@ class TestStarlakeDagsterShellJob:
         from ai.starlake.job import StarlakeOrchestrator
         assert StarlakeDagsterShellJob.sl_orchestrator() == StarlakeOrchestrator.DAGSTER
 
+    def test_sl_job_quotes_options_value(self):
+        """The --options value is quoted so env var values containing spaces
+        (e.g. a PATH with 'Application Support') survive shell word splitting.
+        The op is executed in dry-run mode to capture the built command."""
+        import json
+        import shlex
+
+        from dagster import GraphDefinition
+
+        from ai.starlake.job import TaskType
+
+        job = StarlakeDagsterShellJob(
+            filename="test_options_quoting.py",
+            module_name=_DAGSTER_TEST_MODULE_NAME,
+            options={
+                "sl_env_var": json.dumps({
+                    "SL_ROOT": "/tmp/project",
+                    "PATH": "/opt/with space/bin:/usr/bin",
+                })
+            },
+        )
+        op_def = job.sl_job(
+            task_id="transform_task",
+            arguments=["transform", "--name", "kpi.order_summary"],
+            task_type=TaskType.TRANSFORM,
+        )
+        graph = GraphDefinition(name="options_quoting_graph", node_defs=[op_def])
+        result = graph.execute_in_process(
+            run_config={
+                "ops": {
+                    "transform_task": {
+                        "config": {
+                            "logical_datetime": "2026-07-12T00:00:00+00:00",
+                            "dry_run": True,
+                        }
+                    }
+                }
+            }
+        )
+        assert result.success
+        output: str = result.output_for_node("transform_task", "result")
+        command = output[len("Starlake command "):output.index(" execution skipped")]
+        tokens = shlex.split(command)
+        options_value = tokens[tokens.index("--options") + 1]
+        assert "PATH=/opt/with space/bin:/usr/bin" in options_value
+
 
 # ------------------------------------------------------------------
 # 4.3  DagsterDataset.to_event produces AssetKey instances

@@ -149,6 +149,13 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
                     opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
                 command_with_arguments[-1] = ",".join(opts)
 
+            # double quotes so values containing spaces survive shell word splitting;
+            # applied here, after the transform branch has split/merged the value on commas
+            for i, arg in enumerate(command_with_arguments[:-1]):
+                if arg == "--options":
+                    command_with_arguments[i + 1] = f'"{command_with_arguments[i + 1]}"'
+                    break
+
             command = sl_command + f" {' '.join(command_with_arguments or [])}"
 
             if config.dry_run:
