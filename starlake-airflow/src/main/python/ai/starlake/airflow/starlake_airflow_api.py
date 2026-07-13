@@ -104,32 +104,55 @@ class StarlakeAirflowApiClient(BaseHook):
             conn_id: str = "airflow_api",
             timeout: int = 30,
             max_retries: int = 3,
+            base_url: Optional[str] = None,
+            username: Optional[str] = None,
+            password: Optional[str] = None,
     ) -> None:
+        """
+        Args:
+            conn_id: Airflow connection providing the REST credentials
+                (optional on Airflow 2, where the database is used by default).
+            base_url: explicit Airflow instance to target instead of the one in
+                airflow.cfg. When given, the local metadata database is NOT used
+                (it does not belong to the targeted instance): all calls go
+                through the REST API.
+            username/password: explicit REST credentials, overriding conn_id.
+        """
         super().__init__()
         self.timeout = timeout
         self._supports_datasets = supports_datasets()
         self._supports_assets = supports_assets()
-        self._db_available: Optional[bool] = None
+        # an explicitly targeted instance is remote by definition
+        self._db_available: Optional[bool] = False if base_url is not None else None
 
-        # Base URL from airflow.cfg
-        base = conf.get("webserver", "base_url").rstrip("/")
+        # Base URL from the override or airflow.cfg
+        base = (base_url or conf.get("webserver", "base_url")).rstrip("/")
         self.base_url = base
         self.api_base_url = f"{base}{api_prefix()}"
 
-        # Airflow connection (username/password)
-        try:
-            self.conn = BaseHook.get_connection(conn_id)
-        except Exception as e:
-            if self._supports_assets:
-                raise
-            # Airflow 2.x works database-first: the connection is only
-            # needed by the REST fallback
-            log.info(
-                "Airflow connection '%s' not found (%s); the REST API fallback will be unauthenticated",
-                conn_id,
-                e,
-            )
+        # REST credentials: explicit override, else Airflow connection
+        if username is not None:
             self.conn = None
+            self._login: Optional[str] = username
+            self._password: Optional[str] = password
+        else:
+            try:
+                self.conn = BaseHook.get_connection(conn_id)
+                self._login = self.conn.login
+                self._password = self.conn.password
+            except Exception as e:
+                if self._supports_assets and base_url is None:
+                    raise
+                # Airflow 2.x works database-first: the connection is only
+                # needed by the REST fallback
+                log.info(
+                    "Airflow connection '%s' not found (%s); the REST API fallback will be unauthenticated",
+                    conn_id,
+                    e,
+                )
+                self.conn = None
+                self._login = None
+                self._password = None
 
         # HTTP session with retry strategy
         self.session = requests.Session()
@@ -149,9 +172,9 @@ class StarlakeAirflowApiClient(BaseHook):
         if self._supports_assets:
             # Airflow 3.x → JWT Bearer
             self._configure_bearer_auth()
-        elif self.conn:
+        elif self._login:
             # Airflow 2.x → Basic Auth
-            self.session.auth = (self.conn.login, self.conn.password)
+            self.session.auth = (self._login, self._password)
 
     # -----------------------------------------------------------------------
     # Authentication for Airflow 3.x
@@ -164,8 +187,8 @@ class StarlakeAirflowApiClient(BaseHook):
         token_url = self.base_url + "/auth/token"
 
         payload = {}
-        if self.conn.login and self.conn.password:
-            payload = {"username": self.conn.login, "password": self.conn.password}
+        if self._login and self._password:
+            payload = {"username": self._login, "password": self._password}
 
         log.debug("Requesting JWT token from %s", token_url)
         resp = requests.post(
@@ -245,6 +268,12 @@ class StarlakeAirflowApiClient(BaseHook):
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return self._request("GET", path, params=params)
+
+    def _post(self, path: str, json: Optional[Dict[str, Any]] = None) -> Any:
+        return self._request("POST", path, json=json)
+
+    def _delete(self, path: str) -> Any:
+        return self._request("DELETE", path)
 
     def _get_paged(
             self,
@@ -636,7 +665,38 @@ class StarlakeAirflowApiClient(BaseHook):
         return runs
 
     def get_dag_run(self, dag_id: str, dag_run_id: str) -> DotDict:
-        return self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}")
+        run = self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}")
+        return self._alias_run_ids(run) if run else run
+
+    def trigger_dag_run(
+            self,
+            dag_id: str,
+            dag_run_id: Optional[str] = None,
+            logical_date: Optional[str] = None,
+            conf: Optional[Dict[str, Any]] = None,
+    ) -> Optional[DotDict]:
+        """
+        Trigger a DAG run (POST dagRuns) on the version-appropriate API.
+
+        The v2 API requires the (nullable) logical_date key to be present.
+        """
+        payload: Dict[str, Any] = {}
+        if dag_run_id:
+            payload["dag_run_id"] = dag_run_id
+        if conf is not None:
+            payload["conf"] = conf
+        if self._supports_assets:
+            payload["logical_date"] = logical_date
+        elif logical_date is not None:
+            payload["logical_date"] = logical_date
+        run = self._post(f"dags/{dag_id}/dagRuns", json=payload)
+        return self._alias_run_ids(run) if run else run
+
+    def delete_dag(self, dag_id: str) -> None:
+        """
+        Delete a DAG (DELETE dags/{dag_id}); a no-op if the DAG does not exist.
+        """
+        self._delete(f"dags/{dag_id}")
 
     # -----------------------------------------------------------------------
     # Task Instances

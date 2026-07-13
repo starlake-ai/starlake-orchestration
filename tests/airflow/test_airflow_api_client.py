@@ -346,6 +346,70 @@ def test_list_task_instances_v1_drops_order_by_and_filters_task_id(make_client):
 
 
 # ---------------------------------------------------------------------------
+# DAG run mutations (trigger / delete) — pipeline lifecycle
+# ---------------------------------------------------------------------------
+
+def test_trigger_dag_run_on_airflow_2(make_client):
+    client = make_client(
+        "2.10.5",
+        responses={"/dagRuns": {"dag_run_id": "manual_run_x", "state": "queued"}},
+    )
+
+    run = client.trigger_dag_run(
+        "my_dag",
+        dag_run_id="manual_run_x",
+        logical_date="2026-07-13T00:00:00Z",
+        conf={"backfill": True},
+    )
+
+    call = client.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == f"{BASE_URL}/api/v1/dags/my_dag/dagRuns"
+    assert call["json"] == {
+        "dag_run_id": "manual_run_x",
+        "conf": {"backfill": True},
+        "logical_date": "2026-07-13T00:00:00Z",
+    }
+    assert run.run_id == "manual_run_x"  # aliased like every dag-run object
+
+
+def test_trigger_dag_run_on_airflow_3_sends_nullable_logical_date(make_client):
+    client = make_client(
+        "3.0.2",
+        responses={"/dagRuns": {"dag_run_id": "manual_run_y", "state": "queued"}},
+    )
+
+    client.trigger_dag_run("my_dag", dag_run_id="manual_run_y")
+
+    call = client.calls[0]
+    assert call["url"] == f"{BASE_URL}/api/v2/dags/my_dag/dagRuns"
+    # the v2 API requires the (nullable) logical_date key to be present
+    assert call["json"] == {"dag_run_id": "manual_run_y", "logical_date": None}
+
+
+def test_delete_dag(make_client):
+    client = make_client("2.10.5", responses={"/dags/my_dag": {}})
+    client.delete_dag("my_dag")
+    call = client.calls[0]
+    assert call["method"] == "DELETE"
+    assert call["url"] == f"{BASE_URL}/api/v1/dags/my_dag"
+
+
+def test_explicit_base_url_targets_remote_instance(monkeypatch):
+    """An explicitly targeted instance uses its REST API with the given
+    credentials and never the local metadata database."""
+    monkeypatch.setattr(airflow, "__version__", "2.10.5")
+
+    client = StarlakeAirflowApiClient(
+        base_url="http://remote:8080", username="u", password="p"
+    )
+
+    assert client.api_base_url == "http://remote:8080/api/v1"
+    assert client.session.auth == ("u", "p")
+    assert client.db_available is False
+
+
+# ---------------------------------------------------------------------------
 # Transport selection: database first on Airflow 2, REST as fallback
 # ---------------------------------------------------------------------------
 
