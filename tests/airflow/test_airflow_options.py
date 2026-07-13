@@ -90,6 +90,48 @@ class TestStarlakeAirflowOptions:
                 options={},
             )
 
+    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
+    def test_variable_store_failure_falls_through_to_env(self, mock_variable_cls, monkeypatch):
+        """An unavailable Variable store (unmigrated/unreachable metadata DB)
+        behaves like an unset variable: the chain continues to the environment
+        variable instead of crashing DAG parsing (issue #56)."""
+        mock_variable_cls.get.side_effect = Exception("no such column: variable.team_name")
+        monkeypatch.setenv("my_var", "from_env")
+        result = StarlakeAirflowOptions.get_context_var(
+            var_name="my_var",
+            default_value=None,
+            options={},
+        )
+        assert result == "from_env"
+
+    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
+    def test_variable_store_failure_without_env_raises_missing(self, mock_variable_cls, monkeypatch):
+        """A Variable store failure with no other source still surfaces as
+        MissingEnvironmentVariable, not as the underlying database error."""
+        mock_variable_cls.get.side_effect = Exception("no such table: variable")
+        monkeypatch.delenv("nonexistent_var", raising=False)
+        with pytest.raises(MissingEnvironmentVariable):
+            StarlakeAirflowOptions.get_context_var(
+                var_name="nonexistent_var",
+                default_value=None,
+                options={},
+            )
+
+    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
+    def test_variable_fetched_with_a_single_guarded_call(self, mock_variable_cls):
+        """The value is returned from one Variable.get(default_var=None) call —
+        the old double-call raised KeyError if the variable vanished between
+        the existence check and the unguarded second fetch (issue #56)."""
+        mock_variable_cls.get.return_value = "from_airflow_var"
+        result = StarlakeAirflowOptions.get_context_var(
+            var_name="my_var",
+            default_value=None,
+            options={},
+        )
+        assert result == "from_airflow_var"
+        assert mock_variable_cls.get.call_count == 1
+        assert mock_variable_cls.get.call_args.kwargs.get("default_var", "MISSING") is None
+
 
 # ------------------------------------------------------------------
 # 4.2  DEFAULT_DAG_ARGS values
