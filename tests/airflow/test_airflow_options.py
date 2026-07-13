@@ -209,9 +209,10 @@ class TestStarlakeAirflowBashJob:
         assert "PATH=/opt/with space/bin:/usr/bin" in options_value
 
     def test_sl_transform_converts_starlake_dataset_inlets(self):
-        """StarlakeDataset inlets are converted to Airflow Datasets so Airflow 2's
-        lineage hook can JSON-serialize them to XCom in post_execute."""
-        from airflow.datasets import Dataset
+        """StarlakeDataset inlets are converted to Airflow Datasets (Assets on
+        Airflow 3) so Airflow 2's lineage hook can JSON-serialize them to XCom
+        in post_execute."""
+        from ai.starlake.airflow.compat import Dataset
         from ai.starlake.dataset import StarlakeDataset
 
         job = StarlakeAirflowBashJob(
@@ -235,8 +236,9 @@ class TestStarlakeAirflowBashJob:
 class TestAirflowDataset:
 
     def test_to_event_produces_dataset(self):
-        """AirflowDataset.to_event() returns an Airflow Dataset instance."""
-        from airflow.datasets import Dataset
+        """AirflowDataset.to_event() returns an Airflow Dataset (Asset on 3.x)
+        instance."""
+        from ai.starlake.airflow.compat import Dataset
         from ai.starlake.airflow import AirflowDataset
         from ai.starlake.dataset import StarlakeDataset
 
@@ -269,7 +271,13 @@ class TestAirflowPipeline:
         with pipeline:
             pass
         assert isinstance(pipeline.dag, DAG)
-        assert pipeline.dag.schedule_interval == "0 0 * * *"
+        from ai.starlake.airflow.compat import supports_assets
+        if supports_assets():
+            # Airflow 3 removed DAG.schedule_interval; the cron is carried
+            # by the timetable's expression
+            assert pipeline.dag.timetable.expression == "0 0 * * *"
+        else:
+            assert pipeline.dag.schedule_interval == "0 0 * * *"
 
     # ------------------------------------------------------------------
     # 4.6  AirflowPipeline DAG with dataset triggers
@@ -314,16 +322,17 @@ class TestAirflowPipeline:
         return pipeline
 
     def test_dag_with_dataset_triggers_any(self):
-        """Pipeline with ANY strategy produces a DatasetTriggeredTimetable DAG
+        """Pipeline with ANY strategy produces a dataset/asset-triggered DAG
         carrying all upstream datasets as events."""
         from ai.starlake.dataset import DatasetTriggeringStrategy
 
         pipeline = self._make_dataset_pipeline("any")
         assert pipeline.dag is not None
-        # Timetable is dataset-driven (DatasetTriggeredTimetable)
+        # Timetable is data-driven (DatasetTriggeredTimetable on Airflow 2,
+        # AssetTriggeredTimetable on Airflow 3)
         timetable_cls = type(pipeline.dag.timetable).__name__
-        assert "Dataset" in timetable_cls, (
-            f"Expected dataset timetable, got {timetable_cls}"
+        assert "Dataset" in timetable_cls or "Asset" in timetable_cls, (
+            f"Expected dataset/asset timetable, got {timetable_cls}"
         )
         # Events should contain both upstream datasets
         assert len(pipeline.events) == 2
@@ -334,12 +343,13 @@ class TestAirflowPipeline:
         assert pipeline.job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY
 
     def test_dag_with_dataset_triggers_all(self):
-        """Pipeline with ALL strategy also uses DatasetTriggeredTimetable."""
+        """Pipeline with ALL strategy also uses a dataset/asset-triggered
+        timetable."""
         from ai.starlake.dataset import DatasetTriggeringStrategy
 
         pipeline = self._make_dataset_pipeline("all")
         assert pipeline.dag is not None
         timetable_cls = type(pipeline.dag.timetable).__name__
-        assert "Dataset" in timetable_cls
+        assert "Dataset" in timetable_cls or "Asset" in timetable_cls
         assert len(pipeline.events) == 2
         assert pipeline.job.dataset_triggering_strategy == DatasetTriggeringStrategy.ALL

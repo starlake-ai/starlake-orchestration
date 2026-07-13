@@ -23,7 +23,10 @@ import types
 import pytest
 
 # ---------------------------------------------------------------------------
-# Airflow 2 availability guard — skip all tests if not installed or if v3+
+# Airflow availability guard — skip all tests if Airflow is not installed.
+# The suite runs on both Airflow 2 and Airflow 3; tests exercising
+# Airflow-2-only behavior (e.g. metadata database transport) carry their
+# own version-specific skipif.
 # ---------------------------------------------------------------------------
 
 try:
@@ -35,8 +38,8 @@ except ImportError:
     AIRFLOW_VERSION = (0, 0)
 
 pytestmark = pytest.mark.skipif(
-    not AIRFLOW_AVAILABLE or AIRFLOW_VERSION >= (3, 0),
-    reason="Requires Apache Airflow 2.x",
+    not AIRFLOW_AVAILABLE,
+    reason="Requires Apache Airflow",
 )
 
 # ---------------------------------------------------------------------------
@@ -124,6 +127,10 @@ def _mock_airflow_api(monkeypatch):
         return resp
 
     def _mock_post(*args, **kwargs):
+        url = args[0] if args else kwargs.get("url", "")
+        # Airflow 3 clients first fetch a JWT from POST /auth/token
+        if str(url).endswith("/auth/token"):
+            return _mock_response(json_data={"access_token": "mock-token"})
         return _mock_response(
             json_data={
                 "dag_run_id": "mock_run_1",

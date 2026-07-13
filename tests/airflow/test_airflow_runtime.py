@@ -51,7 +51,9 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not AIRFLOW_AVAILABLE or AIRFLOW_VERSION >= (3, 0),
-        reason="Requires Apache Airflow 2.x",
+        reason="Runtime suite is Airflow 2 only for now: it seeds "
+        "DatasetModel/DatasetEvent directly in the metadata database "
+        "(porting to Airflow 3 assets pending)",
     ),
 ]
 

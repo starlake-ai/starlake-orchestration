@@ -528,6 +528,11 @@ def test_find_dataset_events_rest_composition_on_airflow_3(make_client):
 # Database transport against a real (isolated) sqlite metadata database
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    compat.supports_assets(),
+    reason="Metadata database transport is Airflow 2 only (the client never "
+    "touches the database on Airflow 3, and DatasetModel/DatasetEvent are gone)",
+)
 class TestDatabaseTransport:
     """Exercise the session-backed queries end-to-end: SQL filters, ordering,
     limits and the normalized DotDict shape shared with the REST transport."""

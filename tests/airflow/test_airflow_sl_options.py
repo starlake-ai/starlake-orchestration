@@ -90,9 +90,11 @@ class TestSlOptionsFromEvents:
 class TestSlTransformInjection:
 
     def test_transform_command_carries_the_macro_fragment(self, airflow_job):
+        from ai.starlake.airflow.compat import supports_assets
         task = airflow_job.sl_transform(task_id=None, transform_name="d.t", transform_options=None)
         cmd = task.bash_command
-        fragment = "{{sl_options_from_events(triggering_dataset_events, dag_run, 'd.t')}}"
+        events_key = "triggering_asset_events" if supports_assets() else "triggering_dataset_events"
+        fragment = "{{sl_options_from_events(%s, dag_run, 'd.t')}}" % events_key
         assert fragment in cmd
         # the fragment must be part of the (quoted) --options value, appended last
         options_value = cmd.split("--options", 1)[1].strip()
