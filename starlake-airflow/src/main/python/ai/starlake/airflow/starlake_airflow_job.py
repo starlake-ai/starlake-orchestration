@@ -716,7 +716,8 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         the event extra): the 'all' section applies to every transformation, the
         section keyed by the transformation name only to this one. See
         sl_options_from_events for the merge/precedence/fail-loud semantics.
-        (`triggering_dataset_events` is in the template context since Airflow 2.5.)
+        (The template context key is `triggering_dataset_events` since Airflow 2.5,
+        renamed `triggering_asset_events` in Airflow 3.)
 
         Args:
             task_id (str): The optional task id ({transform_name} by default).
@@ -730,7 +731,8 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         """
         kwargs.update({'doc': kwargs.get('doc', f'Run {transform_name} transform.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
-        runtime_options = "{{sl_options_from_events(triggering_dataset_events, dag_run, '" + transform_name + "')}}"
+        events_context_key = "triggering_asset_events" if supports_assets() else "triggering_dataset_events"
+        runtime_options = "{{sl_options_from_events(" + events_context_key + ", dag_run, '" + transform_name + "')}}"
         transform_options = ",".join(filter(None, [transform_options, runtime_options]))
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset,  **kwargs)
 

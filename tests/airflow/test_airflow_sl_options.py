@@ -104,6 +104,16 @@ class TestSlTransformInjection:
         options_value = task.bash_command.split("--options", 1)[1].strip()
         assert options_value.index("k=v") < options_value.index("sl_options_from_events")
 
+    def test_transform_fragment_uses_asset_events_key_on_airflow_3(self, airflow_job, monkeypatch):
+        """Airflow 3 renamed the template context key to triggering_asset_events;
+        the fragment must be built with the version-appropriate name (the DAG's
+        StrictUndefined default would otherwise fail the render)."""
+        import airflow
+        monkeypatch.setattr(airflow, "__version__", "3.0.2")
+        task = airflow_job.sl_transform(task_id=None, transform_name="d.t", transform_options=None)
+        assert "sl_options_from_events(triggering_asset_events, dag_run, 'd.t')" in task.bash_command
+        assert "triggering_dataset_events" not in task.bash_command
+
 
 # ------------------------------------------------------------------
 # sl_load — scheduled_date override and templatable event extra
