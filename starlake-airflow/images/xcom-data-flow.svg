@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 400" font-family="Inter, system-ui, sans-serif" font-size="12">
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#475569"/>
+    </marker>
+    <style>
+      .box { rx: 6; ry: 6; }
+      .label { font-weight: 600; fill: #1e293b; font-size: 12px; }
+      .detail { fill: #475569; font-size: 10.5px; }
+      .xcom { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.5; }
+      .macro { fill: #f0fdf4; stroke: #22c55e; stroke-width: 1.5; }
+      .mixin { fill: #fef3c7; stroke: #f59e0b; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <!-- start_op -->
+  <rect x="180" y="10" width="300" height="64" class="box xcom"/>
+  <text x="330" y="30" text-anchor="middle" class="label">start_op (ShortCircuitOperator)</text>
+  <text x="330" y="48" text-anchor="middle" class="detail">Pushes: data_interval_start = previous_dag_checked</text>
+  <text x="330" y="62" text-anchor="middle" class="detail">Pushes: data_interval_end = max_scheduled_date</text>
+
+  <line x1="330" y1="74" x2="330" y2="100" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- ts_as_datetime -->
+  <rect x="130" y="100" width="400" height="64" class="box macro"/>
+  <text x="330" y="120" text-anchor="middle" class="label">ts_as_datetime() — user_defined_macro</text>
+  <text x="330" y="136" text-anchor="middle" class="detail">Pulls data_interval_end from "start" task via XCom</text>
+  <text x="330" y="150" text-anchor="middle" class="detail">Falls back to Airflow's data_interval_end | ts</text>
+
+  <line x1="330" y1="164" x2="330" y2="190" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- sl_dates -->
+  <rect x="130" y="190" width="400" height="64" class="box macro"/>
+  <text x="330" y="210" text-anchor="middle" class="label">sl_dates() — user_defined_macro</text>
+  <text x="330" y="226" text-anchor="middle" class="detail">Pulls data_interval_start AND data_interval_end from "start" task</text>
+  <text x="330" y="240" text-anchor="middle" class="detail">Falls back to sl_cron_start_end_dates(cron_expr, start_time)</text>
+
+  <line x1="330" y1="254" x2="330" y2="280" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- pre_execute -->
+  <rect x="130" y="280" width="400" height="64" class="box mixin"/>
+  <text x="330" y="300" text-anchor="middle" class="label">StarlakeDatasetMixin.pre_execute()</text>
+  <text x="330" y="316" text-anchor="middle" class="detail">Updates outlet events with ts and scheduled_date</text>
+  <text x="330" y="330" text-anchor="middle" class="detail">Appends scheduled_dataset outlet for time-aware events</text>
+
+  <!-- Legend -->
+  <rect x="20" y="360" width="16" height="12" rx="2" fill="#eff6ff" stroke="#3b82f6" stroke-width="1"/>
+  <text x="42" y="370" class="detail">XCom</text>
+  <rect x="110" y="360" width="16" height="12" rx="2" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
+  <text x="132" y="370" class="detail">Jinja2 macro</text>
+  <rect x="230" y="360" width="16" height="12" rx="2" fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+  <text x="252" y="370" class="detail">Operator mixin</text>
+</svg>

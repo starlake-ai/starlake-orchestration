@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" font-family="Inter, system-ui, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#475569"/>
+    </marker>
+    <style>
+      .box { rx: 6; ry: 6; }
+      .label { font-weight: 600; fill: #1e293b; }
+      .sublabel { fill: #475569; font-size: 11px; }
+      .condition { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; }
+      .action { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.5; }
+      .main { fill: #fef3c7; stroke: #f59e0b; stroke-width: 2; }
+      .fallback { fill: #f0fdf4; stroke: #22c55e; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <!-- Entry -->
+  <rect x="240" y="10" width="240" height="44" class="box condition"/>
+  <text x="360" y="28" text-anchor="middle" class="label">start_op()</text>
+  <text x="360" y="44" text-anchor="middle" class="sublabel">task_id, scheduled, datasets...</text>
+
+  <!-- Branch lines -->
+  <line x1="300" y1="54" x2="120" y2="110" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="360" y1="54" x2="360" y2="110" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="420" y1="54" x2="600" y2="110" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Branch 1: Pre-2.10 -->
+  <rect x="10" y="110" width="220" height="80" class="box action"/>
+  <text x="120" y="132" text-anchor="middle" class="label" font-size="12">Pre-2.10.0</text>
+  <text x="120" y="148" text-anchor="middle" class="sublabel">not scheduled</text>
+  <text x="120" y="164" text-anchor="middle" class="sublabel">+ least_frequent_datasets</text>
+  <line x1="120" y1="190" x2="120" y2="230" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="10" y="230" width="220" height="50" class="box action"/>
+  <text x="120" y="252" text-anchor="middle" class="label" font-size="11">TaskGroup</text>
+  <text x="120" y="268" text-anchor="middle" class="sublabel">StarlakeEmptyOperator per dataset</text>
+
+  <!-- Branch 2: Main path -->
+  <rect x="250" y="110" width="220" height="80" class="box main"/>
+  <text x="360" y="132" text-anchor="middle" class="label" font-size="12">Airflow >= 2.10.0</text>
+  <text x="360" y="148" text-anchor="middle" class="sublabel">not scheduled</text>
+  <text x="360" y="164" text-anchor="middle" class="sublabel">MAIN PATH</text>
+  <line x1="360" y1="190" x2="360" y2="230" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="250" y="230" width="220" height="50" class="box main"/>
+  <text x="360" y="252" text-anchor="middle" class="label" font-size="11">ShortCircuitOperator</text>
+  <text x="360" y="268" text-anchor="middle" class="sublabel">python_callable=should_continue</text>
+
+  <!-- Branch 3: Fallback -->
+  <rect x="490" y="110" width="220" height="80" class="box fallback"/>
+  <text x="600" y="132" text-anchor="middle" class="label" font-size="12">Otherwise</text>
+  <text x="600" y="148" text-anchor="middle" class="sublabel">cron-scheduled</text>
+  <text x="600" y="164" text-anchor="middle" class="sublabel">or no datasets</text>
+  <line x1="600" y1="190" x2="600" y2="230" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="490" y="230" width="220" height="50" class="box fallback"/>
+  <text x="600" y="252" text-anchor="middle" class="label" font-size="11">parent.start_op()</text>
+  <text x="600" y="268" text-anchor="middle" class="sublabel">returns dummy_op</text>
+
+  <!-- Legend -->
+  <rect x="250" y="310" width="220" height="60" rx="4" fill="#fff8e1" stroke="#f59e0b" stroke-width="1" stroke-dasharray="4"/>
+  <text x="360" y="332" text-anchor="middle" class="sublabel" font-size="11" fill="#92400e">Highlighted path requires refactoring</text>
+  <text x="360" y="350" text-anchor="middle" class="sublabel" font-size="11" fill="#92400e">for Airflow 3 (DB access forbidden)</text>
+</svg>

@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 340" font-family="Inter, system-ui, sans-serif" font-size="12">
+  <defs>
+    <marker id="c" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#475569"/>
+    </marker>
+    <style>
+      .box { rx: 6; ry: 6; }
+      .label { font-weight: 600; fill: #1e293b; font-size: 12px; }
+      .detail { fill: #475569; font-size: 10.5px; }
+      .pipe { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.5; }
+      .def { fill: #f3e8ff; stroke: #9333ea; stroke-width: 1.5; }
+      .sensor { fill: #fef3c7; stroke: #f59e0b; stroke-width: 1.5; }
+      .sched { fill: #f0fdf4; stroke: #22c55e; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <text x="350" y="20" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">DagsterOrchestration.__exit__(): Definitions Assembly</text>
+
+  <!-- Pipelines -->
+  <rect x="20" y="44" width="200" height="80" class="box pipe"/>
+  <text x="120" y="64" text-anchor="middle" class="label">Pipeline with datasets</text>
+  <text x="40" y="82" class="detail">datasets = [StarlakeDataset, ...]</text>
+  <text x="40" y="98" class="detail">cron = None</text>
+  <text x="40" y="114" class="detail">→ sensor-triggered</text>
+
+  <rect x="20" y="140" width="200" height="60" class="box pipe"/>
+  <text x="120" y="160" text-anchor="middle" class="label">Pipeline with cron</text>
+  <text x="40" y="178" class="detail">cron = "0 * * * *"</text>
+  <text x="40" y="192" class="detail">→ schedule-triggered</text>
+
+  <!-- Arrows -->
+  <line x1="220" y1="84" x2="280" y2="84" stroke="#475569" stroke-width="1.5" marker-end="url(#c)"/>
+  <line x1="220" y1="170" x2="280" y2="170" stroke="#475569" stroke-width="1.5" marker-end="url(#c)"/>
+
+  <!-- Sensor -->
+  <rect x="280" y="44" width="240" height="80" class="box sensor"/>
+  <text x="400" y="64" text-anchor="middle" class="label">MultiAssetSensorDefinition</text>
+  <text x="300" y="82" class="detail">monitored_assets = [AssetKey(uri), ...]</text>
+  <text x="300" y="98" class="detail">asset_materialization_fn =</text>
+  <text x="310" y="112" class="detail">multi_asset_sensor_with_skip_reason</text>
+
+  <!-- Schedule -->
+  <rect x="280" y="140" width="240" height="60" class="box sched"/>
+  <text x="400" y="160" text-anchor="middle" class="label">ScheduleDefinition</text>
+  <text x="300" y="178" class="detail">cron_schedule, job_name</text>
+  <text x="300" y="192" class="detail">default_status = RUNNING</text>
+
+  <!-- Arrows to Definitions -->
+  <line x1="520" y1="84" x2="560" y2="230" stroke="#475569" stroke-width="1.5" marker-end="url(#c)"/>
+  <line x1="520" y1="170" x2="560" y2="240" stroke="#475569" stroke-width="1.5" marker-end="url(#c)"/>
+
+  <!-- Jobs arrow -->
+  <rect x="20" y="220" width="200" height="40" class="box pipe"/>
+  <text x="120" y="244" text-anchor="middle" class="label">pipeline.dag (JobDefinition)</text>
+  <line x1="220" y1="240" x2="560" y2="250" stroke="#475569" stroke-width="1.5" marker-end="url(#c)"/>
+
+  <!-- Assets arrow -->
+  <rect x="20" y="276" width="200" height="40" class="box pipe"/>
+  <text x="120" y="300" text-anchor="middle" class="label">pipeline.assets → AssetSpec</text>
+  <line x1="220" y1="296" x2="560" y2="260" stroke="#475569" stroke-width="1.5" marker-end="url(#c)"/>
+
+  <!-- Definitions -->
+  <rect x="560" y="210" width="120" height="80" class="box def"/>
+  <text x="620" y="234" text-anchor="middle" class="label">Definitions</text>
+  <text x="580" y="252" class="detail">assets</text>
+  <text x="580" y="266" class="detail">jobs</text>
+  <text x="580" y="280" class="detail">sensors</text>
+
+  <!-- setattr -->
+  <line x1="620" y1="290" x2="620" y2="316" stroke="#9333ea" stroke-width="2" marker-end="url(#c)"/>
+  <rect x="540" y="316" width="160" height="20" rx="4" fill="#f3e8ff" stroke="#9333ea" stroke-width="1"/>
+  <text x="620" y="330" text-anchor="middle" class="detail" fill="#7c3aed">setattr(module, 'defs', defs)</text>
+</svg>

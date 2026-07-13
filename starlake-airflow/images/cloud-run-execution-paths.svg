@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 340" font-family="Inter, system-ui, sans-serif" font-size="12">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#475569"/>
+    </marker>
+    <style>
+      .box { rx: 6; ry: 6; }
+      .label { font-weight: 600; fill: #1e293b; font-size: 12px; }
+      .detail { fill: #475569; font-size: 10.5px; }
+      .gcloud { fill: #e0f2fe; stroke: #0284c7; stroke-width: 1.5; }
+      .native { fill: #f3e8ff; stroke: #9333ea; stroke-width: 1.5; }
+      .header { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <!-- Headers -->
+  <rect x="10" y="10" width="340" height="30" class="box header"/>
+  <text x="180" y="30" text-anchor="middle" class="label">use_gcloud = True</text>
+  <rect x="370" y="10" width="340" height="30" class="box header"/>
+  <text x="540" y="30" text-anchor="middle" class="label">use_gcloud = False</text>
+
+  <!-- Row labels -->
+  <text x="5" y="90" class="label" transform="rotate(-90, 5, 90)" font-size="11" fill="#64748b">Async</text>
+  <text x="5" y="260" class="label" transform="rotate(-90, 5, 260)" font-size="11" fill="#64748b">Sync</text>
+
+  <!-- Async + gcloud -->
+  <rect x="20" y="50" width="320" height="140" class="box gcloud"/>
+  <text x="180" y="72" text-anchor="middle" class="label">TaskGroup</text>
+  <text x="40" y="92" class="detail">1. BashOperator (gcloud --async)</text>
+  <text x="40" y="108" class="detail">2. GCloudRunJobCompletionSensor</text>
+  <text x="40" y="128" class="detail" font-style="italic">if retry_on_failure=False:</text>
+  <text x="40" y="144" class="detail">3. StarlakeBashOperator (status check)</text>
+  <text x="50" y="160" class="detail" fill="#94a3b8">queries failedCount/cancelledCounts</text>
+  <text x="40" y="178" class="detail" font-style="italic">Chain: job >> sensor [>> status]</text>
+
+  <!-- Async + native -->
+  <rect x="380" y="50" width="320" height="140" class="box native"/>
+  <text x="540" y="72" text-anchor="middle" class="label">TaskGroup</text>
+  <text x="400" y="92" class="detail">1. CloudRunJobOperator (ASYNC mode)</text>
+  <text x="400" y="108" class="detail">2. CloudRunJobCompletionSensor</text>
+  <text x="410" y="128" class="detail" fill="#94a3b8">polls via CloudRunHook.get_operation()</text>
+  <text x="400" y="152" class="detail" font-style="italic">Chain: job >> sensor</text>
+
+  <!-- Sync + gcloud -->
+  <rect x="20" y="210" width="320" height="90" class="box gcloud"/>
+  <text x="180" y="232" text-anchor="middle" class="label">Single operator</text>
+  <text x="40" y="252" class="detail">StarlakeBashOperator</text>
+  <text x="40" y="268" class="detail">(gcloud --wait)</text>
+  <text x="40" y="284" class="detail" fill="#94a3b8">do_xcom_push=True forced</text>
+
+  <!-- Sync + native -->
+  <rect x="380" y="210" width="320" height="90" class="box native"/>
+  <text x="540" y="232" text-anchor="middle" class="label">Single operator</text>
+  <text x="400" y="252" class="detail">CloudRunJobOperator (SYNC mode)</text>
+  <text x="400" y="268" class="detail" fill="#94a3b8">calls parent execute(), returns True/False</text>
+
+  <!-- Dividers -->
+  <line x1="360" y1="10" x2="360" y2="310" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4"/>
+  <line x1="10" y1="200" x2="710" y2="200" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4"/>
+
+  <!-- Legend -->
+  <rect x="180" y="314" width="16" height="12" rx="2" fill="#e0f2fe" stroke="#0284c7" stroke-width="1"/>
+  <text x="202" y="324" class="detail">gcloud CLI path</text>
+  <rect x="350" y="314" width="16" height="12" rx="2" fill="#f3e8ff" stroke="#9333ea" stroke-width="1"/>
+  <text x="372" y="324" class="detail">Native Airflow provider path</text>
+</svg>
