@@ -246,6 +246,45 @@ class StarlakeAirflowApiClient(BaseHook):
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return self._request("GET", path, params=params)
 
+    def _get_paged(
+            self,
+            path: str,
+            collection_key: str,
+            params: Optional[Dict[str, Any]] = None,
+            limit: Optional[int] = None,
+    ) -> List[DotDict]:
+        """GET a collection endpoint page by page.
+
+        The REST APIs clamp page sizes to ``[api] maximum_page_limit`` (default
+        100), so a single call silently truncates large collections. Pages are
+        fetched until ``total_entries`` (or ``limit``, when given) is reached.
+        """
+        params = dict(params or {})
+        params.pop("limit", None)
+        offset = int(params.pop("offset", 0) or 0)
+        items: List[DotDict] = []
+        while True:
+            page_params = dict(params)
+            page_params["offset"] = offset
+            page_params["limit"] = min(100, limit - len(items)) if limit else 100
+            resp = self._get(path, params=page_params)
+            batch = (resp.get(collection_key) if resp else None) or []
+            items.extend(batch)
+            if not batch:
+                break
+            if limit is not None and len(items) >= limit:
+                items = items[:limit]
+                break
+            total = resp.get("total_entries")
+            if total is not None:
+                if offset + len(batch) >= int(total):
+                    break
+            elif len(batch) < page_params["limit"]:
+                # no total_entries: a short page is the only end signal
+                break
+            offset += len(batch)
+        return items
+
     # -----------------------------------------------------------------------
     # Airflow 2.x metadata database access
     # -----------------------------------------------------------------------
@@ -381,12 +420,106 @@ class StarlakeAirflowApiClient(BaseHook):
                 query = query.filter(DagRun.data_interval_end > _as_datetime(params["data_interval_end_gt"]))
             if params.get("data_interval_end_gte") is not None:
                 query = query.filter(DagRun.data_interval_end >= _as_datetime(params["data_interval_end_gte"]))
+            if params.get("data_interval_end_lt") is not None:
+                query = query.filter(DagRun.data_interval_end < _as_datetime(params["data_interval_end_lt"]))
             if params.get("data_interval_end_lte") is not None:
                 query = query.filter(DagRun.data_interval_end <= _as_datetime(params["data_interval_end_lte"]))
             query = self._order_query(query, DagRun, params.get("order_by"))
             if params.get("limit"):
                 query = query.limit(int(params["limit"]))
             return [self._dag_run_to_dotdict(row) for row in query.all()]
+
+    def _find_dataset_events_db(
+            self,
+            uri: str,
+            timestamp_lte: Any,
+            data_interval_end_gt: Any = None,
+            data_interval_end_gte: Any = None,
+            data_interval_end_lte: Any = None,
+    ) -> List[DotDict]:
+        """Single joined query: events for ``uri`` whose producing DagRun's
+        data_interval_end falls in the window — no result limit needed, the
+        window filter is inside the join."""
+        from sqlalchemy import and_, asc
+        from sqlalchemy.orm import joinedload
+
+        from airflow.models import DagRun
+        from airflow.models.dataset import DatasetEvent, DatasetModel
+        from airflow.utils.session import create_session
+        with create_session() as session:
+            query = (
+                session.query(DatasetEvent, DagRun)
+                .options(joinedload(DatasetEvent.dataset))
+                .join(DagRun, and_(
+                    DatasetEvent.source_dag_id == DagRun.dag_id,
+                    DatasetEvent.source_run_id == DagRun.run_id,
+                ))
+                .join(DatasetModel, DatasetEvent.dataset_id == DatasetModel.id)
+                .filter(
+                    DatasetModel.uri == uri,
+                    DatasetEvent.timestamp <= _as_datetime(timestamp_lte),
+                )
+            )
+            if data_interval_end_gt is not None:
+                query = query.filter(DagRun.data_interval_end > _as_datetime(data_interval_end_gt))
+            if data_interval_end_gte is not None:
+                query = query.filter(DagRun.data_interval_end >= _as_datetime(data_interval_end_gte))
+            if data_interval_end_lte is not None:
+                query = query.filter(DagRun.data_interval_end <= _as_datetime(data_interval_end_lte))
+            events: List[DotDict] = []
+            for event, run in query.order_by(asc(DagRun.data_interval_end)).all():
+                normalized = self._event_to_dotdict(event)
+                dataset = getattr(event, "dataset", None)
+                normalized["dataset"] = DotDict({
+                    "id": dataset.id,
+                    "uri": dataset.uri,
+                    "extra": to_dotdict(dataset.extra) if dataset.extra else {},
+                }) if dataset is not None else DotDict({"extra": {}})
+                normalized["data_interval_end"] = self._iso(run.data_interval_end)
+                events.append(normalized)
+            return events
+
+    def _find_previous_dag_runs_db(
+            self,
+            dag_id: str,
+            scheduled_date: Any,
+            leaf_task_ids: List[str],
+            at_scheduled_date: bool = False,
+    ) -> List[DotDict]:
+        """Single query: successful DagRuns before (or at) the scheduled date,
+        minus runs with SKIPPED leaf task instances (anti-join subquery)."""
+        from sqlalchemy import and_
+        from sqlalchemy.orm import aliased
+
+        from airflow.models import DagRun, TaskInstance
+        from airflow.utils.session import create_session
+        from airflow.utils.state import State
+        scheduled = _as_datetime(scheduled_date)
+        with create_session() as session:
+            if at_scheduled_date:
+                date_filter = DagRun.data_interval_end <= scheduled
+            else:
+                date_filter = DagRun.data_interval_end < scheduled
+            query = (
+                session.query(DagRun)
+                .filter(DagRun.dag_id == dag_id, DagRun.state == State.SUCCESS, date_filter)
+                .order_by(DagRun.data_interval_end.desc(), DagRun.start_date.desc())
+            )
+            if leaf_task_ids:
+                TI = aliased(TaskInstance)
+                skipped_query = (
+                    session.query(DagRun.id)
+                    .join(TI, and_(
+                        DagRun.dag_id == TI.dag_id,
+                        DagRun.run_id == TI.run_id,
+                        TI.task_id.in_(leaf_task_ids),
+                        TI.state == State.SKIPPED,
+                    ))
+                    .filter(DagRun.dag_id == dag_id, DagRun.state == State.SUCCESS, date_filter)
+                    .distinct()
+                )
+                query = query.filter(~DagRun.id.in_(skipped_query))
+            return [self._dag_run_to_dotdict(run) for run in query.all()]
 
     def _list_task_instances_db(self, dag_id: str, dag_run_id: Optional[str] = None, **params) -> List[DotDict]:
         from airflow.models import TaskInstance
@@ -443,23 +576,57 @@ class StarlakeAirflowApiClient(BaseHook):
                 return self._list_dag_runs_db(dag_id, **params)
             except Exception as e:
                 log.warning("Metadata database query failed (%s); falling back to the REST API", e)
-        order_by = self._first_order_by(params.pop("order_by", None))
+        order_by = params.pop("order_by", None)
         if order_by is not None:
-            params["order_by"] = order_by
-        di_gt = di_gte = di_lte = ed_lt = None
-        if not self._supports_assets:
+            fields = [str(f) for f in (order_by if isinstance(order_by, (list, tuple)) else [order_by])]
+            if self._supports_assets:
+                # v2 supports multi-criteria sort; data_interval_end and
+                # execution_date are not sortable and map to their Airflow 3
+                # equivalents run_after and logical_date
+                translation = {"data_interval_end": "run_after", "execution_date": "logical_date"}
+                params["order_by"] = [
+                    ("-" if field.startswith("-") else "") + translation.get(field.lstrip("-"), field.lstrip("-"))
+                    for field in fields
+                ]
+            else:
+                # v1 supports a single sort field and cannot sort by
+                # data_interval_end: execution_date is its schedule-equivalent proxy
+                field = fields[0]
+                name = field.lstrip("-")
+                if name == "data_interval_end":
+                    name = "execution_date"
+                params["order_by"] = ("-" if field.startswith("-") else "") + name
+        di_gt = di_gte = di_lt = di_lte = ed_lt = None
+        if self._supports_assets:
+            # Airflow 3.x → the v2 API has no data_interval_end filters:
+            # run_after is their documented equivalent (for scheduled runs it
+            # equals the end of the data interval)
+            for suffix in ("gt", "gte", "lt", "lte"):
+                value = params.pop(f"data_interval_end_{suffix}", None)
+                if value is not None:
+                    params[f"run_after_{suffix}"] = value
+        else:
+            # Airflow 2.x → the v1 API rejects unknown query parameters and has
+            # neither data_interval_end filters nor end_date_lt: applied client-side
             di_gt = params.pop("data_interval_end_gt", None)
             di_gte = params.pop("data_interval_end_gte", None)
+            di_lt = params.pop("data_interval_end_lt", None)
             di_lte = params.pop("data_interval_end_lte", None)
             ed_lt = params.pop("end_date_lt", None)
-        resp = self._get(f"dags/{dag_id}/dagRuns", params=params)
-        runs = [self._alias_run_ids(r) for r in ((resp.dag_runs if resp else None) or [])]
+        limit = params.pop("limit", None)
+        runs = [
+            self._alias_run_ids(r)
+            for r in self._get_paged(f"dags/{dag_id}/dagRuns", "dag_runs", params=params, limit=int(limit) if limit else None)
+        ]
         if di_gt is not None:
             gt = _as_datetime(di_gt)
             runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) > gt]
         if di_gte is not None:
             gte = _as_datetime(di_gte)
             runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) >= gte]
+        if di_lt is not None:
+            lt = _as_datetime(di_lt)
+            runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) < lt]
         if di_lte is not None:
             lte = _as_datetime(di_lte)
             runs = [r for r in runs if r.data_interval_end and _as_datetime(r.data_interval_end) <= lte]
@@ -482,9 +649,14 @@ class StarlakeAirflowApiClient(BaseHook):
             except Exception as e:
                 log.warning("Metadata database query failed (%s); falling back to the REST API", e)
         params = self._rest_task_instance_params(params)
-        task_id = params.pop("task_id", None)
-        resp = self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances", params=params)
-        instances = (resp.task_instances if resp else None) or []
+        task_id = params.pop("task_id", None) if not self._supports_assets else None
+        limit = params.pop("limit", None)
+        instances = self._get_paged(
+            f"dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances",
+            "task_instances",
+            params=params,
+            limit=int(limit) if limit else None,
+        )
         if task_id is not None:
             instances = [ti for ti in instances if ti.task_id == task_id]
         return instances
@@ -499,9 +671,14 @@ class StarlakeAirflowApiClient(BaseHook):
             except Exception as e:
                 log.warning("Metadata database query failed (%s); falling back to the REST API", e)
         params = self._rest_task_instance_params(params)
-        task_id = params.pop("task_id", None)
-        resp = self._get(f"dags/{dag_id}/dagRuns/~/taskInstances", params=params)
-        instances = (resp.task_instances if resp else None) or []
+        task_id = params.pop("task_id", None) if not self._supports_assets else None
+        limit = params.pop("limit", None)
+        instances = self._get_paged(
+            f"dags/{dag_id}/dagRuns/~/taskInstances",
+            "task_instances",
+            params=params,
+            limit=int(limit) if limit else None,
+        )
         if task_id is not None:
             instances = [ti for ti in instances if ti.task_id == task_id]
         return instances
@@ -561,11 +738,11 @@ class StarlakeAirflowApiClient(BaseHook):
         """
         params = dict(params)
         if self._supports_assets:
-            # Airflow 3.x → assets
+            # Airflow 3.x → assets (timestamp filters supported natively)
             if "dataset_id" in params:
                 params["asset_id"] = params.pop("dataset_id")
-            resp = self._get("assets/events", params=params)
-            return ((resp.asset_events if resp else None) or [])
+            limit = params.pop("limit", None)
+            return self._get_paged("assets/events", "asset_events", params=params, limit=int(limit) if limit else None)
 
         if self._supports_datasets:
             # Airflow 2.4+ → datasets
@@ -578,8 +755,8 @@ class StarlakeAirflowApiClient(BaseHook):
                     log.warning("Metadata database query failed (%s); falling back to the REST API", e)
             timestamp_gte = params.pop("timestamp_gte", None)
             timestamp_lte = params.pop("timestamp_lte", None)
-            resp = self._get("datasets/events", params=params)
-            events = (resp.dataset_events if resp else None) or []
+            limit = params.pop("limit", None)
+            events = self._get_paged("datasets/events", "dataset_events", params=params, limit=int(limit) if limit else None)
             if timestamp_gte is not None:
                 gte = _as_datetime(timestamp_gte)
                 events = [e for e in events if e.timestamp and _as_datetime(e.timestamp) >= gte]
@@ -589,3 +766,138 @@ class StarlakeAirflowApiClient(BaseHook):
             return events
 
         raise RuntimeError("Datasets are not supported on this Airflow version.")
+
+    # -----------------------------------------------------------------------
+    # Joined lookups (window-filtered events, previous successful runs)
+    # -----------------------------------------------------------------------
+
+    def find_dataset_events(
+            self,
+            uri: str,
+            timestamp_lte: Any,
+            data_interval_end_gt: Any = None,
+            data_interval_end_gte: Any = None,
+            data_interval_end_lte: Any = None,
+    ) -> List[DotDict]:
+        """
+        Events for ``uri`` whose PRODUCING DagRun's data_interval_end falls in
+        the given window, sorted by that data_interval_end ascending, each with
+        the ``dataset`` attached and the producing run's ``data_interval_end`` set.
+
+        The window applies to the producing run, not to event recency, so
+        arbitrarily old windows (replay/backfill) are fully supported. On
+        Airflow 2 the metadata database executes this as a single joined query;
+        otherwise it is composed from the paginated REST primitives.
+        """
+        if self._supports_datasets and self.db_available:
+            try:
+                return self._find_dataset_events_db(
+                    uri,
+                    timestamp_lte,
+                    data_interval_end_gt=data_interval_end_gt,
+                    data_interval_end_gte=data_interval_end_gte,
+                    data_interval_end_lte=data_interval_end_lte,
+                )
+            except Exception as e:
+                log.warning("Metadata database query failed (%s); falling back to the REST API", e)
+        return self._find_dataset_events_rest(
+            uri,
+            timestamp_lte,
+            data_interval_end_gt=data_interval_end_gt,
+            data_interval_end_gte=data_interval_end_gte,
+            data_interval_end_lte=data_interval_end_lte,
+        )
+
+    def _find_dataset_events_rest(
+            self,
+            uri: str,
+            timestamp_lte: Any,
+            data_interval_end_gt: Any = None,
+            data_interval_end_gte: Any = None,
+            data_interval_end_lte: Any = None,
+    ) -> List[DotDict]:
+        dataset = self.get_dataset_by_uri(uri)
+        if not dataset:
+            return []
+        events = self.list_events(
+            asset_id=dataset.id,
+            timestamp_lte=self._iso(timestamp_lte),
+            order_by="timestamp",
+        )
+        producing_dag_ids = {event.source_dag_id for event in events if event.source_dag_id}
+        window = {
+            key: self._iso(value)
+            for key, value in {
+                "data_interval_end_gt": data_interval_end_gt,
+                "data_interval_end_gte": data_interval_end_gte,
+                "data_interval_end_lte": data_interval_end_lte,
+            }.items()
+            if value is not None
+        }
+        run_index: Dict[Any, DotDict] = {}
+        for producing_dag_id in producing_dag_ids:
+            # no order_by: data_interval_end is not an allowed REST sort field,
+            # the final client-side sort provides the ordering
+            for run in self.list_dag_runs(producing_dag_id, **window):
+                run_index[(run.dag_id, run.run_id)] = run
+        results: List[DotDict] = []
+        for event in events:
+            run = run_index.get((event.source_dag_id, event.source_run_id))
+            if not run:
+                continue
+            event["dataset"] = dataset
+            event["data_interval_end"] = run.data_interval_end
+            results.append(event)
+        results.sort(key=lambda event: event["data_interval_end"] or "")
+        return results
+
+    def find_previous_dag_runs(
+            self,
+            dag_id: str,
+            scheduled_date: Any,
+            leaf_task_ids: List[str],
+            at_scheduled_date: bool = False,
+    ) -> List[DotDict]:
+        """
+        Successful DagRuns of ``dag_id`` with data_interval_end before (or at,
+        when ``at_scheduled_date``) the scheduled date, excluding runs whose
+        leaf task instances were SKIPPED, sorted by (data_interval_end,
+        start_date) descending.
+
+        On Airflow 2 the metadata database executes this as a single query with
+        an anti-join; otherwise it is composed from the paginated REST primitives.
+        """
+        if self.db_available:
+            try:
+                return self._find_previous_dag_runs_db(
+                    dag_id, scheduled_date, leaf_task_ids, at_scheduled_date=at_scheduled_date
+                )
+            except Exception as e:
+                log.warning("Metadata database query failed (%s); falling back to the REST API", e)
+        return self._find_previous_dag_runs_rest(
+            dag_id, scheduled_date, leaf_task_ids, at_scheduled_date=at_scheduled_date
+        )
+
+    def _find_previous_dag_runs_rest(
+            self,
+            dag_id: str,
+            scheduled_date: Any,
+            leaf_task_ids: List[str],
+            at_scheduled_date: bool = False,
+    ) -> List[DotDict]:
+        window_key = "data_interval_end_lte" if at_scheduled_date else "data_interval_end_lt"
+        runs = self.list_dag_runs(
+            dag_id,
+            state="success",
+            order_by=["-data_interval_end", "-start_date"],
+            **{window_key: self._iso(scheduled_date)},
+        )
+        if not runs:
+            return []
+        if leaf_task_ids:
+            leaf_ids = set(leaf_task_ids)
+            instances = self.list_dag_task_instances(dag_id, state="skipped")
+            skipped_run_ids = {ti.dag_run_id for ti in instances if ti.task_id in leaf_ids}
+            runs = [run for run in runs if run.run_id not in skipped_run_ids]
+        runs.sort(key=lambda run: (run.data_interval_end or "", run.start_date or ""), reverse=True)
+        return runs

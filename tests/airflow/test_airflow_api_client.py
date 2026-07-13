@@ -274,7 +274,8 @@ def test_list_dag_runs_filters_data_interval_end_client_side_on_airflow_2(make_c
     # the v1 API rejects unknown query parameters: filters must not be sent
     assert "data_interval_end_gt" not in params
     assert "data_interval_end_lte" not in params
-    assert params["limit"] == 1000
+    # requests are paged: the page size is capped at the API maximum (100)
+    assert params["limit"] == 100
 
 
 def test_list_dag_runs_passes_data_interval_end_filters_through_on_airflow_3(make_client):
@@ -288,10 +289,19 @@ def test_list_dag_runs_passes_data_interval_end_filters_through_on_airflow_3(mak
         },
     )
 
-    runs = client.list_dag_runs("my_dag", data_interval_end_lte="2026-07-02T00:00:00+00:00")
+    runs = client.list_dag_runs(
+        "my_dag",
+        data_interval_end_lte="2026-07-02T00:00:00+00:00",
+        order_by=["-data_interval_end", "-start_date"],
+    )
 
     assert [run.run_id for run in runs] == ["a"]
-    assert client.calls[0]["params"]["data_interval_end_lte"] == "2026-07-02T00:00:00+00:00"
+    params = client.calls[0]["params"]
+    # the v2 API has no data_interval_end filter/sort: run_after is its
+    # documented Airflow 3 equivalent (multi-criteria sort supported)
+    assert params["run_after_lte"] == "2026-07-02T00:00:00+00:00"
+    assert "data_interval_end_lte" not in params
+    assert params["order_by"] == ["-run_after", "-start_date"]
 
 
 def test_list_dag_runs_aliases_v1_dag_run_id(make_client):
@@ -307,8 +317,9 @@ def test_list_dag_runs_aliases_v1_dag_run_id(make_client):
     )
     runs = client.list_dag_runs("my_dag", order_by=["-data_interval_end", "-start_date"])
     assert runs[0].run_id == "a" and runs[0].dag_run_id == "a"
-    # order_by lists are reduced to the first field for the REST APIs
-    assert client.calls[0]["params"]["order_by"] == "-data_interval_end"
+    # v1 accepts a single sort field and cannot sort by data_interval_end:
+    # execution_date is its schedule-equivalent proxy
+    assert client.calls[0]["params"]["order_by"] == "-execution_date"
 
 
 def test_list_task_instances_v1_drops_order_by_and_filters_task_id(make_client):
@@ -389,6 +400,66 @@ def test_db_available_is_false_on_airflow_3(make_client):
     assert client.db_available is False
 
 
+def test_rest_requests_paginate_until_total_entries(make_client, monkeypatch):
+    """A collection larger than the API page cap is fetched page by page."""
+    client = make_client("2.10.5")
+    pages = {
+        0: [{"dag_run_id": f"run_{i}"} for i in range(100)],
+        100: [{"dag_run_id": f"run_{i}"} for i in range(100, 150)],
+    }
+
+    def paged_request(method, url, params=None, json=None, timeout=None):
+        batch = pages.get(params["offset"], [])
+        return FakeResponse(200, {"dag_runs": batch, "total_entries": 150})
+
+    monkeypatch.setattr(client.session, "request", paged_request)
+
+    runs = client.list_dag_runs("my_dag")
+
+    assert len(runs) == 150
+    assert runs[0].run_id == "run_0" and runs[-1].run_id == "run_149"
+
+
+def test_find_dataset_events_rest_composition_on_airflow_3(make_client):
+    """Events are crossed with their producing runs and sorted by the producing
+    run's data_interval_end; the dataset is attached to each event."""
+    uri = "s3://bucket/table"
+    client = make_client(
+        "3.0.2",
+        responses={
+            "/assets/events": {
+                "asset_events": [
+                    {"id": 1, "source_dag_id": "producer", "source_run_id": "new", "timestamp": "2026-07-02T00:00:00+00:00"},
+                    {"id": 2, "source_dag_id": "producer", "source_run_id": "old", "timestamp": "2026-07-01T00:00:00+00:00"},
+                    {"id": 3, "source_dag_id": "producer", "source_run_id": "outside", "timestamp": "2026-06-01T00:00:00+00:00"},
+                ],
+                "total_entries": 3,
+            },
+            "/assets": {"assets": [{"id": 7, "uri": uri}], "total_entries": 1},
+            "/dagRuns": {
+                "dag_runs": [
+                    {"dag_id": "producer", "run_id": "old", "data_interval_end": "2026-07-01T00:00:00+00:00"},
+                    {"dag_id": "producer", "run_id": "new", "data_interval_end": "2026-07-02T00:00:00+00:00"},
+                ],
+                "total_entries": 2,
+            },
+        },
+    )
+
+    events = client.find_dataset_events(
+        uri,
+        "2026-07-03T00:00:00+00:00",
+        data_interval_end_gt="2026-06-30T00:00:00+00:00",
+        data_interval_end_lte="2026-07-02T00:00:00+00:00",
+    )
+
+    # 'outside' has no producing run in the window; the rest sorted by the
+    # producing run's data_interval_end ascending
+    assert [event.id for event in events] == [2, 1]
+    assert all(event.dataset.id == 7 for event in events)
+    assert events[0].data_interval_end == "2026-07-01T00:00:00+00:00"
+
+
 # ---------------------------------------------------------------------------
 # Database transport against a real (isolated) sqlite metadata database
 # ---------------------------------------------------------------------------
@@ -406,63 +477,82 @@ class TestDatabaseTransport:
         previous = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN")
         os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"] = f"sqlite:///{db_dir}/airflow.db"
         from airflow import settings
-        settings.configure_vars()
-        settings.configure_orm()
-        from airflow.utils.db import initdb
-        initdb(load_connections=False)
+        try:
+            settings.configure_vars()
+            settings.configure_orm()
+            from airflow.utils.db import initdb
+            initdb(load_connections=False)
 
-        from airflow.models import DagRun
-        from airflow.models.dataset import DatasetEvent, DatasetModel
-        from airflow.utils.session import create_session
-        from airflow.utils.state import DagRunState
-        from airflow.utils.types import DagRunType
+            from airflow.models import DagRun, TaskInstance
+            from airflow.models.dataset import DatasetEvent, DatasetModel
+            from airflow.utils.session import create_session
+            from airflow.utils.state import DagRunState
+            from airflow.utils.types import DagRunType
 
-        base = datetime(2026, 7, 1, tzinfo=timezone.utc)
-        with create_session() as session:
-            dataset = DatasetModel(uri="s3://bucket/table")
-            session.add(dataset)
-            session.flush()
-            dataset_id = dataset.id
-            for i in range(3):
-                event = DatasetEvent(
-                    dataset_id=dataset_id,
-                    extra={},
-                    source_dag_id="producer",
-                    source_run_id=f"run_{i}",
-                    source_task_id="task",
-                    source_map_index=-1,
+            base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+            with create_session() as session:
+                dataset = DatasetModel(uri="s3://bucket/table")
+                session.add(dataset)
+                session.flush()
+                dataset_id = dataset.id
+                for i in range(3):
+                    event = DatasetEvent(
+                        dataset_id=dataset_id,
+                        extra={},
+                        source_dag_id="producer",
+                        source_run_id=f"run_{i}",
+                        source_task_id="task",
+                        source_map_index=-1,
+                    )
+                    event.timestamp = base + timedelta(days=i)
+                    session.add(event)
+                for i in range(3):
+                    run = DagRun(
+                        dag_id="producer",
+                        run_id=f"run_{i}",
+                        execution_date=base + timedelta(days=i),
+                        start_date=base + timedelta(days=i),
+                        data_interval=(base + timedelta(days=i - 1), base + timedelta(days=i)),
+                        run_type=DagRunType.MANUAL,
+                        state=DagRunState.SUCCESS,
+                    )
+                    run.end_date = base + timedelta(days=i, hours=1)
+                    session.add(run)
+                # the raw insert below is a Core statement and does not autoflush
+                # the pending DagRun rows its foreign key points to
+                session.flush()
+                # a SKIPPED leaf task instance on run_2, for the anti-join query
+                session.execute(
+                    TaskInstance.__table__.insert().values(
+                        dag_id="producer",
+                        task_id="leaf",
+                        run_id="run_2",
+                        map_index=-1,
+                        state="skipped",
+                        try_number=0,
+                        max_tries=-1,
+                        pool="default_pool",
+                        pool_slots=1,
+                        priority_weight=1,
+                    )
                 )
-                event.timestamp = base + timedelta(days=i)
-                session.add(event)
-            for i in range(3):
-                run = DagRun(
-                    dag_id="producer",
-                    run_id=f"run_{i}",
-                    execution_date=base + timedelta(days=i),
-                    start_date=base + timedelta(days=i),
-                    data_interval=(base + timedelta(days=i - 1), base + timedelta(days=i)),
-                    run_type=DagRunType.MANUAL,
-                    state=DagRunState.SUCCESS,
-                )
-                run.end_date = base + timedelta(days=i, hours=1)
-                session.add(run)
 
-        client = StarlakeAirflowApiClient()
+            client = StarlakeAirflowApiClient()
 
-        def no_http(*args, **kwargs):
-            raise AssertionError("HTTP must not be used when the database is available")
+            def no_http(*args, **kwargs):
+                raise AssertionError("HTTP must not be used when the database is available")
 
-        client.session.request = no_http
-        client.base = base
-        client.dataset_id = dataset_id
-        yield client
-
-        if previous is None:
-            os.environ.pop("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", None)
-        else:
-            os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"] = previous
-        settings.configure_vars()
-        settings.configure_orm()
+            client.session.request = no_http
+            client.base = base
+            client.dataset_id = dataset_id
+            yield client
+        finally:
+            if previous is None:
+                os.environ.pop("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", None)
+            else:
+                os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"] = previous
+            settings.configure_vars()
+            settings.configure_orm()
 
     def test_database_is_probed_available(self, db_client):
         assert db_client.db_available is True
@@ -508,3 +598,48 @@ class TestDatabaseTransport:
             end_date_lt=(db_client.base + timedelta(days=1)).isoformat(),
         )
         assert [run.run_id for run in runs] == ["run_0"]
+
+    def test_find_dataset_events_joined_window(self, db_client):
+        """The window filter applies to the producing run inside the join."""
+        from datetime import timedelta
+        events = db_client.find_dataset_events(
+            "s3://bucket/table",
+            db_client.base + timedelta(days=10),
+            data_interval_end_gt=db_client.base.isoformat(),
+            data_interval_end_lte=(db_client.base + timedelta(days=2)).isoformat(),
+        )
+        assert [event.source_run_id for event in events] == ["run_1", "run_2"]
+        assert all(event.dataset.uri == "s3://bucket/table" for event in events)
+        assert all(isinstance(event.data_interval_end, str) for event in events)
+
+    def test_find_dataset_events_replay_past_window(self, db_client):
+        """Replaying an arbitrarily old window finds its events regardless of recency."""
+        from datetime import timedelta
+        events = db_client.find_dataset_events(
+            "s3://bucket/table",
+            db_client.base + timedelta(days=10),
+            data_interval_end_gte=(db_client.base - timedelta(days=1)).isoformat(),
+            data_interval_end_lte=db_client.base.isoformat(),
+        )
+        assert [event.source_run_id for event in events] == ["run_0"]
+
+    def test_find_previous_dag_runs_anti_join(self, db_client):
+        from datetime import timedelta
+        runs = db_client.find_previous_dag_runs(
+            "producer",
+            db_client.base + timedelta(days=10),
+            ["leaf"],
+            at_scheduled_date=True,
+        )
+        # run_2 is excluded: its leaf task instance is SKIPPED
+        assert [run.run_id for run in runs] == ["run_1", "run_0"]
+
+    def test_find_previous_dag_runs_before_scheduled_date(self, db_client):
+        from datetime import timedelta
+        runs = db_client.find_previous_dag_runs(
+            "producer",
+            db_client.base + timedelta(days=1, hours=12),
+            [],
+            at_scheduled_date=False,
+        )
+        assert [run.run_id for run in runs] == ["run_1", "run_0"]

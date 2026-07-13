@@ -285,104 +285,18 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 Find previous successful DagRuns for the current DAG, excluding runs
                 where at least one leaf task is SKIPPED.
 
-                Uses Airflow public API via StarlakeAirflowApiClient.
+                Executed as a single anti-join query against the Airflow 2 metadata
+                database, or composed from the paginated REST primitives otherwise
+                (see StarlakeAirflowApiClient.find_previous_dag_runs).
                 """
-
-                # ----------------------------------------------------------------------
-                # 1. Identify leaf tasks
-                # ----------------------------------------------------------------------
-                leaves = dag.leaves
-                leaf_task_ids = [t.task_id for t in leaves]
+                leaf_task_ids = [task.task_id for task in dag.leaves]
                 logging.info("Leaf tasks to check: [%s]", ",".join(leaf_task_ids))
-
-                # ----------------------------------------------------------------------
-                # 2. Build DagRun query params
-                # ----------------------------------------------------------------------
-                dr_params: Dict[str, Any] = {
-                    "state": "success",
-                    "limit": 100,
-                    "order_by": ["-data_interval_end", "-start_date"],
-                }
-
-                if at_scheduled_date:
-                    dr_params["end_date_lte"] = scheduled_date.isoformat()
-                else:
-                    dr_params["end_date_lt"] = scheduled_date.isoformat()
-
-                dag_runs = client.list_dag_runs(dag_id, **dr_params)
-
-                # Extract end_date values
-                end_dates = [dr.end_date for dr in dag_runs if dr.end_date]
-                logging.info(
-                    "Found %d candidate DagRuns, end_dates: [%s]",
-                    len(dag_runs),
-                    ",".join(end_dates),
+                return client.find_previous_dag_runs(
+                    dag_id,
+                    scheduled_date,
+                    leaf_task_ids,
+                    at_scheduled_date=at_scheduled_date,
                 )
-
-                max_end_date = max(end_dates) if end_dates else scheduled_date.isoformat()
-
-                filtered_runs: List[DotDict] = []
-
-                # ----------------------------------------------------------------------
-                # 3. Build TaskInstance params (only valid keys)
-                # ----------------------------------------------------------------------
-                from airflow.utils.state import State
-
-                ti_base_params = {
-                    "limit": 1000,
-                    "end_date_lte": max_end_date,
-                    "order_by": ["-end_date", "-start_date"],
-                    "state": State.SKIPPED,
-                }
-
-                # ----------------------------------------------------------------------
-                # 4. Optimization: only one leaf → one API call
-                # ----------------------------------------------------------------------
-                if len(leaf_task_ids) == 1:
-                    leaf = leaf_task_ids[0]
-                    logging.info("Optimizing: only one leaf task (%s)", leaf)
-
-                    ti_params = ti_base_params.copy()
-                    ti_params["task_id"] = leaf
-
-                    # Use new method to list task instances across all runs
-                    ti_list = client.list_dag_task_instances(dag_id, **ti_params)
-
-                    skipped_run_ids = {ti.dag_run_id for ti in ti_list}
-
-                    for dr in dag_runs:
-                        if dr.dag_run_id not in skipped_run_ids:
-                            filtered_runs.append(dr)
-
-                else:
-                    # ------------------------------------------------------------------
-                    # 5. Standard path: check each DagRun individually
-                    # ------------------------------------------------------------------
-                    for dr in dag_runs:
-                        dag_run_id = dr.dag_run_id
-
-                        ti_params = ti_base_params.copy()
-
-                        ti_list = client.list_task_instances(
-                            dag_id,
-                            dag_run_id,
-                            **ti_params,
-                        )
-
-                        if any(ti.task_id in leaf_task_ids for ti in ti_list):
-                            continue
-
-                        filtered_runs.append(dr)
-
-                # ----------------------------------------------------------------------
-                # 6. Final sort (API already sorts, but we ensure correctness)
-                # ----------------------------------------------------------------------
-                def sort_key(run):
-                    return (run.data_interval_end, run.start_date)
-
-                filtered_runs.sort(key=sort_key, reverse=True)
-
-                return filtered_runs
 
 
 
@@ -395,177 +309,44 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     scheduled_date: datetime,
             ) -> List[DotDict]:
                 """
-                API-based equivalent of the original SQLAlchemy-based find_dataset_events.
+                Dataset/asset events for ``uri`` produced by DagRuns whose
+                data_interval_end falls in the checked window, sorted by that
+                data_interval_end ascending, each with the dataset attached.
 
-                Steps:
-                1. Resolve dataset/asset ID from URI.
-                2. Fetch events for this ID with timestamp <= ts, ordered by timestamp.
-                3. Collect all producing DAG IDs from these events.
-                4. For each producing DAG, list DagRuns in the data_interval_end window.
-                5. Cross events with DagRuns via (source_dag_id, source_run_id).
-                6. Sort events by producing DagRun.data_interval_end ascending.
+                The window applies to the producing run, not to event recency, so
+                replaying a DAG for an arbitrarily old date finds its events.
+                Executed as a single joined query against the Airflow 2 metadata
+                database, or composed from the paginated REST primitives otherwise
+                (see StarlakeAirflowApiClient.find_dataset_events).
                 """
-
-                # ----------------------------------------------------------------------
-                # 1. Check feature support and resolve dataset/asset by URI
-                # ----------------------------------------------------------------------
-
-
-                logging.info("Resolving dataset/asset by uri=%s", uri)
-
-                dataset: Optional[DotDict] = client.get_dataset_by_uri(uri)
-
-                if not dataset:
-                    logging.info("No dataset/asset found for uri=%s", uri)
-                    return []
-
-                dataset_or_asset_id: int = dataset.id
-
-                logging.info(
-                    "Resolved dataset/asset id=%s for uri=%s",
-                    dataset_or_asset_id,
-                    uri,
-                )
-
-                # ----------------------------------------------------------------------
-                # 2. Fetch events for this ID with timestamp <= ts (ordered)
-                # ----------------------------------------------------------------------
-                logging.info(
-                    "Listing dataset/asset events for id=%s with timestamp <= %s",
-                    dataset_or_asset_id,
-                    ts.isoformat(),
-                )
-
-                params_events: Dict[str, Any] = {
-                    "timestamp_lte": ts.isoformat(),
-                    "order_by": "timestamp",
-                    "limit": 1000,
-                }
-
-                params_events["asset_id"] = dataset_or_asset_id
-
-                events: List[DotDict] = client.list_events(**params_events)
-
-                if not events:
-                    logging.info(
-                        "No events found for uri=%s and timestamp <= %s",
-                        uri,
-                        ts.isoformat(),
-                    )
-                    return []
-
-                logging.info("Found %d events for uri=%s", len(events), uri)
-
-                # ----------------------------------------------------------------------
-                # 3. Collect producing DAG IDs from events
-                # ----------------------------------------------------------------------
-                producing_dag_ids = {ev.source_dag_id for ev in events if ev.source_dag_id}
-                if not producing_dag_ids:
-                    logging.info("No producing DAG IDs found in events for uri=%s", uri)
-                    return []
-
-                logging.info(
-                    "Producing DAG IDs for uri=%s: [%s]",
-                    uri,
-                    ",".join(sorted(producing_dag_ids)),
-                )
-
-                # ----------------------------------------------------------------------
-                # 4. For each producing DAG, list DagRuns in the data_interval_end window
-                # ----------------------------------------------------------------------
-                dag_run_index: Dict[tuple, DotDict] = {}
-
-                dr_params_base: Dict[str, Any] = {
-                    "order_by": "data_interval_end",
-                    "limit": 1000,
-                }
-
                 if scheduled_date_to_check_max > scheduled_date:
+                    # we should include the previous execution of the corresponding dataset
                     logging.info(
-                        "Filtering DagRuns with data_interval_end >= %s and <= %s",
+                        "Finding dataset events for %s with data_interval_end >= %s and <= %s, and with timestamp <= %s",
+                        uri,
                         scheduled_date_to_check_min.isoformat(),
                         scheduled_date.isoformat(),
+                        ts.isoformat(),
                     )
-                    dr_params_base["data_interval_end_gte"] = scheduled_date_to_check_min.isoformat()
-                    dr_params_base["data_interval_end_lte"] = scheduled_date.isoformat()
+                    window = {
+                        "data_interval_end_gte": scheduled_date_to_check_min,
+                        "data_interval_end_lte": scheduled_date,
+                    }
                 else:
                     logging.info(
-                        "Filtering DagRuns with data_interval_end > %s and <= %s",
+                        "Finding dataset events for %s with data_interval_end > %s and <= %s, and with timestamp <= %s",
+                        uri,
                         scheduled_date_to_check_min.isoformat(),
                         scheduled_date_to_check_max.isoformat(),
+                        ts.isoformat(),
                     )
-                    dr_params_base["data_interval_end_gt"] = scheduled_date_to_check_min.isoformat()
-                    dr_params_base["data_interval_end_lte"] = scheduled_date_to_check_max.isoformat()
-
-                # Load DagRuns per producing DAG and index them by (dag_id, run_id)
-                for prod_dag_id in producing_dag_ids:
-                    try:
-                        dag_runs = client.list_dag_runs(prod_dag_id, **dr_params_base)
-                    except Exception as e:
-                        logging.warning(
-                            "Failed to list DagRuns for producing DAG %s: %s",
-                            prod_dag_id,
-                            e,
-                        )
-                        continue
-
-                    for dr in dag_runs:
-                        key = (dr.dag_id, dr.run_id)
-                        dag_run_index[key] = dr
-
-                if not dag_run_index:
-                    logging.info(
-                        "No DagRuns found in the data_interval_end window for any producing DAG of uri=%s",
-                        uri,
-                    )
-                    return []
-
-                logging.info(
-                    "Indexed %d DagRuns for producing DAGs of uri=%s",
-                    len(dag_run_index),
-                    uri,
-                )
-
-                # ----------------------------------------------------------------------
-                # 5. Cross events with DagRuns and filter on data_interval_end window
-                # ----------------------------------------------------------------------
-                filtered_events: List[DotDict] = []
-
-                for ev in events:
-                    key = (ev.source_dag_id, ev.source_run_id)
-                    dr = dag_run_index.get(key)
-                    if not dr:
-                        # Either no DagRun for this event in the window or missing run
-                        continue
-
-                    ev.update({"dataset": dataset or {"extra": {}}})
-
-                    # At this point, dr.data_interval_end is already within the desired window
-                    filtered_events.append(ev)
-
-                if not filtered_events:
-                    logging.info(
-                        "No events remained after crossing with DagRuns for uri=%s",
-                        uri,
-                    )
-                    return []
-
-                # ----------------------------------------------------------------------
-                # 6. Sort by producing DagRun.data_interval_end ascending
-                # ----------------------------------------------------------------------
-                def sort_key(ev: DotDict):
-                    dr = dag_run_index[(ev.source_dag_id, ev.source_run_id)]
-                    return dr.data_interval_end
-
-                filtered_events.sort(key=sort_key)
-
-                logging.info(
-                    "Returning %d filtered events for uri=%s",
-                    len(filtered_events),
-                    uri,
-                )
-
-                return filtered_events
+                    window = {
+                        "data_interval_end_gt": scheduled_date_to_check_min,
+                        "data_interval_end_lte": scheduled_date_to_check_max,
+                    }
+                events = client.find_dataset_events(uri, ts, **window)
+                logging.info("Returning %d filtered events for uri=%s", len(events), uri)
+                return events
 
 
 
@@ -730,10 +511,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
                         scheduled_datetime = None
                         dataset_event = None
-                        if client:
-                            events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
-                        else:
-                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
+                        events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
                         if events:
                             dataset_events = events
                             nb_events = len(events)
