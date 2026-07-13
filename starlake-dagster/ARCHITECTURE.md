@@ -49,7 +49,7 @@ This is the central mechanism for data-aware pipeline scheduling in Dagster. Unl
 **1. Upstream pipeline produces materializations**
 
 Each execution environment's `sl_job()` creates an `@op` that, on success, yields:
-- `AssetMaterialization(asset_key=AssetKey(uri))` with metadata: `sl_uri`, `sl_cron`, `sl_freshness`, `sl_scheduled_date`, `sl_dry_run`
+- `AssetMaterialization(asset_key=AssetKey(uri))` with metadata: `sl_uri`, `sl_cron`, `sl_freshness`, `sl_scheduled_date`, `sl_dry_run`, and (when present) `sl_options` (see [Runtime options propagation](#runtime-options-propagation-sl_options))
 - The materialization is tagged with `partition = logical_datetime` (the scheduled date formatted as `sl_timestamp_format`)
 
 The `StarlakeDagsterUtils.get_materialization()` method builds these materializations with full metadata and partition tags, including `PARTITION_NAME_TAG` and `data_interval_end`.
@@ -71,8 +71,9 @@ The sensor function runs on each evaluation cycle:
 4. **Identify anchor**: find the materialized dataset with the **greatest scheduled date** (`max(materialized_schedules)`)
 5. **Build checking set**: remaining datasets = not-materialized + older-materialized (excluding the anchor)
 6. **Validate freshness** via `check_datasets_freshness()` (detailed below)
-7. **Result**:
-   - All consistent → `RunRequest(run_config=_ops_config(logical_datetime, previous_logical_datetime), partition_key=logical_datetime, tags={...})` + `context.advance_cursor()`
+7. **Merge triggering options**: `StarlakeDagsterUtils.collect_sl_options()` merges the `sl_options` sections carried by the triggering materializations (fail-loud — see [Runtime options propagation](#runtime-options-propagation-sl_options))
+8. **Result**:
+   - All consistent → `RunRequest(run_config=_ops_config(logical_datetime, previous_logical_datetime, sl_options), partition_key=logical_datetime, tags={...})` + `context.advance_cursor()`
    - Missing/inconsistent → `SkipReason`
 
 **4. `check_datasets_freshness()` — Validation Engine**
@@ -99,6 +100,28 @@ Returns `(checked: bool, previous_partition, max_scheduled_date, missing_dataset
 Dagster partition keys cannot contain `:` or `+`, so `StarlakeDagsterUtils` provides encoding:
 - `quote_datetime()`: `2026-03-23T14:30:00+00:00` → `2026-03-23T14.30.00_00.00`
 - `unquote_datetime()`: reverses the encoding
+
+## Runtime options propagation (sl_options)
+
+Producer pipelines can carry runtime `starlake --options` variables to the downstream pipelines their materializations trigger. This is the Dagster counterpart of the Airflow mechanism (Dataset/Asset event `extra` + `sl_options_from_events` macro — see [starlake-airflow/ARCHITECTURE.md](../starlake-airflow/ARCHITECTURE.md)); here the carrier is **materialization metadata** and the relay is the **sensor**, since Dagster ops read config instead of Jinja-templated context.
+
+The payload is a JSON dict of sections under `StarlakeParameters.OPTIONS_PARAMETER` (`sl_options`): `{"all": {key: value}, "<domain.task>": {key: value}}` — the `all` section applies to every node of the triggered run, a task-keyed section only to that node.
+
+**1. Publish — `StarlakeDagsterUtils.get_materialization()`**
+
+When building an `AssetMaterialization`, two sources are merged into a `MetadataValue.json` entry under `sl_options`:
+- **static sections** passed by the caller through the `extra` kwarg of `sl_job()` (declared on the job, analogous to the Airflow mixin's `extra` template field)
+- **run-level sections** from `config.sl_options`, overriding the static ones — so a run *relays* the options it was itself triggered with (multi-hop propagation across pipeline chains)
+
+**2. Relay — the pipeline sensor**
+
+`multi_asset_sensor_with_skip_reason` calls `StarlakeDagsterUtils.collect_sl_options()` on the triggering materializations. Merging is **fail-loud**: the same key carried with different values by two materializations raises, failing the sensor tick — conflicting run variables must stop the run, not silently pick one (the recovery escape hatch is launching the runs one by one, passing `sl_options` in the run config manually). The merged sections are JSON-encoded and injected into every op of the `RunRequest` via `_ops_config(..., sl_options=...)` (`DagsterLogicalDatetimeConfig.sl_options`).
+
+**3. Consume — `StarlakeDagsterUtils.get_sl_options()`**
+
+At op runtime, each execution environment resolves the options applying to its node: `config.sl_options` (falling back to the run tag), merging the `all` section with the section keyed by the node name. The result is appended **last** to the command's `--options` — starlake keeps the last occurrence of a duplicate key, giving precedence `static options < "all" < task-specific`.
+
+**Quoting**: in the shell job, the `--options` value is wrapped in double quotes just before the command string is joined (after the transform branch has split/merged the value on commas), so values containing spaces survive shell word splitting (#51).
 
 ## Definitions Assembly
 
@@ -132,14 +155,16 @@ After graph construction, if the pipeline has a cron schedule, a `PartitionedCon
 
 #### `DagsterLogicalDatetimeConfig` (extends `dagster.Config`)
 
-Run configuration schema injected into every `@op`: `logical_datetime` (str), `previous_logical_datetime` (optional str), `dry_run` (bool, default False).
+Run configuration schema injected into every `@op`: `logical_datetime` (str), `previous_logical_datetime` (optional str), `dry_run` (bool, default False), `sl_options` (optional str — JSON-encoded runtime options sections, populated by the pipeline sensor's `RunRequest` or manually at launch; see [Runtime options propagation](#runtime-options-propagation-sl_options)).
 
 #### `StarlakeDagsterUtils`
 
 Static utilities — replaces Airflow's Jinja2 macros with explicit runtime calls:
 - `get_logical_datetime(context, config)` — resolves from: partition key → config → run launch time → now
-- `get_materialization(context, config, dataset)` — builds `AssetMaterialization` with full metadata and partition tags
+- `get_materialization(context, config, dataset)` — builds `AssetMaterialization` with full metadata (including the merged `sl_options` sections) and partition tags
 - `get_transform_options(context, config, params)` — computes `sl_data_interval_start` / `sl_data_interval_end`
+- `collect_sl_options(materializations)` — fail-loud merge of the `sl_options` sections carried by triggering materializations (used by the pipeline sensor)
+- `get_sl_options(context, config, name)` — resolves the runtime options applying to a node (`all` section + node-keyed section) from `config.sl_options` or the run tag
 - `quote_datetime()` / `unquote_datetime()` — partition key encoding
 
 ### Job Layer
@@ -157,7 +182,7 @@ Base job factory. Unlike Airflow, does NOT override `get_context_var()` (no Dags
 #### `DagsterPipeline` (extends `AbstractPipeline[JobDefinition, OpDefinition, GraphDefinition, AssetKey]`, `DagsterDataset`)
 
 - `__exit__()` — graph construction + `JobDefinition` creation (see Graph Construction above)
-- `_ops_config()` — recursively walks graph to build config dict with `logical_datetime` for every op
+- `_ops_config()` — recursively walks graph to build config dict with `logical_datetime` (and, when relayed by the sensor, `sl_options`) for every op
 - `sl_transform_options()` — returns `None` (handled at runtime in `sl_job()` via `StarlakeDagsterUtils`)
 - `run()` — uses `DagsterInstance.ephemeral()` + `job.execute_in_process()`. In dry_run, also validates dataset freshness.
 
@@ -169,7 +194,7 @@ Base job factory. Unlike Airflow, does NOT override `get_context_var()` (no Dags
 
 ### Execution Environment Jobs
 
-All share the same `@op` pattern: resolve `logical_datetime` → prepend `--scheduledDate` → execute → yield `AssetMaterialization` + `Output` on success, `Failure` on error. All support `skip_or_start` (silent skip on failure), `retry_policy`, and `dry_run` mode.
+All share the same `@op` pattern: resolve `logical_datetime` → prepend `--scheduledDate` → for transforms, append the transform options and the runtime `sl_options` (via `get_sl_options()`, appended last so they override the static ones) to `--options` → execute → yield `AssetMaterialization` + `Output` on success, `Failure` on error. All support `skip_or_start` (silent skip on failure), `retry_policy`, and `dry_run` mode. The shell job additionally double-quotes the `--options` value so values containing spaces survive shell word splitting (#51 — not needed for Dataproc, which submits arguments through the API rather than a shell string).
 
 | Environment | Class | How `sl_job()` Executes CLI | Pre/Post Tasks |
 |-------------|-------|-----------------------------|----------------|
