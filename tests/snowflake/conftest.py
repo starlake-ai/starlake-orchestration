@@ -282,3 +282,60 @@ def runtime_config():
         "transform_dag_ref": "snowflake_transform_sql",
         "dag_config_glob": "snowflake_*.sl.yml",
     }
+
+
+# ---------------------------------------------------------------------------
+# Runtime pipeline fixtures — shared by test_snowflake_runtime.py and
+# test_snowflake_parser_validation.py (moved here from
+# test_snowflake_runtime.py, story 3.2 — behavior-neutral: pytest resolves
+# them from the package conftest; each consuming module still gets its own
+# module-scoped instances).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def generated_python_files(runtime_dags):
+    """Return all generated ``*.py`` DAG files from ``runtime_dags``."""
+    dags_dir, _, _ = runtime_dags
+    files = sorted(dags_dir.glob("*.py"))
+    assert len(files) > 0, f"No .py files in {dags_dir}"
+    return files
+
+
+@pytest.fixture(scope="module")
+def runtime_mock_session():
+    """Module-scoped mock Snowpark Session (named to avoid shadowing conftest)."""
+    session = MagicMock()
+    session.sql.return_value.collect.return_value = []
+    session.call.return_value = None
+    return session
+
+
+# MERGE NOTE (story 3.1 / PR #66 coordination): PR #66 promotes an identical
+# ``runtime_env_vars`` fixture to tests/shared/conftest.py. Once #66 is
+# merged, DELETE this copy — a package-conftest copy would SHADOW the shared
+# one. It lives here (not in a test module) because ``loaded_pipelines``
+# below must resolve it from conftest scope on this branch.
+@pytest.fixture(scope="module")
+def runtime_env_vars(runtime_dags):
+    """Set runtime env vars for the module and restore on teardown."""
+    from tests.shared.conftest import restore_env, set_env
+
+    _, _, env = runtime_dags
+    original = set_env(env)
+    yield env
+    restore_env(original)
+
+
+@pytest.fixture(scope="module")
+def loaded_pipelines(generated_python_files, runtime_env_vars, runtime_mock_session):
+    """Load all pipelines from generated DAG files."""
+    from ai.starlake.orchestration.__main__ import load_pipelines
+
+    all_pipelines = []
+    for py_file in generated_python_files:
+        pipelines = load_pipelines(str(py_file))
+        if pipelines:
+            all_pipelines.extend(pipelines)
+    assert len(all_pipelines) > 0, "No pipelines loaded from generated files"
+    return all_pipelines
