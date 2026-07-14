@@ -32,12 +32,14 @@ from tests.shared.conftest import (  # noqa: F401
     sl_root_env,
     sample_project_path,
     starlake_cli,
+    starlake_cli_secondary,
     java_home,
     starlake_env,
     duckdb_connection,
     isolated_project,
     runtime_env,
     runtime_dags,
+    runtime_env_vars,
 )
 
 

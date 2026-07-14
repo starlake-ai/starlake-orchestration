@@ -22,7 +22,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ai.starlake.orchestration import AbstractPipeline
-from tests.shared.conftest import set_env, restore_env
 
 
 # Mark all tests — they require Starlake CLI + Java runtime.
@@ -47,15 +46,6 @@ def runtime_mock_session():
     session.sql.return_value.collect.return_value = []
     session.call.return_value = None
     return session
-
-
-@pytest.fixture(scope="module")
-def runtime_env_vars(runtime_dags):
-    """Set runtime env vars for the module and restore on teardown."""
-    _, _, env = runtime_dags
-    original = set_env(env)
-    yield env
-    restore_env(original)
 
 
 @pytest.fixture(scope="module")
