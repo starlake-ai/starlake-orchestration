@@ -16,12 +16,9 @@
 
 from __future__ import annotations
 
-import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
-from ai.starlake.orchestration import AbstractPipeline
 
 
 # Mark all tests — they require Starlake CLI + Java runtime.
@@ -29,37 +26,10 @@ pytestmark = [
     pytest.mark.integration,
 ]
 
-
-@pytest.fixture(scope="module")
-def generated_python_files(runtime_dags):
-    """Return all generated ``*.py`` DAG files from ``runtime_dags``."""
-    dags_dir, _, _ = runtime_dags
-    files = sorted(dags_dir.glob("*.py"))
-    assert len(files) > 0, f"No .py files in {dags_dir}"
-    return files
-
-
-@pytest.fixture(scope="module")
-def runtime_mock_session():
-    """Module-scoped mock Snowpark Session (named to avoid shadowing conftest)."""
-    session = MagicMock()
-    session.sql.return_value.collect.return_value = []
-    session.call.return_value = None
-    return session
-
-
-@pytest.fixture(scope="module")
-def loaded_pipelines(generated_python_files, runtime_env_vars, runtime_mock_session):
-    """Load all pipelines from generated DAG files."""
-    from ai.starlake.orchestration.__main__ import load_pipelines
-
-    all_pipelines = []
-    for py_file in generated_python_files:
-        pipelines = load_pipelines(str(py_file))
-        if pipelines:
-            all_pipelines.extend(pipelines)
-    assert len(all_pipelines) > 0, "No pipelines loaded from generated files"
-    return all_pipelines
+# The module-scoped runtime fixtures (``generated_python_files``,
+# ``runtime_mock_session``, ``runtime_env_vars``, ``loaded_pipelines``)
+# moved to tests/snowflake/conftest.py (story 3.2) — they are shared with
+# test_snowflake_parser_validation.py.
 
 
 # ------------------------------------------------------------------
