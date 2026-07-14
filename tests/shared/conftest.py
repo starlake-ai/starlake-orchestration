@@ -241,6 +241,24 @@ def get_duckdb(project_path: Path) -> duckdb.DuckDBPyConnection:
     )
 
 
+def resolve_duckdb_connection_db_path(project_path: Path) -> Path:
+    """Resolve the DuckDB database path declared in application.sl.yml.
+
+    Parses the ``jdbc:duckdb:`` connection URL exactly as a user wrote it
+    and substitutes ``{{SL_ROOT}}`` — proving where Starlake CLI was TOLD
+    to write, independently of where the tests know it writes.
+    """
+    import yaml
+
+    config = yaml.safe_load(
+        (project_path / "metadata" / "application.sl.yml").read_text()
+    )
+    url = config["application"]["connections"]["duckdb"]["options"]["url"]
+    prefix = "jdbc:duckdb:"
+    assert url.startswith(prefix), f"Unexpected connection URL: {url}"
+    return Path(url[len(prefix):].replace("{{SL_ROOT}}", str(project_path)))
+
+
 # ---------------------------------------------------------------------------
 # Runtime fixtures — module-scoped, parameterised via ``runtime_config``
 # ---------------------------------------------------------------------------

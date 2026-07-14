@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.shared.conftest import get_duckdb, restore_env, set_env
+from tests.shared.conftest import get_duckdb, resolve_duckdb_connection_db_path, restore_env, set_env
 from tests.shared.expected_results import (
     EXPECTED_KPI_SNAPSHOTS,
     EXPECTED_ROW_COUNTS,
@@ -457,3 +457,34 @@ class TestAirflowDatasetTriggering:
         condition_uris = {d.uri for d in condition.objects}
         assert "starbake_orders" in condition_uris
         assert "starbake_customers" in condition_uris
+
+
+# ===================================================================
+# TestConnectionEndToEnd (AC #2)
+# ===================================================================
+
+class TestConnectionEndToEnd:
+    """Data lands exactly where application.sl.yml's connection points.
+
+    The orchestrator never read the connection URL — Starlake CLI
+    resolved it from SL_ROOT/SL_ENV alone.  Re-deriving the location
+    from the user-facing YAML and finding the loaded rows there proves
+    the connection chain end-to-end.
+    """
+
+    def test_load_written_to_connection_url_database(self, executed_load_dags):
+        _, isolated, _ = executed_load_dags
+        db_path = resolve_duckdb_connection_db_path(isolated)
+        assert db_path == isolated / "datasets" / "duckdb.db"
+        assert db_path.is_file(), f"No DuckDB database at {db_path}"
+        conn = get_duckdb(isolated)
+        try:
+            customers = conn.execute(
+                "SELECT count(*) FROM starbake.customers"
+            ).fetchone()[0]
+            # MERGE NOTE: after PR #68 (tests/shared/expected_results.py)
+            # merges, use EXPECTED_ROW_COUNTS["customers"] instead of the
+            # literal 7 (matching the module's row-count tests above).
+            assert customers == 7, f"Expected 7 customers, got {customers}"
+        finally:
+            conn.close()
