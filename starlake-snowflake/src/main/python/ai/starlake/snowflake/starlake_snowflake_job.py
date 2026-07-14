@@ -664,7 +664,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
                     raise ValueError("context is required")
             else:
                 # only load and transform commands are implemented
-                raise NotImplementedError(f"{task_type} is not implemented")
+                raise NotImplementedError(
+                    f"[{self.__class__.sl_orchestrator()}] sl_job: task type '{task_type}' is not implemented"
+                )
         else:
             # sink is required
             raise ValueError("sink is required")

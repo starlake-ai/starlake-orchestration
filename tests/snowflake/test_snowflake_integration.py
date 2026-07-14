@@ -22,7 +22,6 @@ import os
 import pytest
 
 from ai.starlake.orchestration import AbstractPipeline
-from tests.shared.conftest import set_env, restore_env
 
 
 # Mark all tests — they require Starlake CLI + Java runtime.
@@ -38,15 +37,6 @@ def generated_python_files(runtime_dags):
     files = sorted(dags_dir.glob("*.py"))
     assert len(files) > 0, f"No .py files in {dags_dir}"
     return files
-
-
-@pytest.fixture(scope="module")
-def runtime_env_vars(runtime_dags):
-    """Set runtime env vars for the module and restore on teardown."""
-    _, _, env = runtime_dags
-    original = set_env(env)
-    yield env
-    restore_env(original)
 
 
 # ------------------------------------------------------------------

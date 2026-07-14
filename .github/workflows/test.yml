@@ -26,6 +26,8 @@ env:
   JAVA_VERSION: 17
   PYTHON_VERSION: "3.11"
   SL_VERSION: "1.5.11"
+  # Secondary CLI for the NFR7 version-tolerance test (orchestration leg only).
+  SL_VERSION_SECONDARY: "1.5.15"
   SL_ENV: DUCKDB
   # ---------------------------------------------------------------------
   # SINGLE EDIT POINT for the test matrix: one JSON object per leg.
@@ -204,6 +206,46 @@ jobs:
       # matches SL_VERSION (starlake --version echoes versions.sh, no JVM).
       - name: Starlake CLI sanity check
         run: starlake --version | grep -F "${{ env.SL_VERSION }}"
+
+      # ----------------------------------------------------------------
+      # Secondary Starlake CLI (NFR7 version tolerance) — orchestration
+      # leg only: the dual-CLI lineage test lives in tests/shared/, which
+      # only that leg runs. Separate install target keyed by version:
+      # starlake.sh selects the jar via SL_VERSION and never downloads on
+      # demand, so SL_VERSION-switching inside one install cannot work.
+      # ----------------------------------------------------------------
+      - name: Cache secondary Starlake CLI (NFR7)
+        if: matrix.module == 'orchestration'
+        id: cache-starlake-secondary
+        uses: actions/cache@v4
+        with:
+          path: ~/starlake-${{ env.SL_VERSION_SECONDARY }}
+          key: starlake-cli-${{ env.SL_VERSION_SECONDARY }}-v1
+
+      - name: Install secondary Starlake CLI (NFR7)
+        if: matrix.module == 'orchestration' && steps.cache-starlake-secondary.outputs.cache-hit != 'true'
+        env:
+          ENABLE_ALL: "false"
+          ENABLE_BIGQUERY: "false"
+          ENABLE_AZURE: "false"
+          ENABLE_SNOWFLAKE: "false"
+          ENABLE_REDSHIFT: "false"
+          ENABLE_POSTGRESQL: "false"
+          ENABLE_KAFKA: "false"
+          ENABLE_MARIA: "false"
+          ENABLE_CLICKHOUSE: "false"
+          ENABLE_TRINODB: "false"
+          ENABLE_DUCKDB: "true"
+          ENABLE_API: "false"
+        run: |
+          curl -fsSL -o /tmp/sl-setup-secondary.sh https://raw.githubusercontent.com/starlake-ai/starlake/master/distrib/setup.sh
+          bash /tmp/sl-setup-secondary.sh --version=${{ env.SL_VERSION_SECONDARY }} --target=$HOME/starlake-${{ env.SL_VERSION_SECONDARY }} < /dev/null
+
+      - name: Secondary Starlake CLI sanity check (NFR7)
+        if: matrix.module == 'orchestration'
+        # SL_VERSION must be overridden: starlake --version echoes $SL_VERSION
+        # (starlake.sh:369), and the workflow env pins it to the PRIMARY version.
+        run: SL_VERSION=${{ env.SL_VERSION_SECONDARY }} "$HOME/starlake-${{ env.SL_VERSION_SECONDARY }}/starlake" --version | grep -F "${{ env.SL_VERSION_SECONDARY }}"
 
       - name: Create virtual environment
         run: uv venv --python ${{ env.PYTHON_VERSION }}
