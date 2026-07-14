@@ -36,7 +36,12 @@ import pytest
 
 from dagster import AssetKey, DagsterInstance
 
-from tests.shared.conftest import get_duckdb, restore_env, set_env
+from tests.shared.conftest import (
+    get_duckdb,
+    resolve_duckdb_connection_db_path,
+    restore_env,
+    set_env,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -404,3 +409,34 @@ class TestDagsterDatasetTriggering:
             )
         finally:
             instance.dispose()
+
+
+# ===================================================================
+# TestConnectionEndToEnd (AC #2)
+# ===================================================================
+
+class TestConnectionEndToEnd:
+    """Data lands exactly where application.sl.yml's connection points.
+
+    The orchestrator never read the connection URL — Starlake CLI
+    resolved it from SL_ROOT/SL_ENV alone.  Re-deriving the location
+    from the user-facing YAML and finding the loaded rows there proves
+    the connection chain end-to-end.
+    """
+
+    def test_load_written_to_connection_url_database(self, executed_load_jobs):
+        _, isolated, _ = executed_load_jobs
+        db_path = resolve_duckdb_connection_db_path(isolated)
+        assert db_path == isolated / "datasets" / "duckdb.db"
+        assert db_path.is_file(), f"No DuckDB database at {db_path}"
+        conn = get_duckdb(isolated)
+        try:
+            customers = conn.execute(
+                "SELECT count(*) FROM starbake.customers"
+            ).fetchone()[0]
+            # MERGE NOTE: after PR #68 (tests/shared/expected_results.py)
+            # merges, use EXPECTED_ROW_COUNTS["customers"] instead of the
+            # literal 7 (matching the module's row-count tests above).
+            assert customers == 7, f"Expected 7 customers, got {customers}"
+        finally:
+            conn.close()
