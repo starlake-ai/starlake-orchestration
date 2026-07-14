@@ -178,7 +178,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                     )
                 )
             elif cron:
-                crons.append(ScheduleDefinition(job_name = pipeline_id, cron_schedule = cron, default_status=DefaultScheduleStatus.RUNNING))
+                crons.append(ScheduleDefinition(job_name = pipeline_id, cron_schedule = cron, default_status=DefaultScheduleStatus.RUNNING, execution_timezone=self.job.timezone))
 
         defs = Definitions(
             assets=[AssetSpec(asset.uri) for pipeline in self.pipelines for asset in pipeline.assets],
@@ -496,7 +496,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                     cron_schedule = cron,
                     start=self.start_date,
                     fmt=sl_timestamp_format,
-                    timezone='UTC',
+                    timezone=self.job.timezone,
                 ),
                 run_config_for_partition_fn=fun,
             )
