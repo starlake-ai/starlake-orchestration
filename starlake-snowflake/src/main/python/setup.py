@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.4.0")
+version = os.environ.get("PROJECT_VERSION", "0.4.1")
 
 setup(name='starlake-snowflake',
       version=version,
