@@ -14,16 +14,27 @@
 # limitations under the License.
 #
 
-"""Airflow 2 runtime integration tests.
+"""Airflow runtime integration tests (dual-version: Airflow 2 and 3).
 
 These tests actually execute DAGs through Airflow's ``dag.test()`` engine,
-validate data in DuckDB, verify Airflow Dataset outlet event production,
-and test transform DAG triggering with ANY / ALL strategies.
+validate data in DuckDB, verify Dataset/Asset outlet production, and test
+transform DAG triggering with ANY / ALL strategies.
+
+Version divergence is confined to module level:
+
+- Airflow 2 names (``Dataset``/``DatasetAll``/``DatasetAny``,
+  ``timetable.dataset_condition``, ``dag.test(execution_date=...)``) map to
+  Airflow 3 assets (``Asset``/``AssetAll``/``AssetAny``,
+  ``timetable.asset_condition``, ``dag.test(logical_date=...)``).
+- DAG registration: Airflow 2 requires ``DAG.bulk_write_to_db``; Airflow 3's
+  ``dag.test()`` self-syncs the owning DAG bundle — the fixtures configure
+  an explicit ``LocalDagBundle`` over the generated DAGs directory via
+  ``AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST``.
 
 All heavy operations (dag-generate, load_pipelines, dag.test) are
 module-scoped to avoid redundant JVM startups.
 
-Prerequisites: Apache Airflow 2.x, Starlake CLI, Java 17+.
+Prerequisites: Apache Airflow 2.x or 3.x, Starlake CLI, Java 17+.
 """
 
 from __future__ import annotations
@@ -36,31 +47,120 @@ from tests.shared.conftest import get_duckdb, restore_env, set_env
 
 try:
     import airflow
-    from airflow.datasets import Dataset, DatasetAll, DatasetAny
-    from airflow.models.dag import DAG
-    from airflow.models.dataset import DatasetEvent, DatasetModel
-    from airflow.utils.state import DagRunState
 
     AIRFLOW_AVAILABLE = True
     AIRFLOW_VERSION = tuple(int(x) for x in airflow.__version__.split(".")[:2])
+    SUPPORTS_ASSETS = AIRFLOW_VERSION >= (3, 0)
+    if SUPPORTS_ASSETS:
+        from airflow.sdk import Asset as Dataset
+        from airflow.sdk import AssetAll as DatasetAll
+        from airflow.sdk import AssetAny as DatasetAny
+    else:
+        from airflow.datasets import Dataset, DatasetAll, DatasetAny
+    from airflow.models.dag import DAG
+    from airflow.utils.state import DagRunState
 except ImportError:
     AIRFLOW_AVAILABLE = False
     AIRFLOW_VERSION = (0, 0)
+    SUPPORTS_ASSETS = False
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not AIRFLOW_AVAILABLE or AIRFLOW_VERSION >= (3, 0),
-        reason="Runtime suite is Airflow 2 only for now: it seeds "
-        "DatasetModel/DatasetEvent directly in the metadata database "
-        "(porting to Airflow 3 assets pending)",
+        not AIRFLOW_AVAILABLE,
+        reason="Requires Apache Airflow",
     ),
 ]
+
+# The name of the condition attribute on dataset/asset-triggered timetables.
+_CONDITION_ATTR = "asset_condition" if SUPPORTS_ASSETS else "dataset_condition"
 
 # Use "now" as execution date — the DAG's start_date is derived from
 # the generated file's mtime, which is always "today".  An execution
 # date in the past would cause Airflow to skip all tasks.
 EXECUTION_DATE = datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _runtime_env(env, dags_dir):
+    """Return the process env for runtime fixtures (version-aware).
+
+    On Airflow 3, ``dag.test()`` registers DAGs by syncing the owning DAG
+    bundle, which parses the bundle's path — point it at the generated DAGs
+    directory.  The bundle path must be given EXPLICITLY in the bundle
+    config: with no ``path`` kwarg, ``LocalDagBundle`` falls back to
+    ``settings.DAGS_FOLDER``, a constant frozen when ``airflow.settings``
+    was first imported, which no ``dags_folder`` override can reach.
+    On Airflow 2 registration is explicit (``DAG.bulk_write_to_db``) and
+    the bundle machinery does not exist.
+    """
+    e = dict(env)
+    # Isolate the metadata DB per session AND per major version.  The
+    # unit-test config's default (unittests.db under the import-time
+    # AIRFLOW_HOME) is shared state: an Airflow 3 run migrates it to the
+    # 3.x schema and a subsequent Airflow 2 run then fails on the renamed
+    # columns (and vice versa).  Env vars beat the test-config file layer,
+    # so this wins over load_test_config's value.
+    e["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"] = (
+        f"sqlite:///{dags_dir.parent}/airflow_v{AIRFLOW_VERSION[0]}_metadata.db"
+    )
+    if SUPPORTS_ASSETS:
+        import json
+
+        e["AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST"] = json.dumps([
+            {
+                "name": "dags-folder",
+                "classpath": "airflow.dag_processing.bundles.local.LocalDagBundle",
+                "kwargs": {"path": str(dags_dir)},
+            }
+        ])
+    return e
+
+
+def _init_airflow_db():
+    """Load the test config and initialize the metadata database.
+
+    ``settings.configure_orm()`` must be re-run after the config change:
+    the engine was built at import time from the pre-fixture config, so
+    without it ``initdb`` (and everything after) would keep talking to
+    the import-time database, ignoring the per-version connection set in
+    :func:`_runtime_env`.
+    """
+    from airflow.configuration import initialize_config
+
+    initialize_config().load_test_config()
+
+    from airflow import settings
+
+    settings.configure_vars()
+    settings.configure_orm()
+
+    from airflow.utils.db import initdb
+
+    initdb()
+
+
+def _register_dags(pipelines):
+    """Register pipeline DAGs in the metadata DB (Airflow 2 only).
+
+    ``DAG.bulk_write_to_db`` no longer exists on Airflow 3, where
+    ``dag.test()`` self-syncs the DAG bundle from the dags folder.
+    """
+    if not SUPPORTS_ASSETS:
+        DAG.bulk_write_to_db([p.dag for p in pipelines])
+
+
+def _dag_test(dag):
+    """Run ``dag.test()`` with version-appropriate kwargs.
+
+    Airflow 3 renamed ``execution_date`` to ``logical_date`` and serializes
+    ``run_conf`` as strict JSON — pass the start date as an ISO string there
+    (the same shape a REST-triggered run's conf has in production).
+    """
+    if SUPPORTS_ASSETS:
+        run_conf = {"start_date": EXECUTION_DATE.isoformat(), "backfill": False}
+        return dag.test(logical_date=EXECUTION_DATE, run_conf=run_conf)
+    run_conf = {"start_date": EXECUTION_DATE, "backfill": False}
+    return dag.test(execution_date=EXECUTION_DATE, run_conf=run_conf)
 
 
 # ===================================================================
@@ -71,12 +171,9 @@ EXECUTION_DATE = datetime.now(timezone.utc).replace(microsecond=0)
 def load_pipelines_loaded(runtime_dags, airflow_home):
     """Load generated load DAGs and register them in Airflow metadata DB."""
     dags_dir, isolated, env = runtime_dags
-    orig = set_env(env)
+    orig = set_env(_runtime_env(env, dags_dir))
     try:
-        from airflow.configuration import initialize_config
-        initialize_config().load_test_config()
-        from airflow.utils.db import initdb
-        initdb()
+        _init_airflow_db()
 
         from ai.starlake.orchestration.__main__ import load_pipelines
 
@@ -86,8 +183,7 @@ def load_pipelines_loaded(runtime_dags, airflow_home):
             if r:
                 pls.extend(r)
         assert pls, "No load pipelines found"
-        for p in pls:
-            DAG.bulk_write_to_db([p.dag])
+        _register_dags(pls)
         return pls, isolated, env
     finally:
         restore_env(orig)
@@ -97,12 +193,9 @@ def load_pipelines_loaded(runtime_dags, airflow_home):
 def transform_pipelines_loaded(runtime_dags, airflow_home):
     """Load generated transform DAGs and register in Airflow metadata DB."""
     dags_dir, isolated, env = runtime_dags
-    orig = set_env(env)
+    orig = set_env(_runtime_env(env, dags_dir))
     try:
-        from airflow.configuration import initialize_config
-        initialize_config().load_test_config()
-        from airflow.utils.db import initdb
-        initdb()
+        _init_airflow_db()
 
         from ai.starlake.orchestration.__main__ import load_pipelines
 
@@ -112,31 +205,25 @@ def transform_pipelines_loaded(runtime_dags, airflow_home):
             if r:
                 pls.extend(r)
         assert pls, "No transform pipelines found"
-        for p in pls:
-            DAG.bulk_write_to_db([p.dag])
+        _register_dags(pls)
         return pls, isolated, env
     finally:
         restore_env(orig)
 
 
 @pytest.fixture(scope="module")
-def executed_load_dags(load_pipelines_loaded):
+def executed_load_dags(runtime_dags, load_pipelines_loaded):
     """Execute all load DAGs once via dag.test() — shared by load tests."""
+    dags_dir, _, _ = runtime_dags
     pls, isolated, env = load_pipelines_loaded
-    orig = set_env(env)
+    orig = set_env(_runtime_env(env, dags_dir))
     try:
-        from airflow.configuration import initialize_config
-        initialize_config().load_test_config()
-        from airflow.utils.db import initdb
-        initdb()
+        _init_airflow_db()
 
         results = []
         for p in pls:
 
-            run_conf = {"start_date": EXECUTION_DATE, "backfill": False}
-            dr = p.dag.test(
-                execution_date=EXECUTION_DATE, run_conf=run_conf
-            )
+            dr = _dag_test(p.dag)
             results.append((p, dr))
         return results, isolated, env
     finally:
@@ -144,24 +231,19 @@ def executed_load_dags(load_pipelines_loaded):
 
 
 @pytest.fixture(scope="module")
-def executed_transform_dags(executed_load_dags, transform_pipelines_loaded):
+def executed_transform_dags(runtime_dags, executed_load_dags, transform_pipelines_loaded):
     """Execute all transform DAGs after load — shared by transform tests."""
+    dags_dir, _, _ = runtime_dags
     _, isolated, env = executed_load_dags
     pls, _, _ = transform_pipelines_loaded
-    orig = set_env(env)
+    orig = set_env(_runtime_env(env, dags_dir))
     try:
-        from airflow.configuration import initialize_config
-        initialize_config().load_test_config()
-        from airflow.utils.db import initdb
-        initdb()
+        _init_airflow_db()
 
         results = []
         for p in pls:
 
-            run_conf = {"start_date": EXECUTION_DATE, "backfill": False}
-            dr = p.dag.test(
-                execution_date=EXECUTION_DATE, run_conf=run_conf
-            )
+            dr = _dag_test(p.dag)
             results.append((p, dr))
         return results, isolated, env
     finally:
@@ -206,7 +288,7 @@ class TestAirflowRuntimeLoad:
             conn.close()
 
     def test_load_tasks_produce_dataset_outlets(self, load_pipelines_loaded):
-        """Load tasks declare outlet Datasets for each table.
+        """Load tasks declare outlet Datasets/Assets for each table.
 
         Outlets are collected across ALL load pipelines (daily + hourly)
         since tables are split by schedule frequency.
@@ -267,34 +349,35 @@ class TestAirflowRuntimeTransform:
 # ===================================================================
 
 class TestAirflowDatasetTriggering:
-    """Verify transform DAG dataset-triggered scheduling with ANY / ALL."""
+    """Verify transform DAG dataset/asset-triggered scheduling with ANY / ALL."""
 
     def test_transform_dag_uses_dataset_triggered_timetable(
         self, transform_pipelines_loaded
     ):
-        """Generated transform DAG has a DatasetTriggeredTimetable."""
+        """Generated transform DAG has a Dataset/AssetTriggeredTimetable."""
         pls, _, _ = transform_pipelines_loaded
+        expected_marker = "Asset" if SUPPORTS_ASSETS else "Dataset"
         for pipeline in pls:
             timetable_cls = type(pipeline.dag.timetable).__name__
-            assert "Dataset" in timetable_cls, (
-                f"Expected dataset timetable, got {timetable_cls}"
+            assert expected_marker in timetable_cls, (
+                f"Expected {expected_marker.lower()} timetable, got {timetable_cls}"
             )
             assert len(pipeline.events) > 0, (
                 f"Pipeline {pipeline.pipeline_id} has no dataset events"
             )
 
     def test_any_strategy_uses_or_combination(self, transform_pipelines_loaded):
-        """Default strategy (ANY) builds dataset_condition with DatasetAny."""
+        """Default strategy (ANY) builds the condition with DatasetAny/AssetAny."""
         pls, _, _ = transform_pipelines_loaded
         for pipeline in pls:
             timetable = pipeline.dag.timetable
-            assert hasattr(timetable, "dataset_condition"), (
-                f"Timetable {type(timetable).__name__} has no dataset_condition"
+            assert hasattr(timetable, _CONDITION_ATTR), (
+                f"Timetable {type(timetable).__name__} has no {_CONDITION_ATTR}"
             )
-            condition = timetable.dataset_condition
+            condition = getattr(timetable, _CONDITION_ATTR)
             if len(pipeline.events) > 1:
                 assert isinstance(condition, DatasetAny), (
-                    f"Expected DatasetAny for ANY strategy, "
+                    f"Expected {DatasetAny.__name__} for ANY strategy, "
                     f"got {type(condition).__name__}"
                 )
                 condition_uris = {d.uri for d in condition.objects}
@@ -304,7 +387,7 @@ class TestAirflowDatasetTriggering:
                 )
 
     def test_all_strategy_uses_and_combination(self, airflow_home):
-        """ALL strategy builds dataset_condition with DatasetAll (AND)."""
+        """ALL strategy builds the condition with DatasetAll/AssetAll (AND)."""
         from ai.starlake.airflow import AirflowOrchestration
         from ai.starlake.airflow.bash import StarlakeAirflowBashJob
         from ai.starlake.orchestration import (
@@ -343,11 +426,12 @@ class TestAirflowDatasetTriggering:
             pass
 
         timetable = pipeline.dag.timetable
-        assert hasattr(timetable, "dataset_condition")
-        condition = timetable.dataset_condition
+        assert hasattr(timetable, _CONDITION_ATTR)
+        condition = getattr(timetable, _CONDITION_ATTR)
 
         assert isinstance(condition, DatasetAll), (
-            f"Expected DatasetAll for ALL strategy, got {type(condition).__name__}"
+            f"Expected {DatasetAll.__name__} for ALL strategy, "
+            f"got {type(condition).__name__}"
         )
         condition_uris = {d.uri for d in condition.objects}
         assert "starbake_orders" in condition_uris
