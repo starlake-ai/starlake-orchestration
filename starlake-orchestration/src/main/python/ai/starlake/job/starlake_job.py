@@ -114,9 +114,11 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         ) if not pre_load_strategy else pre_load_strategy
 
         if isinstance(pre_load_strategy, str):
-            pre_load_strategy = \
-                StarlakePreLoadStrategy(pre_load_strategy) if StarlakePreLoadStrategy.is_valid(pre_load_strategy) \
-                    else StarlakePreLoadStrategy.NONE
+            pre_load_strategy = self.__class__.sl_resolve_pre_load_strategy(
+                pre_load_strategy,
+                default=StarlakePreLoadStrategy.NONE,
+                action="options['pre_load_strategy']",
+            )
 
         self.pre_load_strategy: StarlakePreLoadStrategy = pre_load_strategy
 
@@ -300,6 +302,41 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         """
         return None
 
+    @classmethod
+    def sl_resolve_pre_load_strategy(
+        cls,
+        value: Union[StarlakePreLoadStrategy, str, None],
+        default: Optional[StarlakePreLoadStrategy] = None,
+        action: str = "pre_load_strategy",
+    ) -> Optional[StarlakePreLoadStrategy]:
+        """Resolve a pre-load strategy value, failing fast on invalid strings.
+
+        Args:
+            value: The raw value (enum, string, or None).
+            default: Returned when value is None or empty (backward compatible).
+            action: The action or configuration key for the error message (NFR11).
+
+        Returns:
+            Optional[StarlakePreLoadStrategy]: The resolved strategy.
+
+        Raises:
+            ValueError: If value is a non-empty string that is not a valid
+                strategy. The message includes the orchestrator name, the
+                action/configuration key, the invalid value and the valid values.
+        """
+        if not value:
+            return default
+        if isinstance(value, StarlakePreLoadStrategy):
+            return value
+        if StarlakePreLoadStrategy.is_valid(value):
+            return StarlakePreLoadStrategy(value)
+        orchestrator = cls.sl_orchestrator() or "unknown"
+        valid = ", ".join(s.value for s in StarlakePreLoadStrategy)
+        raise ValueError(
+            f"[{orchestrator}] {action}: invalid pre-load strategy '{value}' "
+            f"— valid values: {valid}"
+        )
+
     @property
     def events(self) -> List[E]:
         """Returns the events.
@@ -419,9 +456,11 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             Optional[T]: The scheduler task or None.
         """
         if isinstance(pre_load_strategy, str):
-            pre_load_strategy = \
-                StarlakePreLoadStrategy(pre_load_strategy) if StarlakePreLoadStrategy.is_valid(pre_load_strategy) \
-                    else self.pre_load_strategy
+            pre_load_strategy = self.__class__.sl_resolve_pre_load_strategy(
+                pre_load_strategy,
+                default=self.pre_load_strategy,
+                action="sl_pre_load(pre_load_strategy=...)",
+            )
 
         pre_load_strategy = self.pre_load_strategy if not pre_load_strategy else pre_load_strategy
 
