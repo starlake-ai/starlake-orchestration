@@ -214,16 +214,24 @@ jobs:
       # Each module's setup.py does open("README.md") but the per-module
       # src/main/python/README.md files are NOT tracked in git — Maven's
       # copy-readme execution creates them at build time. Stage them here
-      # or every editable install below fails with FileNotFoundError.
+      # or every package build below fails with FileNotFoundError.
       - name: Stage module READMEs (Maven copy-readme equivalent)
         run: |
           for m in starlake-orchestration starlake-airflow starlake-dagster starlake-snowflake; do
             cp "$m/README.md" "$m/src/main/python/README.md"
           done
 
+      # All installs below are NON-editable: ai/__init__.py and
+      # ai/starlake/__init__.py are regular packages (no namespace
+      # declaration), so editable installs cannot merge the ai.starlake
+      # namespace — each -e package's import finder claims the whole `ai`
+      # tree and shadows the siblings (core's ai.starlake.job disappears
+      # under an editable orchestrator, or vice versa). Regular wheel
+      # installs physically merge the tree in site-packages, which is
+      # exactly what end users get from PyPI.
       - name: Install local core (module under test, or core changed on this PR)
         if: matrix.module == 'orchestration' || needs.detect-changes.outputs.core_changed == 'true'
-        run: uv pip install -e starlake-orchestration/src/main/python/
+        run: uv pip install starlake-orchestration/src/main/python/
 
       # Version-parameterized: the orchestrator pin comes from the matrix
       # entry, not from hardcoded literals. Airflow's official constraints
@@ -238,14 +246,14 @@ jobs:
             airflow)
               uv pip install "apache-airflow==${{ matrix.orchestrator_version }}" \
                 --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.orchestrator_version }}/constraints-${{ env.PYTHON_VERSION }}.txt"
-              uv pip install -e starlake-airflow/src/main/python/
+              uv pip install starlake-airflow/src/main/python/
               ;;
             dagster)
               uv pip install "dagster==${{ matrix.orchestrator_version }}" "${{ matrix.companion }}"
-              uv pip install -e starlake-dagster/src/main/python/
+              uv pip install starlake-dagster/src/main/python/
               ;;
             snowflake)
-              uv pip install -e starlake-snowflake/src/main/python/
+              uv pip install starlake-snowflake/src/main/python/
               ;;
             *)
               echo "Unknown matrix module: ${{ matrix.module }}" >&2

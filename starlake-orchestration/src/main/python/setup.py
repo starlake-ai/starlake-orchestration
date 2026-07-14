@@ -21,6 +21,7 @@ setup(name='starlake-orchestration',
       license='Apache 2.0',
 #      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-orchestration',
       packages=find_packages(include=['ai', 'ai.*']),
+      install_requires=['croniter'],
       extras_require={
         "airflow": ["starlake-airflow~=0.4"],
         "dagster": ["starlake-dagster~=0.4"],
