@@ -354,3 +354,32 @@ class TestStarlakeDependencyToDataset:
         dataset = dep.to_dataset()
         assert dataset.freshness == 3600
         assert dataset.cron is not None
+
+
+# ---------------------------------------------------------------------------
+# 4.12  Timezone equivalence of the core scheduling helpers
+# ---------------------------------------------------------------------------
+
+class TestScheduledDateTimezoneEquivalence:
+    """The same instant expressed in different timezones yields the same
+    scheduled date from the core helpers — timezone handling is consistent
+    across orchestrators because they all share these helpers."""
+
+    def test_same_instant_two_timezones_same_scheduled_date(self):
+        from ai.starlake.common import sl_scheduled_date
+        # 12:30 UTC == 14:30 Paris (CEST, June)
+        utc_result = sl_scheduled_date(
+            "0 2 * * *", "2025-06-15T12:30:00+00:00"
+        )
+        paris_result = sl_scheduled_date(
+            "0 2 * * *", "2025-06-15T14:30:00+02:00"
+        )
+        assert utc_result == paris_result
+
+    def test_scheduled_dates_range_is_timezone_aware(self):
+        paris = pytz.timezone("Europe/Paris")
+        ts = paris.localize(datetime(2025, 6, 15, 14, 30, 0))
+        start, end = scheduled_dates_range("0 2 * * *", ts)
+        assert start.tzinfo is not None
+        assert end.tzinfo is not None
+        assert start < end

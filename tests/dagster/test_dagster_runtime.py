@@ -36,11 +36,13 @@ import pytest
 
 from dagster import AssetKey, DagsterInstance
 
-from tests.shared.conftest import (
-    get_duckdb,
-    resolve_duckdb_connection_db_path,
-    restore_env,
-    set_env,
+from tests.shared.conftest import get_duckdb, resolve_duckdb_connection_db_path, restore_env, set_env
+from tests.shared.expected_results import (
+    EXPECTED_KPI_SNAPSHOTS,
+    EXPECTED_ROW_COUNTS,
+    EXPECTED_TABLE_SNAPSHOTS,
+    TOP_CUSTOMERS_MAX_ROWS,
+    table_snapshot,
 )
 
 pytestmark = [
@@ -159,20 +161,25 @@ class TestDagsterRuntimeLoad:
         _, isolated, _ = executed_load_jobs
         conn = get_duckdb(isolated)
         try:
-            customers = conn.execute(
-                "SELECT count(*) FROM starbake.customers"
-            ).fetchone()[0]
-            assert customers == 7, f"Expected 7 customers, got {customers}"
+            for table, expected_count in EXPECTED_ROW_COUNTS.items():
+                count = conn.execute(
+                    f"SELECT count(*) FROM {table}"
+                ).fetchone()[0]
+                assert count == expected_count, (
+                    f"Expected {expected_count} rows in {table}, got {count}"
+                )
+        finally:
+            conn.close()
 
-            orders = conn.execute(
-                "SELECT count(*) FROM starbake.orders"
-            ).fetchone()[0]
-            assert orders == 10, f"Expected 10 orders, got {orders}"
-
-            products = conn.execute(
-                "SELECT count(*) FROM starbake.products"
-            ).fetchone()[0]
-            assert products == 5, f"Expected 5 products, got {products}"
+    def test_duckdb_state_matches_canonical_snapshots(self, executed_load_jobs):
+        """NFR1: the loaded data equals the canonical cross-orchestrator snapshot."""
+        _, isolated, _ = executed_load_jobs
+        conn = get_duckdb(isolated)
+        try:
+            for table, expected_rows in EXPECTED_TABLE_SNAPSHOTS.items():
+                assert table_snapshot(conn, table) == expected_rows, (
+                    f"{table}: DuckDB state diverges from the canonical snapshot"
+                )
         finally:
             conn.close()
 
@@ -225,9 +232,24 @@ class TestDagsterRuntimeTransform:
                 "SELECT count(*) FROM kpi.top_customers"
             ).fetchone()[0]
             assert top_customers > 0, "kpi.top_customers is empty"
-            assert top_customers <= 5, (
-                f"top_customers has {top_customers} rows, expected <= 5"
+            assert top_customers <= TOP_CUSTOMERS_MAX_ROWS, (
+                f"top_customers has {top_customers} rows, "
+                f"expected <= {TOP_CUSTOMERS_MAX_ROWS}"
             )
+        finally:
+            conn.close()
+
+    def test_transform_results_match_canonical_snapshots(
+        self, executed_transform_jobs
+    ):
+        """NFR1: transform outputs equal the canonical cross-orchestrator snapshot."""
+        _, isolated, _ = executed_transform_jobs
+        conn = get_duckdb(isolated)
+        try:
+            for table, expected_rows in EXPECTED_KPI_SNAPSHOTS.items():
+                assert table_snapshot(conn, table) == expected_rows, (
+                    f"{table}: DuckDB state diverges from the canonical snapshot"
+                )
         finally:
             conn.close()
 

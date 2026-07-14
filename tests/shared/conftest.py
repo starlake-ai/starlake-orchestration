@@ -43,6 +43,7 @@ _DOT_ENV = dotenv_values(_DOT_ENV_PATH) if _DOT_ENV_PATH.is_file() else dotenv_v
 _DEFAULTS = {
     "SL_VERSION": "1.5.11",
     "SL_ENV": "DUCKDB",
+    "SL_VERSION_SECONDARY": "1.5.15",
 }
 
 
@@ -104,6 +105,28 @@ def starlake_cli() -> str:
     if cli_path is None:
         pytest.skip("Starlake CLI not found on PATH or at ~/starlake/starlake")
     return cli_path
+
+
+@pytest.fixture(scope="session")
+def starlake_cli_secondary() -> str:
+    """Secondary Starlake CLI for NFR7 version-tolerance tests.
+
+    Expected at ``~/starlake-{SL_VERSION_SECONDARY}/starlake`` (scripted
+    install: ``setup.sh --version=<v> --target=$HOME/starlake-<v>``).
+    Skips when absent — same skip-not-fail contract as ``starlake_cli``;
+    CI installs it explicitly on the orchestration leg plus a sanity check
+    so a silent skip cannot fake-green that leg.
+    """
+    version = _env_var("SL_VERSION_SECONDARY")
+    if not version:
+        pytest.skip("SL_VERSION_SECONDARY resolved empty — set it in .env(.example)")
+    home_cli = Path.home() / f"starlake-{version}" / "starlake"
+    if home_cli.is_file():
+        return str(home_cli)
+    pytest.skip(
+        f"Secondary Starlake CLI {version} not found at {home_cli} — install with "
+        f"distrib/setup.sh --version={version} --target=$HOME/starlake-{version}"
+    )
 
 
 @pytest.fixture(scope="session")
@@ -315,3 +338,17 @@ def runtime_dags(runtime_env, tmp_path_factory):
         f"dag-generate failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     return out, isolated, env
+
+
+@pytest.fixture(scope="module")
+def runtime_env_vars(runtime_dags):
+    """Apply the ``runtime_dags`` env to ``os.environ`` for the module.
+
+    Restores the previous environment on teardown. Promoted from the
+    snowflake integration/runtime modules so every orchestrator test
+    module can share it instead of keeping local copies.
+    """
+    _, _, env = runtime_dags
+    original = set_env(env)
+    yield env
+    restore_env(original)

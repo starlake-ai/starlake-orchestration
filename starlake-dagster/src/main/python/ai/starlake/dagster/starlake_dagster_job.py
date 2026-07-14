@@ -59,9 +59,11 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
         """
 
         if isinstance(pre_load_strategy, str):
-            pre_load_strategy = \
-                StarlakePreLoadStrategy(pre_load_strategy) if StarlakePreLoadStrategy.is_valid(pre_load_strategy) \
-                    else self.pre_load_strategy
+            pre_load_strategy = self.__class__.sl_resolve_pre_load_strategy(
+                pre_load_strategy,
+                default=self.pre_load_strategy,
+                action="sl_pre_load(pre_load_strategy=...)",
+            )
 
         pre_load_strategy = self.pre_load_strategy if not pre_load_strategy else pre_load_strategy
 

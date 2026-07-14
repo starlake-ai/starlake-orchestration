@@ -106,7 +106,12 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                                 f"but not for {not_materialized_asset_key_strs}"
                             )
                         else:
-                            # If all datasets were materialized, we run the pipeline
+                            # If all datasets were materialized, we run the pipeline.
+                            # Advance the cursor so the handled materializations are
+                            # not re-consumed on the next tick — without it Dagster
+                            # raises DagsterInvalidDefinitionError on any tick that
+                            # yields runs (issue #80).
+                            context.advance_cursor(asset_events)
                             return RunRequest(
                                 run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options) if sl_options else None,
                             )
@@ -128,6 +133,9 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
 
                     # if there are no datasets to check, we run the pipeline
                     if len(datasets_to_check) == 0:
+                        # Advance the cursor before yielding the run (issue #80),
+                        # mirroring the freshness-checked path below.
+                        context.advance_cursor(asset_events)
                         return RunRequest(
                             run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options) if sl_options else None,
                         )
@@ -178,7 +186,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                     )
                 )
             elif cron:
-                crons.append(ScheduleDefinition(job_name = pipeline_id, cron_schedule = cron, default_status=DefaultScheduleStatus.RUNNING))
+                crons.append(ScheduleDefinition(job_name = pipeline_id, cron_schedule = cron, default_status=DefaultScheduleStatus.RUNNING, execution_timezone=self.job.timezone))
 
         defs = Definitions(
             assets=[AssetSpec(asset.uri) for pipeline in self.pipelines for asset in pipeline.assets],
@@ -496,7 +504,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                     cron_schedule = cron,
                     start=self.start_date,
                     fmt=sl_timestamp_format,
-                    timezone='UTC',
+                    timezone=self.job.timezone,
                 ),
                 run_config_for_partition_fn=fun,
             )

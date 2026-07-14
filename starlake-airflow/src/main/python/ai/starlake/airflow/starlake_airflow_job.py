@@ -618,7 +618,11 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         Returns:
             Optional[BaseOperator]: The Airflow task or None.
         """
-        pre_load_strategy = self.pre_load_strategy if not pre_load_strategy else pre_load_strategy
+        pre_load_strategy = self.__class__.sl_resolve_pre_load_strategy(
+            pre_load_strategy,
+            default=self.pre_load_strategy,
+            action="sl_pre_load(pre_load_strategy=...)",
+        )
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'do_xcom_push': True})
         kwargs.update({'doc': kwargs.get('doc', f'Pre-load for tables {",".join(list(tables or []))} within {domain} using {pre_load_strategy.value} strategy.')})

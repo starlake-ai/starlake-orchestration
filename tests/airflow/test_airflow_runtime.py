@@ -43,31 +43,30 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.shared.conftest import (
-    get_duckdb,
-    resolve_duckdb_connection_db_path,
-    restore_env,
-    set_env,
+from tests.shared.conftest import get_duckdb, resolve_duckdb_connection_db_path, restore_env, set_env
+from tests.shared.expected_results import (
+    EXPECTED_KPI_SNAPSHOTS,
+    EXPECTED_ROW_COUNTS,
+    EXPECTED_TABLE_SNAPSHOTS,
+    TOP_CUSTOMERS_MAX_ROWS,
+    table_snapshot,
+)
+
+from tests.airflow.dataset_compat import (
+    AIRFLOW_AVAILABLE,
+    AIRFLOW_VERSION,
+    SUPPORTS_ASSETS,
+    Dataset,
+    DatasetAll,
+    DatasetAny,
+    CONDITION_ATTR as _CONDITION_ATTR,
 )
 
 try:
-    import airflow
-
-    AIRFLOW_AVAILABLE = True
-    AIRFLOW_VERSION = tuple(int(x) for x in airflow.__version__.split(".")[:2])
-    SUPPORTS_ASSETS = AIRFLOW_VERSION >= (3, 0)
-    if SUPPORTS_ASSETS:
-        from airflow.sdk import Asset as Dataset
-        from airflow.sdk import AssetAll as DatasetAll
-        from airflow.sdk import AssetAny as DatasetAny
-    else:
-        from airflow.datasets import Dataset, DatasetAll, DatasetAny
     from airflow.models.dag import DAG
     from airflow.utils.state import DagRunState
-except ImportError:
-    AIRFLOW_AVAILABLE = False
-    AIRFLOW_VERSION = (0, 0)
-    SUPPORTS_ASSETS = False
+except ImportError:  # pragma: no cover — collection guard only
+    pass
 
 pytestmark = [
     pytest.mark.integration,
@@ -76,9 +75,6 @@ pytestmark = [
         reason="Requires Apache Airflow",
     ),
 ]
-
-# The name of the condition attribute on dataset/asset-triggered timetables.
-_CONDITION_ATTR = "asset_condition" if SUPPORTS_ASSETS else "dataset_condition"
 
 # Use "now" as execution date — the DAG's start_date is derived from
 # the generated file's mtime, which is always "today".  An execution
@@ -275,20 +271,25 @@ class TestAirflowRuntimeLoad:
         _, isolated, _ = executed_load_dags
         conn = get_duckdb(isolated)
         try:
-            customers = conn.execute(
-                "SELECT count(*) FROM starbake.customers"
-            ).fetchone()[0]
-            assert customers == 7, f"Expected 7 customers, got {customers}"
+            for table, expected_count in EXPECTED_ROW_COUNTS.items():
+                count = conn.execute(
+                    f"SELECT count(*) FROM {table}"
+                ).fetchone()[0]
+                assert count == expected_count, (
+                    f"Expected {expected_count} rows in {table}, got {count}"
+                )
+        finally:
+            conn.close()
 
-            orders = conn.execute(
-                "SELECT count(*) FROM starbake.orders"
-            ).fetchone()[0]
-            assert orders == 10, f"Expected 10 orders, got {orders}"
-
-            products = conn.execute(
-                "SELECT count(*) FROM starbake.products"
-            ).fetchone()[0]
-            assert products == 5, f"Expected 5 products, got {products}"
+    def test_duckdb_state_matches_canonical_snapshots(self, executed_load_dags):
+        """NFR1: the loaded data equals the canonical cross-orchestrator snapshot."""
+        _, isolated, _ = executed_load_dags
+        conn = get_duckdb(isolated)
+        try:
+            for table, expected_rows in EXPECTED_TABLE_SNAPSHOTS.items():
+                assert table_snapshot(conn, table) == expected_rows, (
+                    f"{table}: DuckDB state diverges from the canonical snapshot"
+                )
         finally:
             conn.close()
 
@@ -342,9 +343,24 @@ class TestAirflowRuntimeTransform:
                 "SELECT count(*) FROM kpi.top_customers"
             ).fetchone()[0]
             assert top_customers > 0, "kpi.top_customers is empty"
-            assert top_customers <= 5, (
-                f"top_customers has {top_customers} rows, expected <= 5"
+            assert top_customers <= TOP_CUSTOMERS_MAX_ROWS, (
+                f"top_customers has {top_customers} rows, "
+                f"expected <= {TOP_CUSTOMERS_MAX_ROWS}"
             )
+        finally:
+            conn.close()
+
+    def test_transform_results_match_canonical_snapshots(
+        self, executed_transform_dags
+    ):
+        """NFR1: transform outputs equal the canonical cross-orchestrator snapshot."""
+        _, isolated, _ = executed_transform_dags
+        conn = get_duckdb(isolated)
+        try:
+            for table, expected_rows in EXPECTED_KPI_SNAPSHOTS.items():
+                assert table_snapshot(conn, table) == expected_rows, (
+                    f"{table}: DuckDB state diverges from the canonical snapshot"
+                )
         finally:
             conn.close()
 
