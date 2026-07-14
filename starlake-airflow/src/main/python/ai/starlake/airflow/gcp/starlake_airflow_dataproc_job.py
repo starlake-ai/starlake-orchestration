@@ -30,9 +30,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, Starla
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeAirflowOptions, StarlakeDatasetMixin
 
-from airflow.sdk.bases.operator import BaseOperator
-
-from airflow.task.trigger_rule import TriggerRule
+from ai.starlake.airflow.compat import BaseOperator, TriggerRule
 
 class StarlakeAirflowDataprocMasterConfig(StarlakeDataprocMasterConfig, StarlakeAirflowOptions):
     def __init__(self, machine_type: str, disk_type: str, disk_size: int, options: dict, **kwargs):
@@ -219,6 +217,9 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             cluster_name = cluster_name[0:-1] + 'Z'
         task_id = f"{cluster_id}_submit" if not task_id else task_id
         arguments = [] if not arguments else arguments
+        # explicit --scheduledDate override — popped unconditionally: BaseOperator
+        # would reject the kwarg
+        scheduled_date = kwargs.pop('scheduled_date', None)
         if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
             params: dict = kwargs.get('params', dict())
             cron = params.get('cron_expr', params.get('cron', None))
@@ -226,7 +227,10 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             kwargs.update({'params': params})
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+            if scheduled_date:
+                tmp_arguments.append(f"\'{scheduled_date}\'")
+            else:
+                tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",") if not jar_list else jar_list

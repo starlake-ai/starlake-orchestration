@@ -28,13 +28,11 @@ from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, S
 
 from airflow import DAG
 
-from airflow.sdk import Asset as Dataset   # Airflow 3.x
+from ai.starlake.airflow.compat import BaseOperator, Dataset, TaskGroup, get_current_context
 
-from airflow.sdk.bases.operator import BaseOperator
+from ai.starlake.airflow.starlake_airflow_api import StarlakeAirflowApiClient
 
 from airflow.utils.context import Context
-
-from airflow.sdk import TaskGroup
 
 from airflow.utils.state import DagRunState
 
@@ -91,7 +89,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         def ts_as_datetime(ts, context: Context = None):
             from datetime import datetime
             if not context:
-                from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
             sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
@@ -107,7 +104,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         from datetime import datetime
         def sl_dates(cron_expr: str, start_time: datetime, context: Context = None) -> str:
             if not context:
-                from airflow.operators.python import get_current_context
                 context = get_current_context()
             ti = context["task_instance"]
             sl_data_interval_start = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value)
@@ -122,6 +118,8 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         user_defined_macros["ts_as_datetime"] = ts_as_datetime
         user_defined_macros["sl_scheduled_dataset"] = sl_scheduled_dataset
         user_defined_macros["sl_scheduled_date"] = sl_scheduled_date
+        from ai.starlake.airflow import sl_options_from_events
+        user_defined_macros["sl_options_from_events"] = sl_options_from_events
 
         user_defined_filters = kwargs.get('user_defined_filters', job.caller_globals.get('user_defined_filters', None))
         kwargs.pop('user_defined_filters', None)
@@ -171,27 +169,33 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         shutil.copyfile(Path(self.job.caller_globals['__file__']), Path(DAG_FILE))
         print(f"Pipeline {DAG_ID} deployed to {DAG_FILE}")
 
-    def delete(self, **kwargs) -> None:
-        """Delete the pipeline."""
+    @staticmethod
+    def __api_client(**kwargs) -> StarlakeAirflowApiClient:
+        """Client targeting the Airflow instance given by kwargs/environment.
+
+        AIRFLOW_BASE_URL / AIRFLOW_USERNAME / AIRFLOW_PASSWORD select the
+        instance and its REST credentials; the client picks the version-
+        appropriate API (/api/v1 + basic auth on Airflow 2, /api/v2 + JWT on
+        Airflow 3) and never touches the local metadata database when a base
+        URL is explicitly targeted.
+        """
         import os
-        env = os.environ.copy() # Copy the current environment variables
-        DAG_ID = self.pipeline_id
-        AIRFLOW_BASE_URL = kwargs.get('AIRFLOW_BASE_URL', env.get('AIRFLOW_BASE_URL', "http://localhost:8080"))
-        AIRFLOW_API_BASE_URL = f"{AIRFLOW_BASE_URL}/api/v1"
-        AIRFLOW_USERNAME = kwargs.get('AIRFLOW_USERNAME', env.get('AIRFLOW_USERNAME', None))
-        AIRFLOW_PASSWORD = kwargs.get('AIRFLOW_PASSWORD', env.get('AIRFLOW_PASSWORD', None))
-        if AIRFLOW_USERNAME and AIRFLOW_PASSWORD:
-            AIRFLOW_AUTH = (AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
-        else:
-            AIRFLOW_AUTH = None
-        import requests
-        response = requests.delete(
-            f"{AIRFLOW_API_BASE_URL}/dags/{DAG_ID}",
-            headers={'Content-Type': 'application/json'},
-            auth=AIRFLOW_AUTH
+        env = os.environ.copy()
+        return StarlakeAirflowApiClient(
+            base_url=kwargs.get('AIRFLOW_BASE_URL', env.get('AIRFLOW_BASE_URL', "http://localhost:8080")),
+            username=kwargs.get('AIRFLOW_USERNAME', env.get('AIRFLOW_USERNAME', None)),
+            password=kwargs.get('AIRFLOW_PASSWORD', env.get('AIRFLOW_PASSWORD', None)),
         )
-        response.raise_for_status()
-        print(f"Pipeline {DAG_ID} deleted")
+
+    def delete(self, **kwargs) -> None:
+        """Delete the pipeline (best-effort: a warning is printed when the
+        targeted Airflow instance cannot be reached)."""
+        try:
+            client = self.__api_client(**kwargs)
+            client.delete_dag(self.pipeline_id)
+            print(f"Pipeline {self.pipeline_id} deleted")
+        except Exception as e:
+            print(f"Pipeline {self.pipeline_id} could not be deleted: {str(e)}")
 
     def run(self, logical_date: Optional[str] = None, timeout: str = '120', mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN, **kwargs) -> None:
         """Run the pipeline.
@@ -200,8 +204,6 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             timeout (str): the timeout in seconds.
             mode (StarlakeExecutionMode): the execution mode.
         """
-        import os
-        env = os.environ.copy() # Copy the current environment variables
         DAG_ID = self.pipeline_id
         if mode == StarlakeExecutionMode.DRY_RUN:
             # Test the pipeline with the given configuration
@@ -212,8 +214,13 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             conf = dict()
             conf.update(kwargs)
             conf.update({'start_date': execution_date, 'backfill': False})
-            from airflow.configuration import initialize_config
-            initialize_config().load_test_config()
+            try:
+                from airflow.configuration import initialize_config
+                initialize_config().load_test_config()
+            except ImportError:
+                # Airflow 3: initialize_config was removed
+                from airflow.configuration import conf as airflow_conf
+                airflow_conf.load_test_config()
             try:
                 print(f"Testing pipeline {DAG_ID} with execution date {execution_date} and  configuration {conf}")
                 self.dag.test(execution_date=execution_date, run_conf=conf)
@@ -222,51 +229,30 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
 
         elif mode == StarlakeExecutionMode.RUN:
             import time
-            # Run the pipeline with the given configuration
-            AIRFLOW_BASE_URL = kwargs.get('AIRFLOW_BASE_URL', env.get('AIRFLOW_BASE_URL', "http://localhost:8080"))
-            AIRFLOW_API_BASE_URL = f"{AIRFLOW_BASE_URL}/api/v1"
-            AIRFLOW_USERNAME = kwargs.get('AIRFLOW_USERNAME', env.get('AIRFLOW_USERNAME', None))
-            AIRFLOW_PASSWORD = kwargs.get('AIRFLOW_PASSWORD', env.get('AIRFLOW_PASSWORD', None))
-            if AIRFLOW_USERNAME and AIRFLOW_PASSWORD:
-                AIRFLOW_AUTH = (AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
-            else:
-                AIRFLOW_AUTH = None
-            payload = {k: kwargs[k] for k in ['conf', 'logical_date', 'dag_run_id'] if k in kwargs}
-            # conf = kwargs.get('conf', {'backfill': True})
-            # payload['conf'] = conf
-            # generate a unique dag_run_id
             import uuid
-            dag_run_id = f"manual_run_{uuid.uuid4()}"
-            payload['dag_run_id'] = dag_run_id
-            if logical_date:
-                payload['logical_date'] = logical_date + 'Z'
-            print(f"Starting pipeline {DAG_ID} with configuration {payload}")
-            import requests
-            from requests.exceptions import HTTPError
-            response = requests.post(
-                f"{AIRFLOW_API_BASE_URL}/dags/{DAG_ID}/dagRuns",
-                headers={'Content-Type': 'application/json'},
-                json=payload,
-                auth=AIRFLOW_AUTH
-            )
+            # Run the pipeline with the given configuration through the
+            # version-appropriate API (see StarlakeAirflowApiClient)
+            client = self.__api_client(**kwargs)
+            # generate a unique dag_run_id
+            dag_run_id = kwargs.get('dag_run_id', f"manual_run_{uuid.uuid4()}")
+            run_logical_date = logical_date + 'Z' if logical_date else None
+            print(f"Starting pipeline {DAG_ID} with dag_run_id {dag_run_id} and logical date {run_logical_date}")
             try:
-                response.raise_for_status()
-            except HTTPError as e:
+                run = client.trigger_dag_run(
+                    DAG_ID,
+                    dag_run_id=dag_run_id,
+                    logical_date=run_logical_date,
+                    conf=kwargs.get('conf', None),
+                )
+            except Exception as e:
                 print(f"Pipeline {DAG_ID} failed with error {str(e)}")
                 return
-            json_response: dict = response.json() or dict()
-            dag_run_id = json_response.get('dag_run_id', None)
+            dag_run_id = (run or {}).get('dag_run_id', None)
             if dag_run_id:
                 print(f"Pipeline {DAG_ID} started with dag_run_id {dag_run_id}")
                 def check_state() -> bool:
-                    response = requests.get(
-                        f"{AIRFLOW_API_BASE_URL}/dags/{DAG_ID}/dagRuns/{dag_run_id}",
-                        headers={'Content-Type': 'application/json'},
-                        auth=AIRFLOW_AUTH
-                    )
-                    response.raise_for_status()
-                    json_response = response.json()
-                    state = json_response.get('state', None)
+                    dag_run = client.get_dag_run(DAG_ID, dag_run_id)
+                    state = (dag_run or {}).get('state', None)
                     if state == DagRunState.FAILED:
                         raise Exception(f"Pipeline {DAG_ID} failed")
                     elif state == DagRunState.SUCCESS:
@@ -298,6 +284,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
 
         else:
             raise ValueError(f"Execution mode {mode} is not supported")
+
 
 class AirflowTaskGroup(AbstractTaskGroup[TaskGroup]):
     def __init__(self, group_id: str, group: TaskGroup, **kwargs) -> None:

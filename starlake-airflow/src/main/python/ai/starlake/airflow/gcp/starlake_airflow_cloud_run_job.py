@@ -32,18 +32,19 @@ from ai.starlake.airflow.bash import StarlakeBashOperator
 
 from airflow.exceptions import AirflowException
 
-from airflow.sdk.bases.operator import BaseOperator
-
-from airflow.providers.standard.operators.bash import BashOperator
+from ai.starlake.airflow.compat import (
+    BaseOperator,
+    BaseSensorOperator,
+    BashOperator,
+    BashSensor,
+    PokeReturnValue,
+    TaskGroup,
+)
 
 from airflow.providers.google.cloud.hooks.cloud_run import CloudRunHook
 from airflow.providers.google.cloud.operators.cloud_run import  CloudRunExecuteJobOperator
 
-from airflow.sdk.bases.sensor import BaseSensorOperator, PokeReturnValue
-from airflow.providers.standard.sensors.bash import BashSensor
-
 from airflow.utils.context import Context
-from airflow.sdk import TaskGroup
 
 from google.cloud.run_v2.types import Execution
 from google.longrunning import operations_pb2
@@ -111,6 +112,9 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         """
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'retry_delay': timedelta(seconds=self.retry_delay_in_seconds)})
+        # explicit --scheduledDate override — popped unconditionally: BaseOperator
+        # would reject the kwarg
+        scheduled_date = kwargs.pop('scheduled_date', None)
         if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
             arguments = [] if not arguments else arguments
             params: dict = kwargs.get('params', dict())
@@ -119,7 +123,10 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             kwargs.update({'params': params})
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+            if scheduled_date:
+                tmp_arguments.append(f"\'{scheduled_date}\'")
+            else:
+                tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
         command = f'^{self.separator}^' + self.separator.join(arguments)

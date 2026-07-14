@@ -1,0 +1,16 @@
+---
+version: 1
+dag:
+  comment: "dag for loading {{domain}}.{{table}}"
+  template: "load/snowflake__scheduled_table__sql.py.j2"
+  filename: "{{domain}}_{{table}}_dag.py"
+  options:
+    sl_env_var: "{\"SL_ROOT\": \"{{SL_ROOT}}\", \"SL_ENV\": \"DUCKDB\"}"
+    pre_load_strategy: "none"
+    tags: "{{domain}}"
+    timezone: "UTC"
+    stage_location: "staging"
+    packages: "croniter,python-dateutil,snowflake-snowpark-python"
+    warehouse: "COMPUTE_WH"
+    retry_delay: "10"
+    sl_incoming_file_stage: "@incoming_stage"

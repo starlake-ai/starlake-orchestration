@@ -94,6 +94,10 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
         transform = task_type == TaskType.TRANSFORM
         params = kwargs.get('params', dict())
 
+        # static sl_options sections to publish on the materialization (see
+        # DagsterLogicalDatetimeConfig.sl_options for the runtime counterpart)
+        extra = kwargs.pop("extra", None)
+
         assets: List[AssetKey] = kwargs.get("assets", [])
 
         ins=kwargs.get("ins", {})
@@ -122,20 +126,35 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
             if dataset:
                 assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset, **kwargs))
 
-            tmp_arguments = []
-            tmp_arguments.append("--scheduledDate")
             from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
-            tmp_arguments.append(f"\'{logical_datetime}\'")
             command = arguments.pop(0)
-            command_with_arguments = [command] + tmp_arguments + arguments
+            if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
+                tmp_arguments = ["--scheduledDate", f"\'{logical_datetime}\'"]
+                command_with_arguments = [command] + tmp_arguments + arguments
+            else:
+                command_with_arguments = [command] + arguments
 
             if transform:
                 opts = command_with_arguments[-1].split(",")
                 transform_opts = StarlakeDagsterUtils.get_transform_options(context, config, params, **kwargs).split(',')
                 opts.extend(transform_opts)
+                # runtime sl_options carried by the run (sensor RunRequest or manual
+                # launch) — appended last so they override the static ones (starlake
+                # keeps the last occurrence of a duplicate key): precedence
+                # static < 'all' < task-specific.
+                runtime_options = StarlakeDagsterUtils.get_sl_options(context, config, task_id)
+                if runtime_options:
+                    opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
                 command_with_arguments[-1] = ",".join(opts)
+
+            # double quotes so values containing spaces survive shell word splitting;
+            # applied here, after the transform branch has split/merged the value on commas
+            for i, arg in enumerate(command_with_arguments[:-1]):
+                if arg == "--options":
+                    command_with_arguments[i + 1] = f'"{command_with_arguments[i + 1]}"'
+                    break
 
             command = sl_command + f" {' '.join(command_with_arguments or [])}"
 
@@ -171,7 +190,7 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
                 for asset in assets:
                     yield AssetMaterialization(asset_key=asset.path, description=kwargs.get("description", f"Starlake command {command} execution succeeded"))
                 if dataset:
-                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, **kwargs)
+                    yield StarlakeDagsterUtils.get_materialization(context, config, dataset, extra=extra, **kwargs)
 
                 yield Output(value=output, output_name=out)
 

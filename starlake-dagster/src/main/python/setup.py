@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.4.3")
+version = os.environ.get("PROJECT_VERSION", "0.5.0")
 
 setup(name='starlake-dagster',
       version=version,
@@ -21,7 +21,7 @@ setup(name='starlake-dagster',
       license='Apache 2.0',
 #      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-dagster',
       packages=find_packages(include=['ai', 'ai.*']),
-      install_requires=['starlake-orchestration~=0.4'],
+      install_requires=['starlake-orchestration~=0.5'],
       extras_require={
         "dagster": [], #["dagster"],
         "shell": ["dagster-shell"],

@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.3.4")
+version = os.environ.get("PROJECT_VERSION", "0.4.0")
 
 setup(name='starlake-snowflake',
       version=version,
@@ -22,7 +22,7 @@ setup(name='starlake-snowflake',
 #      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-snowflake',
       packages=find_packages(include=['ai', 'ai.*']),
       install_requires=[
-          'starlake-orchestration~=0.4',
+          'starlake-orchestration~=0.5',
           'croniter',
           'sqlalchemy',
           'snowflake',

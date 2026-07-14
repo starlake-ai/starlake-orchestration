@@ -1,0 +1,298 @@
+name: Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - '**'
+  push:
+    branches:
+      - main
+
+# dorny/paths-filter reads the PR file list via the GitHub API and requires
+# pull-requests: read; declare permissions explicitly so the workflow keeps
+# working if the repo/org default token permissions are ever restricted.
+permissions:
+  contents: read
+  pull-requests: read
+
+# Supersede in-flight runs on rapid PR pushes (keep main pushes intact).
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  JAVA_VERSION: 17
+  PYTHON_VERSION: "3.11"
+  SL_VERSION: "1.5.11"
+  SL_ENV: DUCKDB
+  # ---------------------------------------------------------------------
+  # SINGLE EDIT POINT for the test matrix: one JSON object per leg.
+  # Adding an orchestrator version = adding one line; "enabled": false
+  # parks a leg without deleting it (still parsed and JSON-validated on
+  # every run, spawns nothing). Fields:
+  #   name                 → check-name suffix (test-<name>) + uv cache suffix
+  #   module               → path-filter key + install/import-sanity switch
+  #   orchestrator_version → pip pin for the orchestrator ("-" = none; the
+  #                          snowflake SDK comes via install_requires)
+  #   companion            → extra coupled pin (dagster-shell tracks dagster)
+  #   tests                → pytest path(s) for the leg
+  #   enabled              → spawn switch
+  # tests/airflow/ is a DUAL-VERSION suite (compat layer + commit b4ab4da):
+  # BOTH airflow legs run the SAME suite; the Airflow-2-only tests (runtime
+  # suite, TestDatabaseTransport) carry their own skipifs and auto-skip on
+  # the 3.3.0 leg.
+  # ---------------------------------------------------------------------
+  TEST_MATRIX: >-
+    [
+      {"name":"orchestration","module":"orchestration","orchestrator_version":"-","tests":"tests/orchestration/ tests/shared/","enabled":true},
+      {"name":"airflow-2.10.5","module":"airflow","orchestrator_version":"2.10.5","tests":"tests/airflow/","enabled":true},
+      {"name":"airflow-3.3.0","module":"airflow","orchestrator_version":"3.3.0","tests":"tests/airflow/","enabled":true},
+      {"name":"dagster-1.9.13","module":"dagster","orchestrator_version":"1.9.13","companion":"dagster-shell==0.25.13","tests":"tests/dagster/","enabled":true},
+      {"name":"snowflake","module":"snowflake","orchestrator_version":"-","tests":"tests/snowflake/","enabled":true}
+    ]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      legs: ${{ steps.matrix.outputs.legs }}
+      core_changed: ${{ steps.matrix.outputs.core_changed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        with:
+          filters: |
+            core:
+              - 'starlake-orchestration/src/main/**'
+              - 'tests/shared/**'
+              - 'tests/orchestration/**'
+              - 'tests/sample-project/**'
+              - 'tests/conftest.py'
+              - 'tests/__init__.py'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.env.example'
+              - '.github/workflows/test.yml'
+            airflow:
+              - 'starlake-airflow/src/main/**'
+              - 'tests/airflow/**'
+            dagster:
+              - 'starlake-dagster/src/main/**'
+              - 'tests/dagster/**'
+            snowflake:
+              - 'starlake-snowflake/src/main/**'
+              - 'tests/snowflake/**'
+      # Emits the DOCUMENTED whole-matrix form (GitHub expressions reference,
+      # fromJSON example): output is {"include":[{...},{...}]} consumed as
+      # `matrix: ${{ fromJSON(...) }}`. jq is preinstalled on ubuntu runners.
+      - name: Compute test matrix
+        id: matrix
+        env:
+          CORE: ${{ steps.filter.outputs.core }}
+          AIRFLOW: ${{ steps.filter.outputs.airflow }}
+          DAGSTER: ${{ steps.filter.outputs.dagster }}
+          SNOWFLAKE: ${{ steps.filter.outputs.snowflake }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CORE=true; AIRFLOW=true; DAGSTER=true; SNOWFLAKE=true
+          fi
+          changed='[]'
+          [ "$CORE" = "true" ] && changed=$(jq -c '. + ["orchestration","airflow","dagster","snowflake"]' <<<"$changed")
+          [ "$AIRFLOW" = "true" ] && changed=$(jq -c '. + ["airflow"]' <<<"$changed")
+          [ "$DAGSTER" = "true" ] && changed=$(jq -c '. + ["dagster"]' <<<"$changed")
+          [ "$SNOWFLAKE" = "true" ] && changed=$(jq -c '. + ["snowflake"]' <<<"$changed")
+          matrix=$(jq -c --argjson changed "$changed" \
+            '{include: [ .[] | select(.enabled) | select(.module as $m | $changed | index($m)) ]}' \
+            <<<"$TEST_MATRIX")
+          legs=$(jq '.include | length' <<<"$matrix")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          echo "core_changed=${CORE:-false}" >> "$GITHUB_OUTPUT"
+          echo "Test matrix ($legs legs, core_changed=${CORE:-false}): $matrix"
+
+  license-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Java and Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - name: Check Apache 2.0 license headers (NFR16)
+        run: >
+          mvn -B com.mycila:license-maven-plugin:4.2:check
+          -pl starlake-orchestration,starlake-airflow,starlake-dagster,starlake-snowflake
+
+  test:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.legs != '0' && needs.detect-changes.outputs.legs != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: test-${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      # Whole-matrix form from job output — the documented fromJSON pattern.
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # This job executes a remote install script (setup.sh below);
+          # never leave the GITHUB_TOKEN in .git/config here.
+          persist-credentials: false
+
+      - name: Set up Java 17 (Starlake CLI runtime)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up uv
+        # Pinned per setup-uv README recommendation; hash verified against the
+        # v8.3.2 tag via the GitHub API (2026-07-13)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          # Legs install very different wheel sets (airflow 2 vs airflow 3 vs
+          # dagster vs snowflake); without a suffix they contend for one cache
+          # key and only the first leg to finish gets its wheels cached.
+          cache-suffix: ${{ matrix.name }}
+
+      - name: Cache Starlake CLI
+        id: cache-starlake
+        uses: actions/cache@v4
+        with:
+          path: ~/starlake
+          key: starlake-cli-${{ env.SL_VERSION }}-v1
+
+      - name: Install Starlake CLI
+        if: steps.cache-starlake.outputs.cache-hit != 'true'
+        env:
+          ENABLE_ALL: "false"
+          ENABLE_BIGQUERY: "false"
+          ENABLE_AZURE: "false"
+          ENABLE_SNOWFLAKE: "false"
+          ENABLE_REDSHIFT: "false"
+          ENABLE_POSTGRESQL: "false"
+          ENABLE_KAFKA: "false"
+          ENABLE_MARIA: "false"
+          ENABLE_CLICKHOUSE: "false"
+          ENABLE_TRINODB: "false"
+          ENABLE_DUCKDB: "true"
+          ENABLE_API: "false"
+        # -f fails on HTTP errors (a bare `curl | bash` under the default
+        # shell has no pipefail, so a failed download would "succeed" empty);
+        # </dev/null makes any unexpected interactive prompt in setup.jar
+        # fail fast instead of hanging until the job timeout.
+        run: |
+          curl -fsSL -o /tmp/sl-setup.sh https://raw.githubusercontent.com/starlake-ai/starlake/master/distrib/setup.sh
+          bash /tmp/sl-setup.sh --version=${{ env.SL_VERSION }} --target=$HOME/starlake < /dev/null
+
+      - name: Add Starlake CLI to PATH
+        run: echo "$HOME/starlake" >> "$GITHUB_PATH"
+
+      # Fails loudly instead of letting integration tests skip silently; the
+      # grep also catches a stale cache whose installed version no longer
+      # matches SL_VERSION (starlake --version echoes versions.sh, no JVM).
+      - name: Starlake CLI sanity check
+        run: starlake --version | grep -F "${{ env.SL_VERSION }}"
+
+      - name: Create virtual environment
+        run: uv venv --python ${{ env.PYTHON_VERSION }}
+
+      - name: Install test dependencies
+        run: uv pip install -r pyproject.toml --extra test
+
+      # Each module's setup.py does open("README.md") but the per-module
+      # src/main/python/README.md files are NOT tracked in git — Maven's
+      # copy-readme execution creates them at build time. Stage them here
+      # or every package build below fails with FileNotFoundError.
+      - name: Stage module READMEs (Maven copy-readme equivalent)
+        run: |
+          for m in starlake-orchestration starlake-airflow starlake-dagster starlake-snowflake; do
+            cp "$m/README.md" "$m/src/main/python/README.md"
+          done
+
+      # All installs below are NON-editable: ai/__init__.py and
+      # ai/starlake/__init__.py are regular packages (no namespace
+      # declaration), so editable installs cannot merge the ai.starlake
+      # namespace — each -e package's import finder claims the whole `ai`
+      # tree and shadows the siblings (core's ai.starlake.job disappears
+      # under an editable orchestrator, or vice versa). Regular wheel
+      # installs physically merge the tree in site-packages, which is
+      # exactly what end users get from PyPI.
+      - name: Install local core (module under test, or core changed on this PR)
+        if: matrix.module == 'orchestration' || needs.detect-changes.outputs.core_changed == 'true'
+        run: uv pip install starlake-orchestration/src/main/python/
+
+      # Version-parameterized: the orchestrator pin comes from the matrix
+      # entry, not from hardcoded literals. Airflow's official constraints
+      # files are tagged constraints-<AIRFLOW_VERSION>/constraints-<PYTHON>.txt
+      # (verified: both constraints-2.10.5 and constraints-3.3.0 exist for 3.11).
+      - name: Install module under test
+        run: |
+          case "${{ matrix.module }}" in
+            orchestration)
+              echo "core already installed"
+              ;;
+            airflow)
+              uv pip install "apache-airflow==${{ matrix.orchestrator_version }}" \
+                --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.orchestrator_version }}/constraints-${{ env.PYTHON_VERSION }}.txt"
+              uv pip install starlake-airflow/src/main/python/
+              ;;
+            dagster)
+              uv pip install "dagster==${{ matrix.orchestrator_version }}" "${{ matrix.companion }}"
+              uv pip install starlake-dagster/src/main/python/
+              ;;
+            snowflake)
+              uv pip install starlake-snowflake/src/main/python/
+              ;;
+            *)
+              echo "Unknown matrix module: ${{ matrix.module }}" >&2
+              exit 1
+              ;;
+          esac
+
+      # Guards against fake-green runs: a broken install would otherwise make
+      # the availability skip-guards (or collection errors) hide the problem.
+      - name: Module import sanity check
+        run: |
+          case "${{ matrix.module }}" in
+            orchestration) uv run --no-sync python -c "import ai.starlake.orchestration" ;;
+            airflow)       uv run --no-sync python -c "import airflow, ai.starlake.airflow" ;;
+            dagster)       uv run --no-sync python -c "import dagster, dagster_shell, ai.starlake.dagster" ;;
+            snowflake)     uv run --no-sync python -c "import snowflake.core, ai.starlake.snowflake" ;;
+          esac
+
+      # The pytest target comes from the matrix entry. Both airflow legs run
+      # the dual-version tests/airflow/ suite; on 3.3.0 the Airflow-2-only
+      # tests (runtime suite, TestDatabaseTransport) auto-skip — -ra prints
+      # every skip reason so the expected v3 skips stay auditable.
+      - name: Run tests
+        run: uv run --no-sync pytest ${{ matrix.tests }} -v -ra --durations=15
+
+  # Stable, always-present check name for branch protection: the dynamic
+  # matrix means test-<name> checks exist only when that module changed
+  # (and the leg is enabled), so THIS is the job to mark as a required
+  # status check (never the legs).
+  tests-passed:
+    needs: [detect-changes, test, license-check]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any upstream job failed or was cancelled
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "Upstream job failed or was cancelled" >&2
+            exit 1
+          fi
+          echo "All upstream jobs succeeded or were skipped"

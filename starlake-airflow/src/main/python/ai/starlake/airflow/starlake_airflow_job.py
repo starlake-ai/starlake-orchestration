@@ -33,22 +33,20 @@ from ai.starlake.job.starlake_job import StarlakeOrchestrator
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
 
-from airflow.sdk import Asset as Dataset
-from airflow.models.asset import AssetEvent, AssetModel
-
+from ai.starlake.airflow.compat import (
+    BaseOperator,
+    Dataset,
+    EmptyOperator,
+    ShortCircuitOperator,
+    TaskGroup,
+    get_current_context,
+    supports_assets,
+    supports_inlet_events,
+)
 
 from airflow.models import DagRun, TaskInstance
-from airflow.models.serialized_dag import SerializedDagModel
-
-from airflow.sdk.bases.operator import BaseOperator
-
-from airflow.providers.standard.operators.empty import EmptyOperator
-
-from airflow.providers.standard.operators.python import ShortCircuitOperator
 
 from airflow.utils.context import Context
-
-from airflow.sdk import TaskGroup
 
 import logging
 
@@ -61,10 +59,57 @@ DEFAULT_DAG_ARGS = {
     'start_date': datetime(2023, 1, 1),
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 1, 
+    'retries': 1,
     'retry_delay': timedelta(minutes=5),
     'max_active_runs': 1,
 }
+
+def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Optional[str] = None) -> str:
+    """Jinja macro rendering the runtime starlake --options fragment carried by the
+    triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in the event
+    extra, as a dict of sections: {"all": {key: value}, "<domain.task>": {key: value}}).
+    The 'all' section applies to every transformation of the triggered pipeline; the
+    section keyed by the transformation name only to that one. The fragment is
+    appended last to the command's --options, whose duplicate keys are resolved
+    last-wins by starlake — hence the precedence: static options < 'all' < task-specific.
+    Merging is fail-loud: the same key carried with different values by coalesced
+    events raises (conflicting run variables must stop the run, not silently pick
+    one). dag_run.conf[StarlakeParameters.OPTIONS_PARAMETER] overrides events — the
+    manual-recovery escape hatch. Returns 'key=value[,key=value...]', or
+    'sl_options_applied=0' when nothing applies (never empty, so the fragment is
+    always a valid --options token)."""
+    sections: dict = {}
+    for uri, events in (triggering_dataset_events or {}).items():
+        for event in events or []:
+            extra = getattr(event, "extra", None) or {}
+            event_sections = extra.get(StarlakeParameters.OPTIONS_PARAMETER.value) or {}
+            if not isinstance(event_sections, dict):
+                continue
+            for section, opts in event_sections.items():
+                if not isinstance(opts, dict):
+                    continue
+                merged = sections.setdefault(section, {})
+                for key, value in opts.items():
+                    if key in merged and str(merged[key]) != str(value):
+                        from airflow.exceptions import AirflowException
+                        raise AirflowException(
+                            f"Conflicting values for {StarlakeParameters.OPTIONS_PARAMETER.value}['{section}']['{key}'] across triggering dataset events ({uri}): "
+                            f"'{merged[key]}' != '{value}'. Coalesced events carry different run variables — re-trigger the runs one by one, "
+                            f"passing dag_run.conf['{StarlakeParameters.OPTIONS_PARAMETER.value}']."
+                        )
+                    merged[key] = value
+    conf = getattr(dag_run, "conf", None) or {}
+    conf_sections = conf.get(StarlakeParameters.OPTIONS_PARAMETER.value) or {}
+    if isinstance(conf_sections, dict):
+        for section, opts in conf_sections.items():
+            if isinstance(opts, dict):
+                sections.setdefault(section, {}).update(opts)
+    options = dict(sections.get("all", {}))
+    if name:
+        options.update(sections.get(name, {}))
+    if not options:
+        return "sl_options_applied=0"
+    return ",".join(f"{key}={value}" for key, value in options.items())
 
 class AirflowDataset(AbstractEvent[Dataset]):
     @classmethod
@@ -189,16 +234,17 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
             def get_triggering_datasets(context: Context = None) -> List[Dataset]:
                 if not context:
-                    from airflow.operators.python import get_current_context
                     context = get_current_context()
 
                 ti = context["task_instance"]
                 template_ctx = ti.get_template_context()
 
-                # Airflow 3.x: triggering_asset_events
+                # Airflow 3.x: triggering_asset_events / Airflow 2.4+: triggering_dataset_events
                 triggering_dataset_events = []
                 if "triggering_asset_events" in template_ctx:
                     triggering_dataset_events = template_ctx["triggering_asset_events"]
+                elif "triggering_dataset_events" in template_ctx:
+                    triggering_dataset_events = template_ctx["triggering_dataset_events"]
 
                 if not triggering_dataset_events:
                     # No triggering assets
@@ -211,7 +257,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         continue
 
                     for event in events:
-                        if type(event).__name__ != "AssetEvent":
+                        if type(event).__name__ not in ("AssetEvent", "DatasetEvent"):
                             continue
 
                         extra = event.extra or {}
@@ -239,104 +285,18 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 Find previous successful DagRuns for the current DAG, excluding runs
                 where at least one leaf task is SKIPPED.
 
-                Uses Airflow public API via StarlakeAirflowApiClient.
+                Executed as a single anti-join query against the Airflow 2 metadata
+                database, or composed from the paginated REST primitives otherwise
+                (see StarlakeAirflowApiClient.find_previous_dag_runs).
                 """
-
-                # ----------------------------------------------------------------------
-                # 1. Identify leaf tasks
-                # ----------------------------------------------------------------------
-                leaves = dag.leaves
-                leaf_task_ids = [t.task_id for t in leaves]
+                leaf_task_ids = [task.task_id for task in dag.leaves]
                 logging.info("Leaf tasks to check: [%s]", ",".join(leaf_task_ids))
-
-                # ----------------------------------------------------------------------
-                # 2. Build DagRun query params
-                # ----------------------------------------------------------------------
-                dr_params: Dict[str, Any] = {
-                    "state": "success",
-                    "limit": 100,
-                    "order_by": ["-data_interval_end", "-start_date"],
-                }
-
-                if at_scheduled_date:
-                    dr_params["end_date_lte"] = scheduled_date.isoformat()
-                else:
-                    dr_params["end_date_lt"] = scheduled_date.isoformat()
-
-                dag_runs = client.list_dag_runs(dag_id, **dr_params)
-
-                # Extract end_date values
-                end_dates = [dr.end_date for dr in dag_runs if dr.end_date]
-                logging.info(
-                    "Found %d candidate DagRuns, end_dates: [%s]",
-                    len(dag_runs),
-                    ",".join(end_dates),
+                return client.find_previous_dag_runs(
+                    dag_id,
+                    scheduled_date,
+                    leaf_task_ids,
+                    at_scheduled_date=at_scheduled_date,
                 )
-
-                max_end_date = max(end_dates) if end_dates else scheduled_date.isoformat()
-
-                filtered_runs: List[DotDict] = []
-
-                # ----------------------------------------------------------------------
-                # 3. Build TaskInstance params (only valid keys)
-                # ----------------------------------------------------------------------
-                from airflow.utils.state import State
-
-                ti_base_params = {
-                    "limit": 1000,
-                    "end_date_lte": max_end_date,
-                    "order_by": ["-end_date", "-start_date"],
-                    "state": State.SKIPPED,
-                }
-
-                # ----------------------------------------------------------------------
-                # 4. Optimization: only one leaf → one API call
-                # ----------------------------------------------------------------------
-                if len(leaf_task_ids) == 1:
-                    leaf = leaf_task_ids[0]
-                    logging.info("Optimizing: only one leaf task (%s)", leaf)
-
-                    ti_params = ti_base_params.copy()
-                    ti_params["task_id"] = leaf
-
-                    # Use new method to list task instances across all runs
-                    ti_list = client.list_dag_task_instances(dag_id, params=ti_params)
-
-                    skipped_run_ids = {ti.dag_run_id for ti in ti_list}
-
-                    for dr in dag_runs:
-                        if dr.dag_run_id not in skipped_run_ids:
-                            filtered_runs.append(dr)
-
-                else:
-                    # ------------------------------------------------------------------
-                    # 5. Standard path: check each DagRun individually
-                    # ------------------------------------------------------------------
-                    for dr in dag_runs:
-                        dag_run_id = dr.dag_run_id
-
-                        ti_params = ti_base_params.copy()
-
-                        ti_list = client.list_task_instances(
-                            dag_id,
-                            dag_run_id,
-                            params=ti_params,
-                        )
-
-                        if any(ti.task_id in leaf_task_ids for ti in ti_list):
-                            continue
-
-                        filtered_runs.append(dr)
-
-                # ----------------------------------------------------------------------
-                # 6. Final sort (API already sorts, but we ensure correctness)
-                # ----------------------------------------------------------------------
-                def sort_key(run):
-                    return (run.data_interval_end, run.start_date)
-
-                filtered_runs.sort(key=sort_key, reverse=True)
-
-                return filtered_runs
 
 
 
@@ -349,177 +309,44 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     scheduled_date: datetime,
             ) -> List[DotDict]:
                 """
-                API-based equivalent of the original SQLAlchemy-based find_dataset_events.
+                Dataset/asset events for ``uri`` produced by DagRuns whose
+                data_interval_end falls in the checked window, sorted by that
+                data_interval_end ascending, each with the dataset attached.
 
-                Steps:
-                1. Resolve dataset/asset ID from URI.
-                2. Fetch events for this ID with timestamp <= ts, ordered by timestamp.
-                3. Collect all producing DAG IDs from these events.
-                4. For each producing DAG, list DagRuns in the data_interval_end window.
-                5. Cross events with DagRuns via (source_dag_id, source_run_id).
-                6. Sort events by producing DagRun.data_interval_end ascending.
+                The window applies to the producing run, not to event recency, so
+                replaying a DAG for an arbitrarily old date finds its events.
+                Executed as a single joined query against the Airflow 2 metadata
+                database, or composed from the paginated REST primitives otherwise
+                (see StarlakeAirflowApiClient.find_dataset_events).
                 """
-
-                # ----------------------------------------------------------------------
-                # 1. Check feature support and resolve dataset/asset by URI
-                # ----------------------------------------------------------------------
-
-
-                logging.info("Resolving dataset/asset by uri=%s", uri)
-
-                dataset: Optional[DotDict] = client.get_dataset_by_uri(uri)
-
-                if not dataset:
-                    logging.info("No dataset/asset found for uri=%s", uri)
-                    return []
-
-                dataset_or_asset_id: int = dataset.id
-
-                logging.info(
-                    "Resolved dataset/asset id=%s for uri=%s",
-                    dataset_or_asset_id,
-                    uri,
-                )
-
-                # ----------------------------------------------------------------------
-                # 2. Fetch events for this ID with timestamp <= ts (ordered)
-                # ----------------------------------------------------------------------
-                logging.info(
-                    "Listing dataset/asset events for id=%s with timestamp <= %s",
-                    dataset_or_asset_id,
-                    ts.isoformat(),
-                )
-
-                params_events: Dict[str, Any] = {
-                    "timestamp_lte": ts.isoformat(),
-                    "order_by": ["timestamp"],
-                    "limit": 1000,
-                }
-
-                params_events["asset_id"] = dataset_or_asset_id
-
-                events: List[DotDict] = client.list_events(params=params_events)
-
-                if not events:
-                    logging.info(
-                        "No events found for uri=%s and timestamp <= %s",
-                        uri,
-                        ts.isoformat(),
-                    )
-                    return []
-
-                logging.info("Found %d events for uri=%s", len(events), uri)
-
-                # ----------------------------------------------------------------------
-                # 3. Collect producing DAG IDs from events
-                # ----------------------------------------------------------------------
-                producing_dag_ids = {ev.source_dag_id for ev in events if ev.source_dag_id}
-                if not producing_dag_ids:
-                    logging.info("No producing DAG IDs found in events for uri=%s", uri)
-                    return []
-
-                logging.info(
-                    "Producing DAG IDs for uri=%s: [%s]",
-                    uri,
-                    ",".join(sorted(producing_dag_ids)),
-                )
-
-                # ----------------------------------------------------------------------
-                # 4. For each producing DAG, list DagRuns in the data_interval_end window
-                # ----------------------------------------------------------------------
-                dag_run_index: Dict[tuple, DotDict] = {}
-
-                dr_params_base: Dict[str, Any] = {
-                    "order_by": ["data_interval_end", "start_date"],
-                    "limit": 1000,
-                }
-
                 if scheduled_date_to_check_max > scheduled_date:
+                    # we should include the previous execution of the corresponding dataset
                     logging.info(
-                        "Filtering DagRuns with data_interval_end >= %s and <= %s",
+                        "Finding dataset events for %s with data_interval_end >= %s and <= %s, and with timestamp <= %s",
+                        uri,
                         scheduled_date_to_check_min.isoformat(),
                         scheduled_date.isoformat(),
+                        ts.isoformat(),
                     )
-                    dr_params_base["data_interval_end_gte"] = scheduled_date_to_check_min.isoformat()
-                    dr_params_base["data_interval_end_lte"] = scheduled_date.isoformat()
+                    window = {
+                        "data_interval_end_gte": scheduled_date_to_check_min,
+                        "data_interval_end_lte": scheduled_date,
+                    }
                 else:
                     logging.info(
-                        "Filtering DagRuns with data_interval_end > %s and <= %s",
+                        "Finding dataset events for %s with data_interval_end > %s and <= %s, and with timestamp <= %s",
+                        uri,
                         scheduled_date_to_check_min.isoformat(),
                         scheduled_date_to_check_max.isoformat(),
+                        ts.isoformat(),
                     )
-                    dr_params_base["data_interval_end_gt"] = scheduled_date_to_check_min.isoformat()
-                    dr_params_base["data_interval_end_lte"] = scheduled_date_to_check_max.isoformat()
-
-                # Load DagRuns per producing DAG and index them by (dag_id, run_id)
-                for prod_dag_id in producing_dag_ids:
-                    try:
-                        dag_runs = client.list_dag_runs(prod_dag_id, **dr_params_base)
-                    except Exception as e:
-                        logging.warning(
-                            "Failed to list DagRuns for producing DAG %s: %s",
-                            prod_dag_id,
-                            e,
-                        )
-                        continue
-
-                    for dr in dag_runs:
-                        key = (dr.dag_id, dr.run_id)
-                        dag_run_index[key] = dr
-
-                if not dag_run_index:
-                    logging.info(
-                        "No DagRuns found in the data_interval_end window for any producing DAG of uri=%s",
-                        uri,
-                    )
-                    return []
-
-                logging.info(
-                    "Indexed %d DagRuns for producing DAGs of uri=%s",
-                    len(dag_run_index),
-                    uri,
-                )
-
-                # ----------------------------------------------------------------------
-                # 5. Cross events with DagRuns and filter on data_interval_end window
-                # ----------------------------------------------------------------------
-                filtered_events: List[DotDict] = []
-
-                for ev in events:
-                    key = (ev.source_dag_id, ev.source_run_id)
-                    dr = dag_run_index.get(key)
-                    if not dr:
-                        # Either no DagRun for this event in the window or missing run
-                        continue
-
-                    ev.update({"dataset": dataset or {"extra": {}}})
-
-                    # At this point, dr.data_interval_end is already within the desired window
-                    filtered_events.append(ev)
-
-                if not filtered_events:
-                    logging.info(
-                        "No events remained after crossing with DagRuns for uri=%s",
-                        uri,
-                    )
-                    return []
-
-                # ----------------------------------------------------------------------
-                # 6. Sort by producing DagRun.data_interval_end ascending
-                # ----------------------------------------------------------------------
-                def sort_key(ev: DotDict):
-                    dr = dag_run_index[(ev.source_dag_id, ev.source_run_id)]
-                    return dr.data_interval_end
-
-                filtered_events.sort(key=sort_key)
-
-                logging.info(
-                    "Returning %d filtered events for uri=%s",
-                    len(filtered_events),
-                    uri,
-                )
-
-                return filtered_events
+                    window = {
+                        "data_interval_end_gt": scheduled_date_to_check_min,
+                        "data_interval_end_lte": scheduled_date_to_check_max,
+                    }
+                events = client.find_dataset_events(uri, ts, **window)
+                logging.info("Returning %d filtered events for uri=%s", len(events), uri)
+                return events
 
 
 
@@ -684,10 +511,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
                         scheduled_datetime = None
                         dataset_event = None
-                        if client:
-                            events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
-                        else:
-                            events = find_dataset_events(uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date, session=session)
+                        events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
                         if events:
                             dataset_events = events
                             nb_events = len(events)
@@ -887,18 +711,29 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         """Overrides IStarlakeJob.sl_transform()
         Generate the Airflow task that will run the starlake `transform` command.
 
+        The transform options are extended at runtime with the sl_options carried
+        by the triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in
+        the event extra): the 'all' section applies to every transformation, the
+        section keyed by the transformation name only to this one. See
+        sl_options_from_events for the merge/precedence/fail-loud semantics.
+        (The template context key is `triggering_dataset_events` since Airflow 2.5,
+        renamed `triggering_asset_events` in Airflow 3.)
+
         Args:
             task_id (str): The optional task id ({transform_name} by default).
             transform_name (str): The transform to run.
             transform_options (str): The optional transform options to use.
             spark_config (StarlakeSparkConfig): The optional spark configuration to use.
             dataset (Optional[Union[StarlakeDataset, str]]): The optional dataset to materialize.
-        
+
         Returns:
             BaseOperator: The Airflow task.
         """
         kwargs.update({'doc': kwargs.get('doc', f'Run {transform_name} transform.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
+        events_context_key = "triggering_asset_events" if supports_assets() else "triggering_dataset_events"
+        runtime_options = "{{sl_options_from_events(" + events_context_key + ", dag_run, '" + transform_name + "')}}"
+        transform_options = ",".join(filter(None, [transform_options, runtime_options]))
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset,  **kwargs)
 
     def dummy_op(self, task_id, events: Optional[List[Dataset]] = None, task_type: Optional[TaskType] = TaskType.EMPTY, **kwargs) -> BaseOperator :
@@ -945,8 +780,19 @@ class StarlakeDatasetMixin:
         self.task_id = task_id
         params: dict = kwargs.get("params", dict())
         # cron: Optional[str] = params.get('cron', None)
+        inlets: list = kwargs.get("inlets", [])
+        if inlets:
+            # Airflow 2's lineage hook JSON-serializes inlets to XCom in post_execute;
+            # raw StarlakeDataset objects are not serializable (Dataset, an attrs class, is)
+            kwargs["inlets"] = [
+                AirflowDataset.to_event(inlet) if isinstance(inlet, StarlakeDataset) else inlet
+                for inlet in inlets
+            ]
         outlets: list = kwargs.get("outlets", [])
-        extra = dict()
+        # popped: BaseOperator would reject the unknown kwarg. extra is a template
+        # field (see below) so Jinja/XCom values inside it (e.g. runtime sl_options)
+        # are rendered before pre_execute copies it onto the outlet events.
+        extra = kwargs.pop("extra", dict())
         extra.update({"source": source})
         if dataset:
             if isinstance(dataset, StarlakeDataset):
@@ -982,7 +828,7 @@ class StarlakeDatasetMixin:
                 self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts))}}"
             outlets.append(Dataset(uri=uri, extra=extra))
             kwargs["outlets"] = outlets
-            self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date",)
+            self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date", "extra",)
         else:
             self.scheduled_dataset = None
             self.scheduled_date = None
@@ -1000,7 +846,6 @@ class StarlakeDatasetMixin:
             def ts_as_datetime(ts, context: Context = None):
                 from datetime import datetime
                 if not context:
-                    from airflow.operators.python import get_current_context
                     context = get_current_context()
                 ti: TaskInstance = context["task_instance"]
                 sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
@@ -1028,12 +873,16 @@ class StarlakeDatasetMixin:
             from ai.starlake.common import sl_scheduled_date
             context['sl_scheduled_date'] = sl_scheduled_date
 
+        __sl_options_from_events = dag.user_defined_macros.get('sl_options_from_events', None) if dag.user_defined_macros else None
+        if not __sl_options_from_events:
+            print(f"add 'sl_options_from_events' to context")
+            context['sl_options_from_events'] = sl_options_from_events
+
         return super().render_template_fields(context, jinja_env)
 
     
     def pre_execute(self, context: Context):
         if not context:
-            from airflow.operators.python import get_current_context
             context = get_current_context()
 
         ti: TaskInstance = context.get('ti')

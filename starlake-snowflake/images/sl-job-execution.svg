@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" font-family="Inter, system-ui, sans-serif" font-size="12">
+  <defs>
+    <marker id="b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#475569"/>
+    </marker>
+    <style>
+      .box { rx: 6; ry: 6; }
+      .label { font-weight: 600; fill: #1e293b; font-size: 12px; }
+      .detail { fill: #475569; font-size: 10.5px; }
+      .load { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.5; }
+      .transform { fill: #f3e8ff; stroke: #9333ea; stroke-width: 1.5; }
+      .common { fill: #fef3c7; stroke: #f59e0b; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <text x="360" y="20" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">sl_job(): StoredProcedureCall — SQL Execution (no CLI)</text>
+
+  <!-- Common preamble -->
+  <rect x="160" y="40" width="400" height="56" class="box common"/>
+  <text x="360" y="60" text-anchor="middle" class="label">Common Preamble</text>
+  <text x="180" y="78" class="detail">get_task_logical_date() → compute scheduled_date from cron/backfill</text>
+  <text x="180" y="92" class="detail">SYSTEM$TASK_RUNTIME_INFO('CURRENT_TASK_GRAPH_RUN_GROUP_ID') → jobid</text>
+
+  <!-- Branch -->
+  <line x1="280" y1="96" x2="160" y2="130" stroke="#475569" stroke-width="1.5" marker-end="url(#b)"/>
+  <line x1="440" y1="96" x2="560" y2="130" stroke="#475569" stroke-width="1.5" marker-end="url(#b)"/>
+
+  <!-- LOAD -->
+  <rect x="20" y="130" width="280" height="210" class="box load"/>
+  <text x="160" y="152" text-anchor="middle" class="label">LOAD (TaskType.LOAD)</text>
+  <text x="40" y="172" class="detail">Requires: json_context[sink], sl_incoming_file_stage</text>
+  <text x="40" y="192" class="detail">1. BEGIN transaction</text>
+  <text x="40" y="208" class="detail">2. Create table (if 1-step) or first step (if 2-step)</text>
+  <text x="40" y="224" class="detail">3. update_table_schema() if exists</text>
+  <text x="40" y="240" class="detail">4. COPY files: INCOMING → INGESTING</text>
+  <text x="40" y="256" class="detail">5. COPY INTO (build_copy) → load data</text>
+  <text x="40" y="272" class="detail">6. run_expectations(), COMMIT</text>
+  <text x="40" y="288" class="detail">7. log_audit() with COPY results</text>
+  <text x="40" y="304" class="detail">8. Archive files: INGESTING → ARCHIVE</text>
+  <text x="40" y="324" class="detail" font-style="italic">On error: ROLLBACK, log_audit(failed),</text>
+  <text x="40" y="336" class="detail" font-style="italic">move files: INGESTING → REJECTED</text>
+
+  <!-- TRANSFORM -->
+  <rect x="420" y="130" width="280" height="210" class="box transform"/>
+  <text x="560" y="152" text-anchor="middle" class="label">TRANSFORM (TaskType.TRANSFORM)</text>
+  <text x="440" y="172" class="detail">Requires: statements[sink] from caller_globals</text>
+  <text x="440" y="192" class="detail">1. BEGIN transaction</text>
+  <text x="440" y="208" class="detail">2. Create domain if not exists</text>
+  <text x="440" y="224" class="detail">3. Execute preActions, preSqls</text>
+  <text x="440" y="240" class="detail">4. update_table_schema() if exists</text>
+  <text x="440" y="256" class="detail">5. mainSqlIfExists or mainSqlIfNotExists</text>
+  <text x="440" y="272" class="detail">6. Execute postsql</text>
+  <text x="440" y="288" class="detail">7. run_expectations(), COMMIT</text>
+  <text x="440" y="304" class="detail">8. log_audit(success)</text>
+  <text x="440" y="324" class="detail" font-style="italic">On error: ROLLBACK,</text>
+  <text x="440" y="336" class="detail" font-style="italic">log_audit(failed)</text>
+
+  <!-- Footer -->
+  <rect x="160" y="352" width="400" height="24" rx="4" fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+  <text x="360" y="368" text-anchor="middle" class="detail" fill="#92400e">Both wrapped in DAGTask(StoredProcedureCall(func, stage_location, imports=[ai_zip], packages))</text>
+</svg>

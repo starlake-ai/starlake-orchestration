@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="420" viewBox="0 0 860 420" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#546e7a"/>
+    </marker>
+  </defs>
+
+  <!-- caller -->
+  <rect x="310" y="16" width="240" height="46" rx="8" fill="#eceff1" stroke="#546e7a"/>
+  <text x="430" y="35" text-anchor="middle" font-weight="bold">StarlakeAirflowApiClient</text>
+  <text x="430" y="52" text-anchor="middle" fill="#455a64">find_dataset_events · find_previous_dag_runs · primitives</text>
+
+  <!-- version decision -->
+  <polygon points="430,92 540,127 430,162 320,127" fill="#fff8e1" stroke="#f9a825"/>
+  <text x="430" y="123" text-anchor="middle">Airflow version ?</text>
+  <text x="430" y="140" text-anchor="middle" fill="#795548">supports_assets()</text>
+  <line x1="430" y1="62" x2="430" y2="90" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- airflow 3 branch -->
+  <line x1="540" y1="127" x2="660" y2="127" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="600" y="118" text-anchor="middle" fill="#455a64">3.x</text>
+  <rect x="664" y="96" width="176" height="62" rx="8" fill="#e3f2fd" stroke="#1565c0"/>
+  <text x="752" y="120" text-anchor="middle" font-weight="bold">REST /api/v2</text>
+  <text x="752" y="138" text-anchor="middle" fill="#455a64">JWT · assets · paginated</text>
+
+  <!-- airflow 2 branch: db probe -->
+  <line x1="430" y1="162" x2="430" y2="196" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="446" y="184" fill="#455a64">2.4+</text>
+  <polygon points="430,198 545,233 430,268 315,233" fill="#fff8e1" stroke="#f9a825"/>
+  <text x="430" y="229" text-anchor="middle">metadata DB reachable ?</text>
+  <text x="430" y="246" text-anchor="middle" fill="#795548">db_available (probed once)</text>
+
+  <!-- db branch -->
+  <line x1="315" y1="233" x2="196" y2="233" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="256" y="224" text-anchor="middle" fill="#455a64">yes (default)</text>
+  <rect x="20" y="202" width="176" height="62" rx="8" fill="#e8f5e9" stroke="#2e7d32"/>
+  <text x="108" y="226" text-anchor="middle" font-weight="bold">SQLAlchemy session</text>
+  <text x="108" y="244" text-anchor="middle" fill="#455a64">joined queries · no limits</text>
+
+  <!-- rest v1 fallback -->
+  <line x1="430" y1="268" x2="430" y2="302" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="510" y="290" text-anchor="middle" fill="#455a64">no, or query failed</text>
+  <rect x="342" y="304" width="176" height="62" rx="8" fill="#fbe9e7" stroke="#bf360c"/>
+  <text x="430" y="328" text-anchor="middle" font-weight="bold">REST /api/v1 (fallback)</text>
+  <text x="430" y="346" text-anchor="middle" fill="#455a64">basic auth · paginated</text>
+
+  <!-- db error fallback arrow -->
+  <path d="M 108 264 C 108 340, 250 335, 340 335" fill="none" stroke="#bf360c" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="160" y="330" fill="#bf360c">on query error</text>
+
+  <!-- normalized output -->
+  <rect x="310" y="382" width="240" height="30" rx="8" fill="#eceff1" stroke="#546e7a"/>
+  <text x="430" y="402" text-anchor="middle" fill="#37474f">normalized DotDicts — identical shape on every transport</text>
+  <line x1="430" y1="366" x2="430" y2="380" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M 752 158 C 752 300, 600 397, 552 397" fill="none" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M 108 264 C 108 397, 260 397, 308 397" fill="none" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+</svg>

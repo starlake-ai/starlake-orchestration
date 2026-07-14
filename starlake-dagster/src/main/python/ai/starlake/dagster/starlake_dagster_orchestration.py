@@ -73,6 +73,17 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                     # we first retrieve the materialized events
                     materialized_events = {key.to_user_string(): event for key, event in asset_events.items() if event}
 
+                    # sl_options carried by the triggering materializations, merged
+                    # fail-loud (a conflicting key across materializations raises and
+                    # fails the sensor tick — conflicting run variables must stop the
+                    # run, not silently pick one), then relayed to every op of the
+                    # triggered run through its config (see DagsterLogicalDatetimeConfig)
+                    merged_sl_options = StarlakeDagsterUtils.collect_sl_options(
+                        [event.asset_materialization for event in materialized_events.values()]
+                    )
+                    import json
+                    sl_options = json.dumps(merged_sl_options) if merged_sl_options else None
+
                     # and convert them to datasets
                     materialized_datasets = {key: dg_pipeline.get_dataset_and_partition(event) for key, event in materialized_events.items()}
 
@@ -96,7 +107,9 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                             )
                         else:
                             # If all datasets were materialized, we run the pipeline
-                            return RunRequest()
+                            return RunRequest(
+                                run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options) if sl_options else None,
+                            )
 
                     # then we retrieve the materialized dataset with the most recent scheduled datetime
                     freshest_materialized_dataset: tuple = max(materialized_schedules.items(), key=lambda x: x[1], default=(None, None))
@@ -115,7 +128,9 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
 
                     # if there are no datasets to check, we run the pipeline
                     if len(datasets_to_check) == 0:
-                        return RunRequest()
+                        return RunRequest(
+                            run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options) if sl_options else None,
+                        )
 
                     # we check if all datasets are consistent with the most recent materialized dataset
                     t = dg_pipeline.check_datasets_freshness(freshest_materialized_dataset_datetime, datasets_to_check, materialized_schedules, context.instance)
@@ -129,7 +144,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                         previous_logical_datetime=previous_partition.strftime(sl_timestamp_format)
                         context.advance_cursor(asset_events)
                         return RunRequest(
-                            run_config=dg_pipeline._ops_config(logical_datetime=logical_datetime, previous_logical_datetime=previous_logical_datetime),
+                            run_config=dg_pipeline._ops_config(logical_datetime=logical_datetime, previous_logical_datetime=previous_logical_datetime, sl_options=sl_options),
                             partition_key=logical_datetime,
                             tags={
                                 PARTITION_NAME_TAG: logical_datetime,
@@ -493,10 +508,13 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             config=partition_config,
         )
 
-    def _ops_config(self, logical_datetime: str, dry_run: bool = False, previous_logical_datetime: Optional[str] = None) -> dict:
+    def _ops_config(self, logical_datetime: Optional[str], dry_run: bool = False, previous_logical_datetime: Optional[str] = None, sl_options: Optional[str] = None) -> dict:
         def walk(node: NodeDefinition, config: dict = dict()) -> dict:
             if isinstance(node, OpDefinition):
-                config[node.name] = {'config': {'logical_datetime': logical_datetime, 'dry_run': dry_run, 'previous_logical_datetime': previous_logical_datetime}}
+                op_config = {'logical_datetime': logical_datetime, 'dry_run': dry_run, 'previous_logical_datetime': previous_logical_datetime}
+                if sl_options:
+                    op_config['sl_options'] = sl_options
+                config[node.name] = {'config': op_config}
                 return config
             elif isinstance(node, GraphDefinition):
                 sub_config = dict()

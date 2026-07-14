@@ -52,8 +52,16 @@ class StarlakeAirflowOptions(StarlakeOptions):
             return options.get(var_name)
         elif default_value is not None:
             return default_value
-        elif Variable.get(var_name, default_var=None, **kwargs) is not None:
-            return Variable.get(var_name)
+        # An unavailable Variable store (unmigrated or unreachable metadata
+        # database — e.g. Airflow 3 pointed at an Airflow 2 schema, or a fresh
+        # install before `airflow db migrate`) must behave like an unset
+        # variable and let the chain fall through, not crash DAG parsing.
+        try:
+            value = Variable.get(var_name, default_var=None, **kwargs)
+        except Exception:
+            value = None
+        if value is not None:
+            return value
         elif os.getenv(var_name) is not None:
             return os.getenv(var_name)
         else:

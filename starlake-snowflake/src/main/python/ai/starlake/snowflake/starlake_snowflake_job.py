@@ -215,6 +215,10 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
+        # Snowflake tasks have no lineage-input concept and DAGTask's
+        # constructor is strict; dataset-driven triggering is handled by the
+        # module's event mechanism instead.
+        kwargs.pop('inlets', None)
         comment = kwargs.get('comment', None)
         if not comment:
             comment = f"Starlake load {domain}.{table}"
@@ -249,6 +253,9 @@ class StarlakeSnowflakeJob(IStarlakeJob[DAGTask, StarlakeDataset], StarlakeOptio
         Returns:
             DAGTask: The Snowflake task.
         """
+        # Same rationale as sl_load: consume the lineage kwarg before it
+        # reaches DAGTask's strict constructor.
+        kwargs.pop('inlets', None)
         if dataset:
             if isinstance(dataset, str):
                 sink = dataset

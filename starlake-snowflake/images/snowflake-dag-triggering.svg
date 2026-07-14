@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 480" font-family="Inter, system-ui, sans-serif" font-size="12">
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#475569"/>
+    </marker>
+    <style>
+      .box { rx: 6; ry: 6; }
+      .label { font-weight: 600; fill: #1e293b; font-size: 12px; }
+      .detail { fill: #475569; font-size: 10.5px; }
+      .snow { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.5; }
+      .root { fill: #f3e8ff; stroke: #9333ea; stroke-width: 1.5; }
+      .check { fill: #fef3c7; stroke: #f59e0b; stroke-width: 1.5; }
+      .ok { fill: #f0fdf4; stroke: #22c55e; stroke-width: 1.5; }
+      .skip { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; }
+      .stream { fill: #ecfdf5; stroke: #10b981; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <text x="370" y="20" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">Snowflake: SnowflakeDag Root Task + Stream/Audit Triggering</text>
+
+  <!-- Snowflake Cron/timedelta schedule -->
+  <rect x="20" y="40" width="200" height="56" class="box snow"/>
+  <text x="120" y="60" text-anchor="middle" class="label">Snowflake Schedule</text>
+  <text x="40" y="78" class="detail">Cron(expr, tz) or</text>
+  <text x="40" y="92" class="detail">timedelta(min_timedelta)</text>
+
+  <line x1="220" y1="68" x2="280" y2="68" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Stream condition -->
+  <rect x="260" y="40" width="220" height="56" class="box stream"/>
+  <text x="370" y="60" text-anchor="middle" class="label">Stream Condition (optional)</text>
+  <text x="280" y="78" class="detail">SYSTEM$STREAM_HAS_DATA('stream')</text>
+  <text x="280" y="92" class="detail">combined with OR / AND logic</text>
+
+  <line x1="480" y1="68" x2="520" y2="68" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Root task -->
+  <rect x="520" y="40" width="200" height="56" class="box root"/>
+  <text x="620" y="60" text-anchor="middle" class="label">SnowflakeDag root task</text>
+  <text x="540" y="78" class="detail">StoredProcedureCall(fun)</text>
+  <text x="540" y="92" class="detail">runs validation logic</text>
+
+  <!-- Root task flow -->
+  <line x1="620" y1="96" x2="620" y2="126" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Validation phases -->
+  <rect x="280" y="126" width="440" height="220" rx="8" fill="#fafafa" stroke="#d1d5db" stroke-width="1"/>
+  <text x="500" y="148" text-anchor="middle" class="label" font-size="13" fill="#374151">Root Task Validation (StoredProcedureCall)</text>
+
+  <rect x="300" y="160" width="400" height="36" class="box check"/>
+  <text x="500" y="182" text-anchor="middle" class="detail">1. get_previous_dag_run() — find last successful run via audit SQL</text>
+
+  <rect x="300" y="204" width="400" height="36" class="box check"/>
+  <text x="500" y="226" text-anchor="middle" class="detail">2. Guard: same scheduled_date + min_timedelta → skip</text>
+
+  <rect x="300" y="248" width="400" height="36" class="box check"/>
+  <text x="500" y="270" text-anchor="middle" class="detail">3. Per dataset: find_dataset_event() — query audit table</text>
+
+  <rect x="300" y="292" width="400" height="36" class="box check"/>
+  <text x="500" y="314" text-anchor="middle" class="detail">4. Optional / beyond_data_cycle classification</text>
+
+  <!-- Outcomes -->
+  <line x1="430" y1="346" x2="340" y2="388" stroke="#22c55e" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="570" y1="346" x2="620" y2="388" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="220" y="388" width="240" height="56" class="box ok"/>
+  <text x="340" y="408" text-anchor="middle" class="label" fill="#166534">SYSTEM$SET_RETURN_VALUE</text>
+  <text x="340" y="424" text-anchor="middle" class="detail" fill="#166534">(scheduled_date) → non-empty</text>
+  <text x="340" y="440" text-anchor="middle" class="detail" fill="#166534">downstream tasks proceed</text>
+
+  <rect x="520" y="388" width="200" height="56" class="box skip"/>
+  <text x="620" y="408" text-anchor="middle" class="label" fill="#64748b">SYSTEM$SET_RETURN_VALUE</text>
+  <text x="620" y="424" text-anchor="middle" class="detail" fill="#64748b">('') → empty string</text>
+  <text x="620" y="440" text-anchor="middle" class="detail" fill="#64748b">downstream tasks skipped</text>
+
+  <!-- Downstream condition -->
+  <rect x="20" y="388" width="180" height="56" class="box snow"/>
+  <text x="110" y="408" text-anchor="middle" class="label">Downstream DAGTask</text>
+  <text x="30" y="424" class="detail">condition:</text>
+  <text x="30" y="440" class="detail">GET_PREDECESSOR_RETURN_VALUE</text>
+
+  <line x1="220" y1="416" x2="200" y2="416" stroke="#22c55e" stroke-width="1.5" marker-end="url(#a)" transform="rotate(180, 210, 416)"/>
+
+  <!-- Legend -->
+  <text x="30" y="148" class="detail" fill="#64748b">No sensor needed:</text>
+  <text x="30" y="164" class="detail" fill="#64748b">Snowflake Tasks</text>
+  <text x="30" y="180" class="detail" fill="#64748b">have native scheduling</text>
+  <text x="30" y="196" class="detail" fill="#64748b">+ predecessor return</text>
+  <text x="30" y="212" class="detail" fill="#64748b">value propagation</text>
+</svg>

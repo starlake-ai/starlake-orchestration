@@ -1,16 +1,18 @@
 # starlake-airflow
 
-**starlake-airflow** is the **[Starlake](https://starlake.ai)** Python Distribution for **Airflow**.
+**starlake-airflow** is the **[Starlake](https://starlake.ai)** Python Distribution for **Apache Airflow**.
 
-It is recommended to use it in combinaison with **[starlake dag generation](https://docs.starlake.ai/guides/orchestrate/customization)**, but can be used directly as is in your **DAGs**.
+It is recommended to use it in combination with **[starlake dag generation](https://docs.starlake.ai/guides/orchestrate/customization)**, but can be used directly as is in your **DAGs**.
+
+For deep architectural details, see [ARCHITECTURE.md](https://github.com/starlake-ai/starlake-orchestration/blob/main/starlake-airflow/ARCHITECTURE.md).
 
 ## Prerequisites
 
 Before installing starlake-airflow, ensure the following minimum versions are installed on your system:
 
-- starlake: 1.3.1 or higher
-- python: 3.8 or higher
-- Apache Airflow: 2.4.0 or higher (2.6.0 or higher is recommanded with cloud-run)
+- starlake: 1.5.7 or higher
+- Python: 3.8 or higher
+- Apache Airflow: 2.10.0 or higher
 
 ### Airflow API Configuration
 
@@ -25,13 +27,19 @@ The following environment variables should be defined to enable the Airflow API 
 pip install starlake-orchestration[airflow] --upgrade
 ```
 
+or
+
+```bash
+pip install starlake-airflow --upgrade
+```
+
 ## StarlakeAirflowJob
 
-`ai.starlake.airflow.StarlakeAirflowJob` is an **abstract factory class** that extends the generic factory interface `ai.starlake.job.IStarlakeJob` and is responsible for **generating** the **Airflow tasks** that will run the [import](https://docs.starlake.ai/cli/import), [load](https://docs.starlake.ai/category/load) and [transform](https://docs.starlake.ai/category/transform) starlake commands.
+`ai.starlake.airflow.StarlakeAirflowJob` is a factory class that extends the generic factory interface `ai.starlake.job.IStarlakeJob[BaseOperator, Dataset]`, `StarlakeAirflowOptions`, and `AirflowDataset`. It is responsible for **generating** the **Airflow tasks** that will run the [import](https://docs.starlake.ai/cli/import), [load](https://docs.starlake.ai/category/load) and [transform](https://docs.starlake.ai/category/transform) starlake commands.
 
 ### sl_import
 
-It generates the Airflow task that will run the starlake [import](https://docs.starlake.ai/cli/stage) command.
+Generates the Airflow task that will run the starlake [import](https://docs.starlake.ai/cli/stage) command.
 
 ```python
 def sl_import(
@@ -51,7 +59,7 @@ def sl_import(
 
 ### sl_load
 
-It generates the Airflow task that will run the starlake [load](https://docs.starlake.ai/cli/load) command.
+Generates the Airflow task that will run the starlake [load](https://docs.starlake.ai/cli/load) command.
 
 ```python
 def sl_load(
@@ -60,20 +68,22 @@ def sl_load(
     domain: str,
     table: str,
     spark_config: StarlakeSparkConfig=None,
+    dataset: Optional[Union[StarlakeDataset, str]]=None,
     **kwargs) -> BaseOperator:
     #...
 ```
 
-| name         | type                | description                                               |
-| ------------ | ------------------- | --------------------------------------------------------- |
-| task_id      | str                 | the optional task id (`{domain}_{table}_load` by default) |
-| domain       | str                 | the required domain of the table to load                  |
-| table        | str                 | the required table to load                                |
-| spark_config | StarlakeSparkConfig | the optional `ai.starlake.job.StarlakeSparkConfig`        |
+| name         | type                              | description                                                 |
+| ------------ | --------------------------------- | ----------------------------------------------------------- |
+| task_id      | str                               | the optional task id (`{domain}_{table}_load` by default) |
+| domain       | str                               | the required domain of the table to load                    |
+| table        | str                               | the required table to load                                  |
+| spark_config | StarlakeSparkConfig               | the optional `ai.starlake.job.StarlakeSparkConfig`        |
+| dataset      | Optional[Union[StarlakeDataset, str]] | the optional dataset to materialize                     |
 
 ### sl_transform
 
-It generates the Airflow task that will run the starlake [transform](https://docs.starlake.ai/cli/transform) command.
+Generates the Airflow task that will run the starlake [transform](https://docs.starlake.ai/cli/transform) command.
 
 ```python
 def sl_transform(
@@ -81,16 +91,19 @@ def sl_transform(
     task_id: str,
     transform_name: str,
     transform_options: str=None,
-    spark_config: StarlakeSparkConfig=None, **kwargs) -> BaseOperator:
+    spark_config: StarlakeSparkConfig=None,
+    dataset: Optional[Union[StarlakeDataset, str]]=None,
+    **kwargs) -> BaseOperator:
     #...
 ```
 
-| name              | type                | description                                          |
-| ----------------- | ------------------- | ---------------------------------------------------- |
-| task_id           | str                 | the optional task id (`{transform_name}` by default) |
-| transform_name    | str                 | the transform to run                                 |
-| transform_options | str                 | the optional transform options                       |
-| spark_config      | StarlakeSparkConfig | the optional `ai.starlake.job.StarlakeSparkConfig`   |
+| name              | type                              | description                                            |
+| ----------------- | --------------------------------- | ------------------------------------------------------ |
+| task_id           | str                               | the optional task id (`{transform_name}` by default) |
+| transform_name    | str                               | the transform to run                                   |
+| transform_options | str                               | the optional transform options                         |
+| spark_config      | StarlakeSparkConfig               | the optional `ai.starlake.job.StarlakeSparkConfig`   |
+| dataset           | Optional[Union[StarlakeDataset, str]] | the optional dataset to materialize                |
 
 ### sl_job
 
@@ -102,36 +115,40 @@ def sl_job(
     task_id: str,
     arguments: list,
     spark_config: StarlakeSparkConfig=None,
+    dataset: Optional[Union[StarlakeDataset, str]]=None,
+    task_type: Optional[TaskType]=None,
     **kwargs) -> BaseOperator:
     #...
 ```
 
-| name         | type                | description                                           |
-| ------------ | ------------------- | ----------------------------------------------------- |
-| task_id      | str                 | the required task id                                  |
-| arguments    | list                | The required arguments of the starlake command to run |
-| spark_config | StarlakeSparkConfig | the optional `ai.starlake.job.StarlakeSparkConfig`    |
+| name         | type                              | description                                           |
+| ------------ | --------------------------------- | ----------------------------------------------------- |
+| task_id      | str                               | the required task id                                  |
+| arguments    | list                              | the required arguments of the starlake command to run |
+| spark_config | StarlakeSparkConfig               | the optional `ai.starlake.job.StarlakeSparkConfig`  |
+| dataset      | Optional[Union[StarlakeDataset, str]] | the optional dataset to materialize               |
+| task_type    | Optional[TaskType]                | the optional task type                                |
 
 ### Init
 
 To initialize this class, you may specify the optional **pre load strategy** and **options** to use.
 
 ```python
-    def __init__(self, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None], options: dict=None, **kwargs) -> None:
-        """Overrides IStarlakeJob.__init__()
-        Args:
-            pre_load_strategy (Union[StarlakePreLoadStrategy, str, None]): The pre-load strategy to use.
-            options (dict): The options to use.
-        """
-        super().__init__(pre_load_strategy, options, **kwargs)
-        #...
+def __init__(
+    self,
+    filename: Optional[str] = None,
+    module_name: Optional[str] = None,
+    pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None,
+    options: dict = {},
+    **kwargs) -> None:
+    #...
 ```
 
 #### StarlakePreLoadStrategy
 
-`ai.starlake.job.StarlakePreLoadStrategy` is an enum that defines the different **pre load strategies** that can be used to conditionaly load tables within a domain.
+`ai.starlake.job.StarlakePreLoadStrategy` is an enum that defines the different **pre load strategies** that can be used to conditionally load tables within a domain.
 
-The pre-load strategy is implemented by `sl_pre_load` method that will generate the Airflow group of tasks corresponding to the choosen strategy.
+The pre-load strategy is implemented by the `sl_pre_load` method that will generate the Airflow group of tasks corresponding to the chosen strategy.
 
 ```python
 def sl_pre_load(
@@ -147,53 +164,72 @@ def sl_pre_load(
 | ----------------- | ---- | ------------------------------------------------------------------ |
 | domain            | str  | the domain to load                                                 |
 | tables            | set  | the optional tables to pre-load                                    |
+| tables            | set  | the optional tables to pre-load                                    |
 | pre_load_strategy | str  | the optional pre load strategy (self.pre_load_strategy by default) |
 
 ##### NONE
 
-The load of the domain will not be conditionned and no pre-load tasks will be executed.
+The load of the domain will not be conditioned and no pre-load tasks will be executed.
 
-![none strategy example](../images/none.png)
+![none strategy example](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/none.png)
 
 ##### IMPORTED
 
 This strategy implies that at least one file is present in the landing area (`SL_ROOT/datasets/importing/{domain}` by default). If there is one or more files to load, the method `sl_import` will be called to import the domain before loading it, otherwise the loading of the domain will be skipped.
 
-![imported strategy example](../images/imported.png)
+![imported strategy example](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/imported.png)
 
 ##### PENDING
 
 This strategy implies that at least one file is present in the pending datasets area of the domain (`SL_ROOT/datasets/pending/{domain}` by default), otherwise the loading of the domain will be skipped.
 
-![pending strategy example](../images/pending.png)
+![pending strategy example](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/pending.png)
 
 ##### ACK
 
 This strategy implies that an **ack file** is present at the specified path (option `global_ack_file_path`), otherwise the loading of the domain will be skipped.
 
-![ack strategy example](../images/ack.png)
+![ack strategy example](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/ack.png)
 
 #### Options
 
-The following options can be specified in all concrete factory classes:
+The following options can be specified in all concrete factory classes. Options are resolved with the following priority: options dict, default value, Airflow Variable, environment variable.
 
-| name                     | type | description                                                                       |
-| ------------------------ | ---- | --------------------------------------------------------------------------------- |
-| **default_pool**         | str  | pool of slots to use (`default_pool` by default)                                  |
-| **tags**                 | str  | a list of tags to be applied to the dag                                           |
-| **start_date**           | str  | optional start date of the dag                                                    |
-| **end_date**             | str  | optional end date of the dag                                                      |
-| **catchup**              | str  | whether to catch up the missed runs or not (`False` by default)                   |
-| **sl_env_var**           | str  | optional starlake environment variables passed as an encoded json string          |
-| **retries**              | int  | optional number of retries to attempt before failing a task (`1` by default)      |
-| **retry_delay**          | int  | optional delay between retries in seconds (`300` by default)                      |
-| **pre_load_strategy**    | str  | one of `none` (default), `imported`, `pending` or `ack`                           |
-| **global_ack_file_path** | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default) |
-| **ack_wait_timeout**     | int  | timeout in seconds to wait for the ack file(`1 hour` by default)                  |
+| name                               | type | description                                                                                 |
+| ---------------------------------- | ---- | ------------------------------------------------------------------------------------------- |
+| **default_pool**                   | str  | pool of slots to use (`default_pool` by default)                                          |
+| **tags**                           | str  | a list of tags to be applied to the dag                                                     |
+| **start_date**                     | str  | optional start date of the dag                                                              |
+| **end_date**                       | str  | optional end date of the dag                                                                |
+| **catchup**                        | str  | whether to catch up the missed runs or not (`False` by default)                             |
+| **sl_env_var**                     | str  | optional starlake environment variables passed as an encoded json string                    |
+| **retries**                        | int  | optional number of retries to attempt before failing a task (`1` by default)                |
+| **retry_delay**                    | int  | optional delay between retries in seconds (`300` by default)                                |
+| **pre_load_strategy**              | str  | one of `none` (default), `imported`, `pending` or `ack`                                     |
+| **global_ack_file_path**           | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default)          |
+| **ack_wait_timeout**               | int  | timeout in seconds to wait for the ack file (`1 hour` by default)                           |
+| **dataset_triggering_strategy**    | str  | the dataset triggering strategy to use                                                      |
+| **max_active_runs**                | int  | maximum number of active DAG runs (`3` by default)                                          |
+
+### Default DAG Args
+
+The following default DAG arguments are applied when no custom arguments are provided:
+
+| arg               | value             |
+| ----------------- | ----------------- |
+| depends_on_past   | False             |
+| start_date        | 2023-01-01        |
+| email_on_failure  | False             |
+| email_on_retry    | False             |
+| retries           | 1                 |
+| retry_delay       | 5 minutes         |
+| max_active_runs   | 1                 |
 
 ## Data-aware scheduling
 
-The `ai.starlake.airflow.StarlakeAirflowJob` class is also responsible for recording the `outlets` related to the execution of each starlake command, usefull for scheduling DAGs using **data-aware scheduling**.
+`StarlakeAirflowJob` is also responsible for recording the `outlets` related to the execution of each starlake command, useful for scheduling DAGs using **data-aware scheduling**.
+
+The class extends `AirflowDataset` (which extends `AbstractEvent[Dataset]`), converting `StarlakeDataset` instances to Airflow `Dataset` objects with extras (URI, cron, freshness).
 
 All the outlets that have been recorded are available in the `outlets` property of the instance of the concrete class.
 
@@ -240,13 +276,24 @@ def sl_transform(
     #...
 ```
 
-In conjonction with the starlake dag generation, the `outlets` property can be used to schedule **effortless** DAGs that will run the **transform** commands.
+In conjunction with the starlake dag generation, the `outlets` property can be used to schedule **effortless** DAGs that will run the **transform** commands.
+
+### Airflow version compatibility
+
+The library detects the installed Airflow version and adapts its behavior:
+
+- **`supports_inlet_events()`** -- returns `True` for Airflow >= 2.10.0, enabling inlet event support for dataset readiness validation via `ShortCircuitOperator` in the `start_op()`.
+- **`supports_assets()`** -- returns `True` for Airflow >= 3.0.0, enabling asset-based scheduling.
+
+### StarlakeDatasetMixin
+
+`StarlakeDatasetMixin` adds dataset outlet management and scheduled date rendering to operators. It is mixed into operators produced by the concrete job classes.
 
 ## On premise
 
 ### StarlakeAirflowBashJob
 
-This class is a concrete implementation of `StarlakeAirflowJob` that generates tasks using `airflow.operators.bash.BashOperator`. Usefull for **on premise** execution.
+This class is a concrete implementation of `StarlakeAirflowJob` that generates tasks using `airflow.operators.bash.BashOperator`. Useful for **on premise** execution.
 
 An additional `SL_STARLAKE_PATH` option is required to specify the **path** to the `starlake` **executable**.
 
@@ -354,6 +401,8 @@ for schedule in schedules:
                     sl_job.sl_load(
                         task_id=load_task_id,
                         domain=domain["name"],
+                        task_id=load_task_id,
+                        domain=domain["name"],
                         table=table["name"],
                         spark_config=spark_config(spark_config_name, **sys.modules[__name__].__dict__.get('spark_properties', {})),
                         params={'cron':_cron},
@@ -377,7 +426,7 @@ for schedule in schedules:
             all_load_tasks >> all_done >> post_tasks >> end
 ```
 
-![dag generated with StarlakeAirflowBashJob](../images/dagsWithStarlakeAirflowBashJob.png)
+![dag generated with StarlakeAirflowBashJob](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/dagsWithStarlakeAirflowBashJob.png)
 
 #### StarlakeAirflowBashJob Transform Examples
 
@@ -648,19 +697,19 @@ with DAG(dag_id=os.path.basename(__file__).replace(".py", "").replace(".pyc", ""
 
 ```
 
-![transform without dependencies](../images/bashTransformWithoutDependencies.png)
+![transform without dependencies](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/bashTransformWithoutDependencies.png)
 
 If you want to load the dependencies, you just need to set the `run_dependencies` option to `True`:
 
-![transform without dependencies](../images/bashTransformWithDependencies.png)
+![transform with dependencies](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/bashTransformWithDependencies.png)
 
 ## Google Cloud Platform
 
 ### StarlakeAirflowDataprocJob
 
-This class is a concrete implementation of `StarlakeAirflowJob` that overrides the `sl_job` method that will run the starlake command by submitting **Dataproc job** to the configured **Dataproc cluster**.
+This class is a concrete implementation of `StarlakeAirflowJob` that overrides the `sl_job` method to run starlake commands by submitting **Dataproc jobs** to a configured **Dataproc cluster**.
 
-It delegates to an instance of the `ai.starlake.airflow.gcp.StarlakeAirflowDataprocCluster` class the responsibility to :
+It manages the full cluster lifecycle (create, submit, delete) by delegating to an instance of the `ai.starlake.airflow.gcp.StarlakeAirflowDataprocCluster` class, which is responsible for:
 
 - **create** the **Dataproc cluster** by instantiating `airflow.providers.google.cloud.operators.dataproc.DataprocCreateClusterOperator`
 - **submit Dataproc job** to the latter by instantiating `airflow.providers.google.cloud.operators.dataproc.DataprocSubmitJobOperator`
@@ -681,17 +730,17 @@ Additional options may be specified to configure the **Dataproc cluster**.
 | **cluster_id**                   | str  | the optional unique id of the cluster that will participate in the definition of the Dataproc cluster name (if not specified)     |
 | **dataproc_name**                | str  | the optional dataproc name of the cluster that will participate in the definition of the Dataproc cluster name (if not specified) |
 | **dataproc_project_id**          | str  | the optional dataproc project id (the project id on which the composer has been instantiated by default)                          |
-| **dataproc_region**              | str  | the optional region (`europe-west1` by default)                                                                                   |
-| **dataproc_subnet**              | str  | the optional subnet (the `default` subnet if not specified)                                                                       |
-| **dataproc_service_account**     | str  | the optional service account (`service-{self.project_id}@dataproc-accounts.iam.gserviceaccount.com` by default)                   |
-| **dataproc_image_version**       | str  | the image version of the dataproc cluster (`2.2-debian1` by default)                                                              |
-| **dataproc_master_machine_type** | str  | the optional master machine type (`n1-standard-4` by default)                                                                     |
-| **dataproc_master_disk_type**    | str  | the optional master disk type (`pd-standard` by default)                                                                          |
-| **dataproc_master_disk_size**    | int  | the optional master disk size (`1024` by default)                                                                                 |
-| **dataproc_worker_machine_type** | str  | the optional worker machine type (`n1-standard-4` by default)                                                                     |
-| **dataproc_worker_disk_type**    | str  | the optional worker disk size (`pd-standard` by default)                                                                          |
-| **dataproc_worker_disk_size**    | int  | the optional worker disk size (`1024` by default)                                                                                 |
-| **dataproc_num_workers**         | int  | the optional number of workers (`4` by default)                                                                                   |
+| **dataproc_region**              | str  | the optional region (`europe-west1` by default)                                                                                 |
+| **dataproc_subnet**              | str  | the optional subnet (the `default` subnet if not specified)                                                                     |
+| **dataproc_service_account**     | str  | the optional service account (`service-{self.project_id}@dataproc-accounts.iam.gserviceaccount.com` by default)                 |
+| **dataproc_image_version**       | str  | the image version of the dataproc cluster (`2.2-debian1` by default)                                                            |
+| **dataproc_master_machine_type** | str  | the optional master machine type (`n1-standard-4` by default)                                                                   |
+| **dataproc_master_disk_type**    | str  | the optional master disk type (`pd-standard` by default)                                                                        |
+| **dataproc_master_disk_size**    | int  | the optional master disk size (`1024` by default)                                                                               |
+| **dataproc_worker_machine_type** | str  | the optional worker machine type (`n1-standard-4` by default)                                                                   |
+| **dataproc_worker_disk_type**    | str  | the optional worker disk type (`pd-standard` by default)                                                                        |
+| **dataproc_worker_disk_size**    | int  | the optional worker disk size (`1024` by default)                                                                               |
+| **dataproc_num_workers**         | int  | the optional number of workers (`4` by default)                                                                                 |
 | **dataproc_cluster_metadata**    | str  | the metadata to add to the dataproc cluster specified as a map in json format                                                     |
 
 All of these options will be used by default if no **StarlakeAirflowDataprocClusterConfig** was defined when instantiating **StarlakeAirflowDataprocCluster** or if the latter was not defined when instantiating **StarlakeAirflowDataprocJob**.
@@ -703,7 +752,7 @@ Additional options may be specified to configure the **Dataproc job**.
 | name                         | type | description                                                                  |
 | ---------------------------- | ---- | ---------------------------------------------------------------------------- |
 | **spark_jar_list**           | str  | the required list of spark jars to be used (using `,` as separator)          |
-| **spark_bucket**             | str  | the required bucket to use for spark and biqquery temporary storage          |
+| **spark_bucket**             | str  | the required bucket to use for spark and bigquery temporary storage             |
 | **spark_job_main_class**     | str  | the optional main class of the spark job (`ai.starlake.job.Main` by default) |
 | **spark_executor_memory**    | str  | the optional amount of memory to use per executor process (`11g` by default) |
 | **spark_executor_cores**     | int  | the optional number of cores to use on each executor (`4` by default)        |
@@ -722,8 +771,13 @@ options = {
     # General options
     'sl_env_var':'{"SL_ROOT": "gcs://starlake/samples/starbake"}',
     'pre_load_strategy':'pending',
+    'sl_env_var':'{"SL_ROOT": "gcs://starlake/samples/starbake"}',
+    'pre_load_strategy':'pending',
     # Dataproc cluster configuration
     'dataproc_project_id':'starbake',
+    # Dataproc job configuration
+    'spark_bucket':'my-bucket',
+    'spark_jar_list':'gcs://artifacts/starlake.jar',
     # Dataproc job configuration
     'spark_bucket':'my-bucket',
     'spark_jar_list':'gcs://artifacts/starlake.jar',
@@ -737,32 +791,43 @@ sl_job = StarlakeAirflowDataprocJob(options=options)
 #...
 ```
 
-![dag generated with StarlakeAirflowDataprocJob](../images/dagsWithStarlakeAirflowDataprocJob.png)
+![dag generated with StarlakeAirflowDataprocJob](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/dagsWithStarlakeAirflowDataprocJob.png)
 
 ### StarlakeAirflowCloudRunJob
 
-This class is a concrete implementation of `StarlakeAirflowJob` that overrides the `sl_job` method that will run the starlake command by executing **Cloud Run job**.
+This class is a concrete implementation of `StarlakeAirflowJob` that overrides the `sl_job` method to run starlake commands by executing a **Cloud Run job**.
+
+Cloud Run supports three execution modes via the `CloudRunMode` enum:
+
+- **SYNC** -- synchronous execution, the operator waits for the job to complete
+- **ASYNC** -- asynchronous execution with a sensor that polls for completion
+- **DEFER** -- deferrable execution using Airflow's async event loop
 
 #### Cloud Run job configuration
 
 Additional options may be specified to configure the **Cloud Run job**.
 
-| name                          | type | description                                                                                               |
-| ----------------------------- | ---- | --------------------------------------------------------------------------------------------------------- |
-| **cloud_run_project_id**      | str  | the required cloud run project id (the project id on which the composer has been instantiated by default) |
-| **cloud_run_job_name**        | str  | the required name of the cloud run job                                                                    |
-| **cloud_run_region**          | str  | the optional region (`europe-west1` by default)                                                           |
-| **cloud_run_service_account** | str  | the optional cloud run service account                                                                    |
-| **cloud_run_async**           | bool | the optional flag to run the cloud run job asynchronously (`True` by default)                             |
-| **retry_on_failure**          | bool | the optional flag to retry the cloud run job on failure (`False` by default)                              |
-| **retry_delay_in_seconds**    | int  | the optional delay in seconds to wait before retrying the cloud run job (`10` by default)                 |
-| **use_gcloud**                | bool | whether to use the gcloud command or the google cloud run python operator (the gcloud command by default) |
+| name                                | type  | description                                                                                               |
+| ----------------------------------- | ----- | --------------------------------------------------------------------------------------------------------- |
+| **cloud_run_project_id**      | str   | the required cloud run project id (the project id on which the composer has been instantiated by default) |
+| **cloud_run_job_name**        | str   | the required name of the cloud run job                                                                    |
+| **cloud_run_job_region**      | str   | the optional region (defaults to `GCP_REGION` env var)                                                  |
+| **cloud_run_service_account** | str   | the optional cloud run service account                                                                    |
+| **cloud_run_async**           | bool  | the optional flag to run the cloud run job asynchronously (`True` by default)                           |
+| **cloud_run_async_poke_interval** | float | the optional poke interval for async sensor in seconds (`30` by default)                            |
+| **retry_on_failure**          | bool  | the optional flag to retry the cloud run job on failure (`False` by default)                            |
+| **retry_delay_in_seconds**    | float | the optional delay in seconds to wait before retrying the cloud run job (`10` by default)               |
+| **use_gcloud**                | bool  | whether to use the gcloud command or the google cloud run python operator (`True` by default)           |
 
 If the execution has been parameterized to be **asynchronous**, an `airflow.sensors.base.BaseSensorOperator` will be instantiated to wait for the completion of the **Cloud Run job** execution.
 
+The following SVG diagrams illustrate key Cloud Run execution flows:
+
+![Cloud Run execution paths](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/starlake-airflow/images/cloud-run-execution-paths.svg)
+
 #### StarlakeAirflowCloudRunJob load Examples
 
-The following examples shows how to use `StarlakeAirflowCloudRunJob` to generate dynamically DAGs that **load** domains using `starlake` and record corresponding `outlets`.
+The following examples show how to use `StarlakeAirflowCloudRunJob` to generate dynamically DAGs that **load** domains using `starlake` and record corresponding `outlets`.
 
 ##### Synchronous execution
 
@@ -771,6 +836,9 @@ description="""example to load domain(s) using airflow starlake cloud run job sy
 
 options = {
     # General options
+    'sl_env_var':'{"SL_ROOT": "gs://my-bucket/starbake"}',
+    'pre_load_strategy':'ack',
+    'global_ack_file_path':'gs://my-bucket/starbake/pending/HighValueCustomers/2024-22-01.ack',
     'sl_env_var':'{"SL_ROOT": "gs://my-bucket/starbake"}',
     'pre_load_strategy':'ack',
     'global_ack_file_path':'gs://my-bucket/starbake/pending/HighValueCustomers/2024-22-01.ack',
@@ -787,31 +855,100 @@ sl_job = StarlakeAirflowCloudRunJob(options=options)
 #...
 ```
 
-![dag generated with StarlakeAirflowCloudRunJob synchronously](../images/dagsWithStarlakeAirflowCloudRunJobSynchronous.png)
+![dag generated with StarlakeAirflowCloudRunJob synchronously](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/dagsWithStarlakeAirflowCloudRunJobSynchronous.png)
 
 ##### Asynchronous execution
 
 ```python
-
 description="""example to load domain(s) using airflow starlake cloud run job asynchronously"""
 
 options = {
     # General options
     'sl_env_var':'{"SL_ROOT": "gs://my-bucket/starbake"}',
     'pre_load_strategy':'pending',
+    'sl_env_var':'{"SL_ROOT": "gs://my-bucket/starbake"}',
+    'pre_load_strategy':'pending',
     # Cloud run options
     'cloud_run_job_name':'starlake',
+    'cloud_run_job_name':'starlake',
     'cloud_run_project_id':'starbake',
-    'cloud_run_async':'True'
-    'retry_on_failure':'True',
+    'cloud_run_async':'True',
+    'retry_on_failure':'True'
 }
 
 # all the code following the options is exactly the same as that defined above
 #...
 ```
 
-![dag generated with StarlakeAirflowCloudRunJob asynchronously](https://raw.githubusercontent.com/starlake-ai/starlake/master/src/main/python/images/dagsWithStarlakeAirflowCloudRunJobAsynchronous.png)
+![dag generated with StarlakeAirflowCloudRunJob asynchronously](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/dagsWithStarlakeAirflowCloudRunJobAsynchronous.png)
 
 ## Amazon Web Services
 
+### StarlakeAirflowFargateJob
+
+This class is a concrete implementation of `StarlakeAirflowJob` that overrides the `sl_job` method to run starlake commands by executing tasks on **AWS Fargate** using `airflow.providers.amazon.aws.operators.ecs.EcsRunTaskOperator`.
+
+Fargate supports two execution modes:
+
+- **Synchronous** -- the operator waits for the ECS task to complete (`fargate_async=False`)
+- **Asynchronous** -- the task is launched and an `EcsTaskStateSensor` polls for completion (`fargate_async=True`, default)
+
+#### Fargate job configuration
+
+Additional options may be specified to configure the **Fargate job**.
+
+| name                                       | type  | description                                                                                     |
+| ------------------------------------------ | ----- | ----------------------------------------------------------------------------------------------- |
+| **aws_conn_id**                      | str   | the optional AWS connection id (`aws_default` by default)                                     |
+| **aws_profile**                      | str   | the optional AWS profile (`default` by default)                                               |
+| **aws_region**                       | str   | the optional AWS region (`eu-west-3` by default)                                              |
+| **aws_cluster_name**                 | str   | the required ECS cluster name                                                                   |
+| **aws_task_definition_name**         | str   | the required ECS task definition name                                                           |
+| **aws_task_definition_container_name** | str | the required container name within the task definition                                          |
+| **aws_task_private_subnets**         | str   | the required private subnets for the Fargate task (comma-separated)                             |
+| **aws_task_security_groups**         | str   | the required security groups for the Fargate task (comma-separated)                             |
+| **cpu**                              | int   | the optional container CPU units (`1024` by default)                                          |
+| **memory**                           | int   | the optional container memory in MiB (`2048` by default)                                      |
+| **fargate_async**                    | bool  | the optional flag to run asynchronously (`True` by default)                                   |
+| **fargate_async_poke_interval**      | float | the optional poke interval for async sensor in seconds (`30` by default)                      |
+| **retry_on_failure**                 | bool  | the optional flag to retry on failure (`False` by default)                                    |
+
+#### StarlakeAirflowFargateJob load Example
+
+The following example shows how to use `StarlakeAirflowFargateJob` to generate dynamically DAGs that **load** domains using `starlake` on AWS Fargate.
+
+```python
+description="""example to load domain(s) using airflow starlake fargate job"""
+
+options = {
+    # General options
+    'sl_env_var':'{"SL_ROOT": "s3://my-bucket/starbake"}',
+    'pre_load_strategy':'imported',
+    # Fargate options
+    'aws_cluster_name':'my-ecs-cluster',
+    'aws_task_definition_name':'starlake-task',
+    'aws_task_definition_container_name':'starlake',
+    'aws_task_private_subnets':'subnet-abc123,subnet-def456',
+    'aws_task_security_groups':'sg-abc123',
+    'fargate_async':'True',
+}
+
+from ai.starlake.airflow.aws import StarlakeAirflowFargateJob
+
+sl_job = StarlakeAirflowFargateJob(options=options)
+
+# all the code following the instantiation of the starlake job is exactly the same as that defined for StarlakeAirflowBashJob
+#...
+```
+
+## Additional SVG Diagrams
+
+The following SVG diagrams provide visual reference for key internal flows:
+
+- [Start operation branching](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/starlake-airflow/images/start-op-branching.svg) -- how the `start_op()` uses `ShortCircuitOperator` with dataset readiness validation
+- [Check datasets flow](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/starlake-airflow/images/check-datasets-flow.svg) -- the dataset readiness checking process
+- [XCom data flow](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/starlake-airflow/images/xcom-data-flow.svg) -- how data flows through XCom between tasks
+
 ## Azure
+
+Azure support is planned for a future release.

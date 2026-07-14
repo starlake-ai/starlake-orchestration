@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.4.3")
+version = os.environ.get("PROJECT_VERSION", "0.5.0")
 
 setup(name='starlake-orchestration',
       version=version,
@@ -21,6 +21,7 @@ setup(name='starlake-orchestration',
       license='Apache 2.0',
 #      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-orchestration',
       packages=find_packages(include=['ai', 'ai.*']),
+      install_requires=['croniter', 'python-dateutil', 'pytz'],
       extras_require={
         "airflow": ["starlake-airflow~=0.4"],
         "dagster": ["starlake-dagster~=0.4"],

@@ -1,0 +1,29 @@
+---
+version: 1
+table:
+  name: "products"
+  pattern: "products.*.csv"
+  attributes:
+  - name: "product_id"
+    type: "long"
+    array: false
+  - name: "name"
+    type: "string"
+    array: false
+  - name: "category"
+    type: "string"
+    array: false
+  - name: "price"
+    type: "double"
+    array: false
+  - name: "cost"
+    type: "double"
+    array: false
+  metadata:
+    format: "DSV"
+    array: false
+    withHeader: true
+    separator: ","
+    writeStrategy:
+      type: "APPEND"
+  comment: "Product catalog reference data (daily schedule, inherited from domain)"
