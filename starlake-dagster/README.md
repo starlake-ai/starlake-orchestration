@@ -213,7 +213,7 @@ The following options can be specified in all concrete factory classes:
 | **pre_load_strategy**             | str  | one of `none` (default), `imported`, `pending` or `ack`                                   |
 | **global_ack_file_path**          | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default)         |
 | **ack_wait_timeout**              | int  | timeout in seconds to wait for the ack file (`1 hour` by default)                         |
-| **dataset_triggering_strategy**   | str  | one of `ANY` or `ALL` for multi-asset sensor triggering                                   |
+| **dataset_triggering_strategy**   | str  | one of `ANY` or `ALL` for the multi-asset sensor **trigger gate** (see [Multi-Asset Sensor](#multi-asset-sensor) — a post-gate consistency check still requires all non-optional datasets before a run) |
 
 ## DagsterLogicalDatetimeConfig
 
@@ -297,6 +297,8 @@ For pipelines with dataset dependencies, a `MultiAssetSensorDefinition` is creat
 - Supports `DatasetTriggeringStrategy` (ANY or ALL)
 - Validates freshness of materialized datasets against the expected schedule
 - Computes `logical_datetime` and `previous_logical_datetime` for the triggered run
+
+> **ANY vs ALL semantics.** The `dataset_triggering_strategy` governs the **trigger gate only**: with `ANY`, the sensor passes the gate as soon as one monitored asset has materialized; with `ALL`, every asset must have materialized. Passing the gate does not fire a run by itself — a designed **post-gate consistency check** then verifies the freshness of **all** the non-optional datasets the pipeline depends on within the window frame, and the sensor keeps returning a `SkipReason` until every one of them has materialized consistently. Under `ANY` with a partially-materialized upstream set, Dagster therefore does **not** fire on the first available upstream the way Airflow's `DatasetAny`/`AssetAny` timetable does. See [ARCHITECTURE.md](https://github.com/starlake-ai/starlake-orchestration/blob/main/starlake-dagster/ARCHITECTURE.md) for the detailed sensor flow.
 
 ![Materialization Sensor Flow](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/starlake-dagster/images/materialization-sensor-flow.svg)
 

@@ -76,6 +76,18 @@ The sensor function runs on each evaluation cycle:
    - All consistent → `RunRequest(run_config=_ops_config(logical_datetime, previous_logical_datetime, sl_options), partition_key=logical_datetime, tags={...})` + `context.advance_cursor()`
    - Missing/inconsistent → `SkipReason`
 
+**ANY vs ALL — trigger gate vs post-gate consistency check**
+
+The `dataset_triggering_strategy` option governs the **trigger gate only** (step 2). Passing the gate does not fire a run by itself: a **designed post-gate consistency check** (steps 4–6) then requires the freshness of **all** the non-optional datasets the pipeline depends on within the window frame before a `RunRequest` is emitted. Under `ANY` with a partially-materialized upstream set, the sensor therefore keeps skipping — it does **not** fire on the first available upstream the way Airflow's `DatasetAny`/`AssetAny` timetable does. Users porting event-driven pipelines from Airflow should expect this difference (intentional design — see issue [#78](https://github.com/starlake-ai/starlake-orchestration/issues/78); behavior pinned by `tests/dagster/test_dagster_triggering_strategy.py`).
+
+Observed sensor outcomes:
+
+| strategy | materialized | outcome |
+|----------|--------------|---------|
+| `ANY` | 1 of 2 | `SkipReason("Observed materializations for ..., but not for ...")` — post-gate consistency check |
+| `ALL` | 1 of 2 | `SkipReason("No materializations observed")` — trigger gate |
+| `ANY`/`ALL` | 2 of 2 | `RunRequest` |
+
 **4. `check_datasets_freshness()` — Validation Engine**
 
 This is the Dagster equivalent of Airflow's `check_datasets()`. Same logical phases but uses **Dagster's public API** (no direct DB access):

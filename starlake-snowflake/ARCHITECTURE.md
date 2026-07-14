@@ -67,6 +67,15 @@ The root task's `StoredProcedureCall` runs the validation logic as a Python stor
 
 **4. Downstream gating**: All downstream `DAGTask` nodes have `condition = "SYSTEM$GET_PREDECESSOR_RETURN_VALUE() <> ''"` set by `start_op()`. This skips the entire pipeline if the root task returned an empty string.
 
+### ALL-only: `dataset_triggering_strategy` has no effect
+
+`DatasetTriggeringStrategy` is never consulted anywhere in starlake-snowflake: setting the `dataset_triggering_strategy` job option to `any` or `all` produces a **structurally identical** Snowflake DAG. The trigger mechanics are fixed by design:
+
+- The stream condition connectives are hard-wired (`OR` across most-frequent scheduled streams, `AND` across not-scheduled streams — step 2 above), independent of the option.
+- The root task's per-dataset validation (step 3) skips the run if **any** depended-upon dataset was not published within the window frame — hard-wired ALL semantics.
+
+This is by orchestrator design (see issue [#79](https://github.com/starlake-ai/starlake-orchestration/issues/79)): Snowflake has no event-based triggering mechanism, so ANY cannot and will not be implemented — the run must ensure all depended-upon datasets were published within the window frame. **Snowflake is ALL-only.** A parity pin test (`tests/snowflake/test_snowflake_triggering_strategy.py`) protects this behavior; if the platform ever gains an event mechanism and the ruling is revisited, that pin will flip loudly.
+
 ### Comparison with Airflow/Dagster
 
 | Aspect | Airflow | Dagster | Snowflake |
@@ -75,6 +84,7 @@ The root task's `StoredProcedureCall` runs the validation logic as a Python stor
 | Dataset event source | `DatasetEvent` DB table (SQLAlchemy) | `AssetMaterialization` (public API) | Starlake audit table (SQL) + Snowflake Streams |
 | Skip mechanism | ShortCircuit skips downstream | `SkipReason` prevents `RunRequest` | Empty `SYSTEM$SET_RETURN_VALUE` + condition check |
 | Schedule fallback | None (cron or dataset-only) | None (cron or sensor-only) | `timedelta` (always scheduled) |
+| `dataset_triggering_strategy` | ANY/ALL honored (timetable condition) | ANY/ALL honored (trigger gate; post-gate check still requires all) | **Ignored — ALL-only by design** |
 
 ## Task Execution: `sl_job()` as StoredProcedureCall
 

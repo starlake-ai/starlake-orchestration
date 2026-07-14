@@ -63,6 +63,20 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
             dg_pipeline: DagsterPipeline = pipeline
 
             def multi_asset_sensor_with_skip_reason(context: MultiAssetSensorEvaluationContext):
+                """Evaluate the pipeline's upstream datasets and decide RunRequest vs SkipReason.
+
+                The configured ``dataset_triggering_strategy`` governs the trigger GATE only:
+                ANY passes the gate as soon as one monitored asset has ever materialized,
+                ALL requires every one. Passing the gate does not fire a run by itself —
+                a designed post-gate consistency check then verifies the freshness of ALL
+                the non-optional datasets the pipeline depends on within the window frame
+                (``check_datasets_freshness``), and the tick keeps returning ``SkipReason``
+                until every one of them has materialized consistently. Under ANY with a
+                partially-materialized upstream set the sensor therefore skips — it does
+                not fire on the first available upstream the way Airflow's
+                ``DatasetAny``/``AssetAny`` timetable does. This is intentional design
+                (issue #78), pinned by tests/dagster/test_dagster_triggering_strategy.py.
+                """
                 asset_events = context.latest_materialization_records_by_key()
                 if self.job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
                     events_checked = any(asset_events.values())
