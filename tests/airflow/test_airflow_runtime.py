@@ -52,24 +52,21 @@ from tests.shared.expected_results import (
     table_snapshot,
 )
 
-try:
-    import airflow
+from tests.airflow.dataset_compat import (
+    AIRFLOW_AVAILABLE,
+    AIRFLOW_VERSION,
+    SUPPORTS_ASSETS,
+    Dataset,
+    DatasetAll,
+    DatasetAny,
+    CONDITION_ATTR as _CONDITION_ATTR,
+)
 
-    AIRFLOW_AVAILABLE = True
-    AIRFLOW_VERSION = tuple(int(x) for x in airflow.__version__.split(".")[:2])
-    SUPPORTS_ASSETS = AIRFLOW_VERSION >= (3, 0)
-    if SUPPORTS_ASSETS:
-        from airflow.sdk import Asset as Dataset
-        from airflow.sdk import AssetAll as DatasetAll
-        from airflow.sdk import AssetAny as DatasetAny
-    else:
-        from airflow.datasets import Dataset, DatasetAll, DatasetAny
+try:
     from airflow.models.dag import DAG
     from airflow.utils.state import DagRunState
-except ImportError:
-    AIRFLOW_AVAILABLE = False
-    AIRFLOW_VERSION = (0, 0)
-    SUPPORTS_ASSETS = False
+except ImportError:  # pragma: no cover — collection guard only
+    pass
 
 pytestmark = [
     pytest.mark.integration,
@@ -78,9 +75,6 @@ pytestmark = [
         reason="Requires Apache Airflow",
     ),
 ]
-
-# The name of the condition attribute on dataset/asset-triggered timetables.
-_CONDITION_ATTR = "asset_condition" if SUPPORTS_ASSETS else "dataset_condition"
 
 # Use "now" as execution date — the DAG's start_date is derived from
 # the generated file's mtime, which is always "today".  An execution
