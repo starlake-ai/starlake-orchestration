@@ -241,6 +241,12 @@ The root task of each `SnowflakeDag` contains a `StoredProcedureCall` that perfo
 
 All downstream `DAGTask` nodes have their condition set to `SYSTEM$GET_PREDECESSOR_RETURN_VALUE() <> ''`. This ensures the entire pipeline is skipped if the root task determined that upstream data is not ready.
 
+### ALL-only Triggering — `dataset_triggering_strategy` Has No Effect
+
+The `dataset_triggering_strategy` job option (`any`/`all`) is **ignored by starlake-snowflake**: both values produce a structurally identical Snowflake DAG. The stream condition connectives are hard-wired (`OR` across most-frequent scheduled streams, `AND` across not-scheduled streams) and the root task validation skips the run if **any** depended-upon dataset was not published within the window frame.
+
+This is by orchestrator design: Snowflake has no event-based triggering mechanism, so ANY semantics cannot be implemented — the run must ensure **all** depended-upon datasets were published within the window frame. Pipelines that rely on ANY triggering on Airflow or Dagster will behave as ALL when deployed to Snowflake. See [ARCHITECTURE.md](https://github.com/starlake-ai/starlake-orchestration/blob/main/starlake-snowflake/ARCHITECTURE.md) for details.
+
 ## SnowflakePipeline
 
 `SnowflakePipeline` extends `AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset]` and manages the full lifecycle of a Snowflake DAG.

@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.5.0")
+version = os.environ.get("PROJECT_VERSION", "0.5.1")
 
 setup(name='starlake-orchestration',
       version=version,
