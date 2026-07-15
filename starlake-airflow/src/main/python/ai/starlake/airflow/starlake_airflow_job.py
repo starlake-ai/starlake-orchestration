@@ -763,12 +763,29 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
     def default_dag_args(self) -> dict:
         import json
         from json.decoder import JSONDecodeError
-        dag_args = DEFAULT_DAG_ARGS
+        # Precedence contract (issue #87):
+        #   DEFAULT_DAG_ARGS (framework constants)
+        #     < default_dag_args JSON option
+        #     < explicitly provided retries / retry_delay options
+        # start_date is always framework-derived (computed from the DAG file).
+        # copy: the shared module constant must never be mutated — the Airflow
+        # scheduler parses many DAG modules in one interpreter.
+        dag_args = dict(DEFAULT_DAG_ARGS)
         try:
             dag_args.update(json.loads(__class__.get_context_var(var_name="default_dag_args", options=self.options)))
         except (MissingEnvironmentVariable, JSONDecodeError):
             pass
-        dag_args.update({'start_date': self.start_date, 'retry_delay': timedelta(seconds=self.retry_delay), 'retries': self.retries})
+        dag_args.update({'start_date': self.start_date})
+        # only an explicitly provided option may override the JSON option —
+        # the core fallbacks (retries=1, retry_delay=300) must not clobber it
+        try:
+            dag_args.update({'retries': int(__class__.get_context_var(var_name='retries', options=self.options))})
+        except (MissingEnvironmentVariable, ValueError):
+            pass
+        try:
+            dag_args.update({'retry_delay': timedelta(seconds=int(__class__.get_context_var(var_name='retry_delay', options=self.options)))})
+        except (MissingEnvironmentVariable, ValueError):
+            pass
         return dag_args
 
 import jinja2

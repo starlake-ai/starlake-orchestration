@@ -123,10 +123,13 @@ The Airflow-specific base job factory. All execution environment jobs extend thi
 - Parses `end_date` from context var (YYYY-MM-DD format or None)
 - Resolves `max_active_runs` from context var (default: 3)
 
-**`default_dag_args()`** — merges in this order:
+**`default_dag_args()`** — returns a **copy** (the shared `DEFAULT_DAG_ARGS` constant is never mutated — the Airflow scheduler parses many DAG modules in one interpreter, issue #87) built with this precedence (lowest to highest):
+
 1. `DEFAULT_DAG_ARGS` (module constant: depends_on_past=False, start_date=2023-01-01, retries=1, retry_delay=5min, max_active_runs=1)
-2. JSON from `default_dag_args` context var (if present)
-3. `start_date`, `retry_delay`, `retries` from the job instance
+2. JSON from the `default_dag_args` context var (if present)
+3. `start_date` (always framework-derived from the DAG file) and the `retries` / `retry_delay` context vars **only when explicitly provided** — the core fallbacks (retries=1, retry_delay=300s) never clobber a value set via the JSON option
+
+At pipeline level, `AirflowPipeline.__init__` merges `{**job.caller_globals.get('default_dag_args', {}), **job.default_dag_args()}` — the options-derived args win over the caller-module `default_dag_args` snapshot; snapshot-only keys (e.g. `owner`) survive. Hand-written caller modules that need to override an options-derived key can mutate `pipeline.dag.default_args` after `sl_create_pipeline()`, before task construction. The stock orchestrator include computes the module snapshot as `dict(DEFAULT_DAG_ARGS, **__dag_args)`, so the user's `default_dag_args` JSON option wins over the framework constants there too.
 
 **`sl_load()`, `sl_transform()`, `sl_import()`, `sl_pre_load()`** — add Airflow-specific kwargs (`doc`, `pool`, `do_xcom_push`) then delegate to parent. `sl_transform()` additionally appends the runtime `sl_options_from_events` fragment to the transform options (version-aware context key, see *Runtime options propagation*).
 
@@ -408,7 +411,7 @@ The `ts_as_datetime` macro first checks XCom for a `data_interval_end` pushed by
 
 ### 5. Caller Globals Injection
 
-Generated DAG files (from Jinja2 templates) define module-level variables (`description`, `options`, `schedules`, `default_dag_args`, `user_defined_macros`, etc.). The `AirflowPipeline` constructor and `StarlakeAirflowJob` read these via `job.caller_globals` — this is how template-generated configuration flows into the pipeline without modifying framework code.
+Generated DAG files (from Jinja2 templates) define module-level variables (`description`, `options`, `schedules`, `default_dag_args`, `user_defined_macros`, etc.). The `AirflowPipeline` constructor and `StarlakeAirflowJob` read these via `job.caller_globals` — this is how template-generated configuration flows into the pipeline without modifying framework code. Note that for `default_dag_args` specifically, the options-derived dict returned by `job.default_dag_args()` takes precedence over the caller-module snapshot (issue #87); snapshot-only keys survive.
 
 ## Module Constants
 
