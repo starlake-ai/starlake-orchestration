@@ -66,9 +66,12 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         j: StarlakeAirflowJob = job
         max_active_runs: int = j.max_active_runs
 
+        # options-derived args (retries, retry_delay, start_date and the
+        # default_dag_args JSON option) win over the caller-module snapshot;
+        # snapshot-only keys (e.g. 'owner') survive (issue #87)
         default_args = {
-            **job.default_dag_args(), 
-            **job.caller_globals.get('default_dag_args', {})
+            **job.caller_globals.get('default_dag_args', {}),
+            **job.default_dag_args()
         }
 
         # AssetOrTimeSchedule is not supported yet within SL

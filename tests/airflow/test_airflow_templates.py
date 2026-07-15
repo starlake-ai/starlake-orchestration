@@ -102,7 +102,9 @@ class TestAirflowTemplateComposition:
         # __starlake_airflow_orchestrator.py.j2 — enum + airflow-specific vars
         assert "orchestrator = StarlakeOrchestrator.AIRFLOW" in rendered
         assert "access_control = None" in rendered
-        assert "default_dag_args = dict(__dag_args, **DEFAULT_DAG_ARGS)" in rendered
+        # story 6.1 (issue #87): the user's default_dag_args JSON option wins
+        # over the framework constants in the module snapshot
+        assert "default_dag_args = dict(DEFAULT_DAG_ARGS, **__dag_args)" in rendered
         # __starlake_shell_execution.py — execution environment
         assert "execution_environment = StarlakeExecutionEnvironment.SHELL" in rendered
         # __common__.py.j2 — config projection

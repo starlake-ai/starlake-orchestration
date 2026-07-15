@@ -8,4 +8,4 @@ from ai.starlake.airflow import StarlakeAirflowOptions, DEFAULT_DAG_ARGS
 import json
 
 __dag_args = json.loads(StarlakeAirflowOptions.get_context_var(var_name="default_dag_args", default_value="""{}""", options=options))
-default_dag_args = dict(__dag_args, **DEFAULT_DAG_ARGS)
+default_dag_args = dict(DEFAULT_DAG_ARGS, **__dag_args)
