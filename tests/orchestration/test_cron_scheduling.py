@@ -279,6 +279,9 @@ class TestStarlakeDependenciesFromJson:
         assert parent.dependency_type == StarlakeDependencyType.TASK
         assert len(parent.dependencies) == 1
         assert parent.dependencies[0].name == "child.table"
+        assert deps.get_dependency("parent_task") is parent
+        assert deps.get_dependency("child.table") is parent.dependencies[0]
+        assert deps.get_dependency("missing") is None
 
 
 # ---------------------------------------------------------------------------

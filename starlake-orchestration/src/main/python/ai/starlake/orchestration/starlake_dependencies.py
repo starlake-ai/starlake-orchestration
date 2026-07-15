@@ -365,6 +365,10 @@ class StarlakeDependencies():
                 if parent.id not in all_nodes.keys():
                     all_nodes[parent.id] = parent
 
+        self.__dependencies_map = {
+            dependency.name: dependency for dependency in self.dependencies
+        }
+        self.__dependencies_map.update(all_dependencies)
         self.__all_dependencies = all_dependencies
         self.__first_level_tasks = first_level_tasks
         self.__filtered_datasets = filtered_datasets
