@@ -133,6 +133,17 @@ At pipeline level, `AirflowPipeline.__init__` merges `{**job.caller_globals.get(
 
 **`sl_load()`, `sl_transform()`, `sl_import()`, `sl_pre_load()`** — add Airflow-specific kwargs (`doc`, `pool`, `do_xcom_push`) then delegate to parent. `sl_transform()` additionally appends the runtime `sl_options_from_events` fragment to the transform options (version-aware context key, see *Runtime options propagation*).
 
+#### Pre-load sensor mode (story 6.2, issue #86)
+
+With `pre_load_sensor=true` (option, or the `sensor=True` kwarg on `sl_pre_load`) the bash job builds a `StarlakePreloadBashSensor(StarlakeDatasetMixin, BashSensor)` instead of the one-shot `StarlakeBashOperator`:
+
+- **Construction** — `mode='reschedule'` (worker slot freed between pokes), `poke_interval=pre_load_poke_interval`, `timeout=pre_load_timeout` (wall-clock, counted from the first poke), `soft_fail=pre_load_sensor_soft_fail`, `retries` defaulted to 0 (a retried sensor restarts the whole poke window; an explicit `retries` kwarg or explicitly provided `retries` option still wins per the story 6.1 precedence contract).
+- **Command** — the RAW starlake command prefixed with `cd <sl_root> && ` (`BashSensor` has no `cwd` parameter, unlike `BashOperator`); the exit-code-swallowing xcom echo-wrapper is NOT applied — the sensor needs the true exit code: non-zero → poke again, 0 → done. `env` is passed through unchanged (`Popen(env=...)` REPLACES the process environment, same semantics as the BashOperator path). `retry_exit_code` stays `None`, so a genuinely broken CLI invocation also pokes until timeout instead of failing fast — an accepted trade-off, same behavior class as any bash sensor.
+- **`skip_or_start` composition preserved** — `sl_pre_load` still forces `do_xcom_push=True`, and the sensor's `execute()` override returns `True` after `super().execute(context)` so a truthy `return_value` XCom is recorded on success and the downstream `ShortCircuitOperator` proceeds. On timeout the sensor is SKIPPED (`soft_fail=true`) or FAILED — in both cases no XCom exists, `f_skip_or_start` pulls `None` and the downstream loads are skipped. The stock `pre_load >> skip_or_start >> [import >>] load` template wiring is unchanged.
+- **ACK strategy** — `--globalAckFilePath` is kept, but the historical `retry_delay=ack_wait_timeout` retry-as-wait injection is skipped in sensor mode (the sensor's `pre_load_timeout` IS the wall-clock window).
+- **Shell-only** — the cloud engines (cloud_run, dataproc, fargate) call the provider-free classmethod `StarlakeAirflowJob._reject_pre_load_sensor_kwargs(kwargs, env_name)` at the top of their `sl_job`: it pops the four sensor kwargs and raises `ValueError` when `pre_load_sensor` is truthy, pointing at the retries-as-poke workaround (`retries` / `retry_delay`).
+- **Zero change when off** — with the option unset/false and no `sensor` kwarg, `sl_pre_load` produces byte-identical arguments and kwargs to the pre-6.2 behavior.
+
 **`dummy_op()`** — creates `EmptyOperator` with optional `outlets` (Dataset list).
 
 **`skip_or_start_op()`** — creates a `ShortCircuitOperator` that:

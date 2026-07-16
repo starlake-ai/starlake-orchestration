@@ -139,6 +139,7 @@ def sl_pre_load(
     domain: str,
     tables: set = set(),
     pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None,
+    sensor: Optional[bool] = None,
     **kwargs
 ) -> Optional[T]:
 ```
@@ -148,6 +149,7 @@ def sl_pre_load(
 | domain | `str` | The required domain to pre-load |
 | tables | `set` | The optional tables to pre-load |
 | pre_load_strategy | `Union[StarlakePreLoadStrategy, str, None]` | The optional pre-load strategy (`self.pre_load_strategy` by default) |
+| sensor | `Optional[bool]` | Optional sensor-mode override (the `pre_load_sensor` option by default): when enabled, the pre-load task pokes `starlake preload` every `pre_load_poke_interval` seconds within the `pre_load_timeout` wall-clock window instead of running once — shell execution environment only |
 
 ###### StarlakePreLoadStrategy
 
@@ -270,7 +272,11 @@ The following options are available for all concrete factory classes derived fro
 | **retry_delay** | `int` | Delay between retries in seconds (`300` by default) |
 | **pre_load_strategy** | `str` | One of `none` (default), `imported`, `pending`, or `ack` |
 | **global_ack_file_path** | `str` | Path to the ack file (`{SL_DATASETS}/pending/{domain}/{{ds}}.ack` by default) |
-| **ack_wait_timeout** | `int` | Timeout in seconds to wait for the ack file (`1 hour` by default) |
+| **ack_wait_timeout** | `int` | Timeout in seconds to wait for the ack file (`1 hour` by default); ignored in sensor mode (`pre_load_timeout` is the wall-clock window there) |
+| **pre_load_sensor** | `bool` | `true`/`false` (default `false`) — turn the pre-load task into a sensor that pokes `starlake preload` until files arrive. SHELL execution environment only: cloud engines (cloud_run, dataproc, fargate) reject it with a `ValueError` at DAG-definition time — use the retries-as-poke workaround there (`retries` / `retry_delay` options) |
+| **pre_load_poke_interval** | `int` | Seconds between two pokes in sensor mode (`300` by default) |
+| **pre_load_timeout** | `int` | Wall-clock timeout in seconds for the pre-load sensor (`3600` by default); must be >= `pre_load_poke_interval` |
+| **pre_load_sensor_soft_fail** | `bool` | `true`/`false` (default `false`) — on sensor timeout, skip the downstream loads instead of failing the run |
 | **dataset_triggering_strategy** | `str` | One of `any` (default) or `all` |
 | **timezone** | `str` | Timezone for scheduling (`UTC` by default) |
 

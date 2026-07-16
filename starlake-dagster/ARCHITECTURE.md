@@ -187,7 +187,20 @@ Base job factory. Unlike Airflow, does NOT override `get_context_var()` (no Dags
 
 - `sl_orchestrator()` → `StarlakeOrchestrator.DAGSTER`
 - `sl_pre_load()` — adds `skip_or_start=True`, `retries=0` when strategy ≠ NONE
+- `_reject_pre_load_sensor_kwargs(kwargs, env_name)` — classmethod called by the cloud variants' `sl_job` (cloud_run, dataproc, fargate): pops the four `pre_load_*` sensor kwargs and raises `ValueError` when `pre_load_sensor` is truthy (sensor mode is shell-only; the retries-as-poke workaround applies on cloud engines)
 - `dummy_op()` — `@op` yielding `Output(value=task_id)` + `AssetMaterialization` per event
+
+#### Pre-load sensor mode (story 6.2, issue #86)
+
+With `pre_load_sensor=true` (option, or the `sensor=True` kwarg on `sl_pre_load`) the shell job wraps command execution in an **in-op wall-clock poke loop** instead of the single `execute_shell_command()` call:
+
+- Dagster has **no reschedule primitive** — the op HOLDS ITS EXECUTOR SLOT while poking, for up to `pre_load_timeout` seconds. Size executor concurrency accordingly.
+- Loop: run `starlake preload`; exit 0 → normal success path (materializations + `Output`); non-zero → `time.sleep(pre_load_poke_interval)` and poke again while another poke still fits in the window (monotonic clock; no useless final sleep).
+- On deadline: `pre_load_sensor_soft_fail=true` → the existing optional-output skip (bare `return`, downstream ops skipped); otherwise `raise Failure("... timed out waiting for files after <timeout>s")`. The hard timeout deliberately BYPASSES the `skip_or_start` bare-return branch — the `skip_or_start=True` forced by `sl_pre_load` must not swallow it.
+- This also makes wait semantics real on Dagster: the core ACK `retry_delay=ack_wait_timeout` injection was dead code here (preload forces `retries=0`, so `RetryPolicy` is never built); in sensor mode the injection is skipped in core and the poke loop provides the wall-clock wait. `retry_policy` stays `None` on the preload op.
+- The poke behavior lives in the op **closure**, so it survives the `DagsterPipeline.__exit__` graph rebuild (`copy_node_with_new_inputs`).
+- In `dry_run` the loop is not entered (the dry-run short-circuit returns exit 0 before any poke/sleep).
+- Zero change when off: without the option/kwarg the single-shot execution path is byte-identical to the pre-6.2 behavior.
 
 ### Orchestration Layer
 

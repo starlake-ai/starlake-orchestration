@@ -337,6 +337,41 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             f"— valid values: {valid}"
         )
 
+    @classmethod
+    def _sl_pre_load_option_error(cls, option: str, value, expected: str) -> ValueError:
+        """Build an NFR11-shaped error for an invalid pre-load sensor option (story 6.2)."""
+        orchestrator = cls.sl_orchestrator() or "unknown"
+        return ValueError(
+            f"[{orchestrator}] sl_pre_load: invalid value '{value}' for option "
+            f"'{option}' — expected {expected}"
+        )
+
+    @classmethod
+    def _sl_parse_strict_bool(cls, option: str, value) -> bool:
+        """Strictly parse a boolean option value (story 6.2, NFR11).
+
+        Accepts ONLY 'true'/'false' (case-insensitive, stripped) — anything
+        else raises a ValueError naming the orchestrator, the option and the
+        offending value.  Deliberately NOT the permissive ``== "true"`` idiom,
+        which silently maps e.g. 'yes' to False.
+        """
+        normalized = str(value).strip().lower()
+        if normalized not in ("true", "false"):
+            raise cls._sl_pre_load_option_error(option, value, "'true' or 'false'")
+        return normalized == "true"
+
+    @classmethod
+    def _sl_parse_strict_positive_int(cls, option: str, value) -> int:
+        """Strictly parse a positive integer option value (story 6.2, NFR11)."""
+        expected = "a positive integer number of seconds"
+        try:
+            parsed = int(str(value).strip())
+        except ValueError:
+            raise cls._sl_pre_load_option_error(option, value, expected) from None
+        if parsed <= 0:
+            raise cls._sl_pre_load_option_error(option, value, expected)
+        return parsed
+
     @property
     def events(self) -> List[E]:
         """Returns the events.
@@ -443,7 +478,7 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
                 return sanitize_id(f'check_{domain}_ack_file')
 
 
-    def sl_pre_load(self, domain: str, tables: set=set(), pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None, **kwargs) -> Optional[T]:
+    def sl_pre_load(self, domain: str, tables: set=set(), pre_load_strategy: Union[StarlakePreLoadStrategy, str, None] = None, sensor: Optional[bool] = None, **kwargs) -> Optional[T]:
         """Pre-load job.
         Generate the scheduler task that will check if the conditions are met to load the specified domain according to the pre-load strategy choosen.
 
@@ -451,7 +486,13 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             domain (str): The required domain to pre-load.
             tables (set): The optional tables to pre-load.
             pre_load_strategy (Union[StarlakePreLoadStrategy, str, None]): The optional pre-load strategy to use.
-        
+            sensor (Optional[bool]): Optional sensor mode override (story 6.2).
+                When None the ``pre_load_sensor`` option decides (default false).
+                When enabled the four ``pre_load_*`` kwargs are forwarded to
+                ``sl_job`` so shell execution environments poke the preload
+                command every ``pre_load_poke_interval`` seconds within the
+                ``pre_load_timeout`` wall-clock window.
+
         Returns:
             Optional[T]: The scheduler task or None.
         """
@@ -472,7 +513,21 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
             task_id = kwargs.get('task_id', self.__class__.get_sl_pre_load_task_id(domain, pre_load_strategy, **kwargs))
 
             kwargs.pop("task_id", None)
-            
+
+            # story 6.2 (issue #86) — optional sensor mode: explicit kwarg wins,
+            # else the pre_load_sensor option decides (strict parsing, NFR11)
+            if sensor is None:
+                sensor = self.__class__._sl_parse_strict_bool(
+                    'pre_load_sensor',
+                    __class__.get_context_var(
+                        var_name='pre_load_sensor',
+                        default_value='false',
+                        options=self.options
+                    )
+                )
+            else:
+                sensor = bool(sensor)
+
             if pre_load_strategy == StarlakePreLoadStrategy.ACK:
 
                 def current_dt():
@@ -503,7 +558,59 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
                 )
                 kwargs.pop("ack_wait_timeout", None)
 
-                kwargs.update({'retry_delay': timedelta(seconds=ack_wait_timeout)})
+                if not sensor:
+                    # retry-as-wait idiom — superseded by the sensor's
+                    # wall-clock pre_load_timeout in sensor mode (story 6.2)
+                    kwargs.update({'retry_delay': timedelta(seconds=ack_wait_timeout)})
+
+            if sensor:
+                # kwarg > option > default (same lazy pattern as ack_wait_timeout)
+                poke_interval = self.__class__._sl_parse_strict_positive_int(
+                    'pre_load_poke_interval',
+                    kwargs.pop(
+                        'pre_load_poke_interval',
+                        __class__.get_context_var(
+                            var_name='pre_load_poke_interval',
+                            default_value=300, # 5 minutes
+                            options=self.options
+                        )
+                    )
+                )
+                pre_load_timeout = self.__class__._sl_parse_strict_positive_int(
+                    'pre_load_timeout',
+                    kwargs.pop(
+                        'pre_load_timeout',
+                        __class__.get_context_var(
+                            var_name='pre_load_timeout',
+                            default_value=3600, # 1 hour
+                            options=self.options
+                        )
+                    )
+                )
+                soft_fail = self.__class__._sl_parse_strict_bool(
+                    'pre_load_sensor_soft_fail',
+                    kwargs.pop(
+                        'pre_load_sensor_soft_fail',
+                        __class__.get_context_var(
+                            var_name='pre_load_sensor_soft_fail',
+                            default_value='false',
+                            options=self.options
+                        )
+                    )
+                )
+                if pre_load_timeout < poke_interval:
+                    orchestrator = self.__class__.sl_orchestrator() or "unknown"
+                    raise ValueError(
+                        f"[{orchestrator}] sl_pre_load: invalid configuration — "
+                        f"'pre_load_timeout' ({pre_load_timeout}) must be greater than or "
+                        f"equal to 'pre_load_poke_interval' ({poke_interval})"
+                    )
+                kwargs.update({
+                    'pre_load_sensor': True,
+                    'pre_load_poke_interval': poke_interval,
+                    'pre_load_timeout': pre_load_timeout,
+                    'pre_load_sensor_soft_fail': soft_fail,
+                })
 
             return self.sl_job(task_id=task_id, arguments=arguments, task_type=TaskType.PRELOAD, **kwargs)
 

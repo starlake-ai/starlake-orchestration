@@ -28,6 +28,10 @@ from dagster._core.definitions import NodeDefinition
 
 from dagster_shell import execute_shell_command
 
+# used as time.monotonic()/time.sleep() (module-attribute calls) so tests can
+# patch the poke-loop clock (story 6.2)
+import time
+
 class StarlakeDagsterShellJob(StarlakeDagsterJob):
 
     def __init__(self, filename: str=None, module_name: str=None, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None]=None, options: dict=None, **kwargs) -> None:
@@ -98,6 +102,13 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
         # DagsterLogicalDatetimeConfig.sl_options for the runtime counterpart)
         extra = kwargs.pop("extra", None)
 
+        # story 6.2 (issue #86) — sensor mode: popped BEFORE the outs/RetryPolicy
+        # computation and captured by the op closure below
+        pre_load_sensor = bool(kwargs.pop("pre_load_sensor", False))
+        pre_load_poke_interval = int(kwargs.pop("pre_load_poke_interval", 300))
+        pre_load_timeout = int(kwargs.pop("pre_load_timeout", 3600))
+        pre_load_sensor_soft_fail = bool(kwargs.pop("pre_load_sensor_soft_fail", False))
+
         assets: List[AssetKey] = kwargs.get("assets", [])
 
         ins=kwargs.get("ins", {})
@@ -163,15 +174,47 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
                 context.log.info(output)
             else:
                 context.log.info(f"Executing Starlake command: {command}")
-                # Execute the shell command
-                output, return_code = execute_shell_command(
-                    shell_command=command,
-                    output_logging="STREAM",
-                    log=context.log,
-                    cwd=self.sl_root,
-                    env=env,
-                    log_shell_command=True,
-                )
+
+                def _run_command():
+                    # Execute the shell command
+                    return execute_shell_command(
+                        shell_command=command,
+                        output_logging="STREAM",
+                        log=context.log,
+                        cwd=self.sl_root,
+                        env=env,
+                        log_shell_command=True,
+                    )
+
+                if pre_load_sensor:
+                    # story 6.2 — in-op wall-clock poke loop: Dagster has no
+                    # reschedule primitive, so the op HOLDS ITS EXECUTOR SLOT
+                    # while poking (up to pre_load_timeout seconds).
+                    # time.monotonic()/time.sleep() are called through the
+                    # module so tests can patch the clock.
+                    deadline = time.monotonic() + pre_load_timeout
+                    while True:
+                        output, return_code = _run_command()
+                        if not return_code:
+                            break
+                        # sleep only when another poke still fits in the window
+                        if time.monotonic() + pre_load_poke_interval >= deadline:
+                            timeout_message = (
+                                f"Starlake command {command} timed out waiting "
+                                f"for files after {pre_load_timeout}s"
+                            )
+                            if pre_load_sensor_soft_fail:
+                                # existing optional-output skip: no Output is
+                                # yielded, downstream tasks are skipped
+                                context.log.info(f"{timeout_message} — skipping downstream tasks (pre_load_sensor_soft_fail=true).")
+                                return
+                            # hard timeout — MUST bypass the skip_or_start
+                            # bare-return branch below (the forced
+                            # skip_or_start=True must not swallow it)
+                            raise Failure(description=timeout_message)
+                        time.sleep(pre_load_poke_interval)
+                else:
+                    output, return_code = _run_command()
 
             if return_code:
                 value=f"Starlake command {command} execution failed with output: {output}"

@@ -212,7 +212,11 @@ The following options can be specified in all concrete factory classes:
 | **retry_delay**                   | int  | optional delay between retries in seconds (`300` by default)                              |
 | **pre_load_strategy**             | str  | one of `none` (default), `imported`, `pending` or `ack`                                   |
 | **global_ack_file_path**          | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default)         |
-| **ack_wait_timeout**              | int  | timeout in seconds to wait for the ack file (`1 hour` by default)                         |
+| **ack_wait_timeout**              | int  | timeout in seconds to wait for the ack file (`1 hour` by default); ignored in sensor mode (historically dead on Dagster anyway — preload forces `retries=0`) |
+| **pre_load_sensor**               | bool | `true`/`false` (default `false`) — wrap the pre-load op in an in-op poke loop that re-runs `starlake preload` until files arrive. CAUTION: Dagster has no reschedule primitive, the op HOLDS ITS EXECUTOR SLOT while poking (up to `pre_load_timeout` seconds). SHELL execution environment only: cloud variants (cloud_run, dataproc, fargate) reject it with a `ValueError` at definition time — use the retries-as-poke workaround there (`retries` / `retry_delay` options) |
+| **pre_load_poke_interval**        | int  | seconds between two pokes in sensor mode (`300` by default)                               |
+| **pre_load_timeout**              | int  | wall-clock timeout in seconds for the pre-load poke loop (`3600` by default)              |
+| **pre_load_sensor_soft_fail**     | bool | `true`/`false` (default `false`) — on timeout skip the downstream loads (optional-output gating) instead of raising `Failure` |
 | **dataset_triggering_strategy**   | str  | one of `ANY` or `ALL` for the multi-asset sensor **trigger gate** (see [Multi-Asset Sensor](#multi-asset-sensor) — a post-gate consistency check still requires all non-optional datasets before a run) |
 
 ## DagsterLogicalDatetimeConfig
