@@ -121,8 +121,9 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
                             options += f",{opt}"
                 else:
                     options = ",".join([f"{key}={value}" for i, (key, value) in enumerate(self.sl_env_vars.items())]) # Add/overwrite with sl env variables
-                # double quotes so values containing spaces survive bash -c word
-                # splitting, including inside the single-quoted do_xcom_push wrapper
+                # double quotes so values containing spaces survive bash word
+                # splitting; the do_xcom_push wrapper is a flat script (story
+                # 6.4, issue #95) so these quotes are parsed exactly once
                 arguments[index+1] = f'"{options}"'
                 found = True
                 break

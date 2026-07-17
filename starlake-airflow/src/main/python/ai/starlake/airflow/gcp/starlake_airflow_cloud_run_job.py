@@ -176,8 +176,10 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         # NOT select the exit-swallowing wrapper here: only
                         # PRELOAD swallows, every other task type keeps the
                         # active `exit $return_code` trailer so a failed
-                        # execution fails the chain
-                        bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command.replace("'", '"'), preload)
+                        # execution fails the chain. The command is passed
+                        # untouched — the wrapper owns the quoting contract
+                        # (story 6.4, issue #95)
+                        bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command, preload)
                         job_status = StarlakeBashOperator(
                             task_id=get_completion_status_id,
                             dataset=dataset,
@@ -236,8 +238,13 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     # story 6.3 (issue #92) — wrapper variant keyed on the
                     # task type, not on do_xcom_push: preload swallows the
                     # exit code (XCom-gated), every other task type keeps the
-                    # active `exit $return_code` trailer
-                    bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command.replace("'", '"'), preload)
+                    # active `exit $return_code` trailer. The command is
+                    # passed untouched — the wrapper owns the quoting
+                    # contract (story 6.4, issue #95): the old blanket
+                    # .replace("'", '"') turned the single quotes of
+                    # --scheduledDate '...' into double quotes that
+                    # terminated --args "..." early for LOAD/TRANSFORM
+                    bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command, preload)
                 kwargs.pop('do_xcom_push', None)
                 return StarlakeBashOperator(
                     task_id=task_id,

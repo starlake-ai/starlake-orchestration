@@ -29,6 +29,12 @@ Two layers:
   ``apache-airflow-providers-amazon`` / ``-google``): the real
   ``FargateTaskOperator`` / ``CloudRunJobOperator`` / completion sensors and
   the ``sl_job`` wrapper selection per task type.
+
+Story 6.4 (issue #95) extends this file with the wrapper QUOTING contract:
+the echo/XCom wrapper is a flat script (no nested ``bash -c '...'`` quoting
+context) and the gcloud call sites no longer pre-mangle commands with
+``.replace("'", '"')`` — a wrapped command executes with argv identical to
+the raw command's.
 """
 
 from __future__ import annotations
@@ -119,29 +125,55 @@ class TestXComWrappedCommand:
         assert "# if [ $return_code -ne 0 ]; then" not in wrapped
         assert "#     exit $return_code" not in wrapped
 
-    def test_non_preload_variant_byte_equal_to_pre_refactor_bash_wrapper(self):
-        """AC6 — the helper's non-preload variant is byte-identical to the
-        wrapper string the bash job shipped before the refactor."""
+    def test_non_preload_variant_byte_pin_flat_wrapper(self):
+        """Story 6.4 (issue #95) — supersedes the 6.3 byte-pin of the nested
+        ``bash -c '...'`` wrapper: the single-quoted context mangled commands
+        containing single quotes (``--scheduledDate '...'``, apostrophes in
+        ``--options`` values). The wrapper is now a FLAT script — no nested
+        shell, no quoting context — pinned byte-for-byte here."""
         from ai.starlake.airflow import StarlakeAirflowJob
 
         expected = (
             "\n"
-            "                set -e\n"
-            "                bash -c '\n"
-            "                starlake load\n"
-            "                return_code=$?\n"
+            "starlake load\n"
+            "return_code=$?\n"
             "\n"
-            "                # Push the return code to XCom\n"
-            "                echo $return_code\n"
+            "# Push the return code to XCom\n"
+            "echo $return_code\n"
             "\n"
-            "                # Exit with the captured return code if non-zero\n"
-            "                if [ $return_code -ne 0 ]; then\n"
-            "                    exit $return_code\n"
-            "                fi\n"
-            "                '\n"
-            "                "
+            "# Exit with the captured return code if non-zero\n"
+            "if [ $return_code -ne 0 ]; then\n"
+            "    exit $return_code\n"
+            "fi\n"
         )
         assert StarlakeAirflowJob._sl_xcom_wrapped_command("starlake load", preload=False) == expected
+
+    def test_preload_variant_byte_pin_flat_wrapper(self):
+        """Story 6.4 (issue #95) — flat preload variant: echo is the LAST
+        line (BashOperator pushes the last stdout line as the ``return_value``
+        XCom that ``f_skip_or_start`` int-parses)."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        expected = (
+            "\n"
+            "starlake preload\n"
+            "return_code=$?\n"
+            "\n"
+            "# Push the return code to XCom\n"
+            "echo $return_code\n"
+        )
+        assert StarlakeAirflowJob._sl_xcom_wrapped_command("starlake preload", preload=True) == expected
+
+    @pytest.mark.parametrize("preload", [True, False])
+    def test_wrapper_has_no_nested_quoting_context(self, preload):
+        """Story 6.4 (issue #95) — no ``bash -c`` (nothing to escape into)
+        and no ``set -e`` (it would abort a failing command before
+        ``return_code=$?`` captures it)."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command("starlake load", preload=preload)
+        assert "bash -c" not in wrapped
+        assert "set -e" not in wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +543,39 @@ class TestCloudRunGcloudWrapperSelection:
         assert "return_code=$?" in task.bash_command
         assert ACTIVE_EXIT not in task.bash_command
 
+    def test_sync_gcloud_load_wrapped_command_preserves_single_quotes(self):
+        """Story 6.4 (issue #95): the sync-gcloud call site pre-mangled the
+        command with .replace("'", '"') before wrapping — the substituted
+        double quotes terminated ``--args "..."`` early and word-split the
+        rest of the gcloud invocation for LOAD/TRANSFORM."""
+        job = self._make_job({"cloud_run_async": "false"})
+        with _dag():
+            task = job.sl_load(
+                task_id="load_customers", domain="starbake", table="customers",
+                do_xcom_push=True,
+            )
+        cmd = task.bash_command
+        assert "--scheduledDate '{{sl_scheduled_date" in cmd
+        assert "strftime('%Y-%m-%dT%H:%M:%S%z')" in cmd
+        assert "--format='get(metadata.name)'" in cmd
+        # no trace of the old mangling
+        assert 'strftime("' not in cmd
+        assert '--format="get' not in cmd
+
+    def test_async_status_task_preserves_single_quotes(self):
+        """Story 6.4 (issue #95): same de-mangling on the async status-task
+        call site — gcloud ``--format='...'``, ``sed '...'`` and the Jinja
+        ``task_ids='...'`` keep their single quotes."""
+        job = self._make_job()
+        with _dag() as dag:
+            job.sl_load(task_id="load_customers", domain="starbake", table="customers")
+        cmd = dag.get_task("load_customers_wait.load_customers_get_completion_status").bash_command
+        assert "--format='value(status.failedCount, status.cancelledCounts)'" in cmd
+        assert "sed 's/[[:blank:]]//g'" in cmd
+        assert "task_ids='" in cmd
+        assert '--format="value' not in cmd
+        assert 'task_ids="' not in cmd
+
 
 @google_only
 class TestCloudRunJobOperatorExecute:
@@ -635,3 +700,165 @@ class TestCloudRunJobCompletionSensorPoke:
         verdict = sensor.poke(context={})
         assert verdict.is_done is True
         assert verdict.xcom_value is True
+
+
+# ---------------------------------------------------------------------------
+# 6. Story 6.4 (issue #95) — wrapper quoting contract, runtime-executed
+# ---------------------------------------------------------------------------
+
+def _run_bash(script: str):
+    """Execute a bash_command string exactly as BashOperator would."""
+    import subprocess
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+class TestXComWrapperQuotingRuntime:
+    """Story 6.4 (issue #95) — the wrapper must preserve the wrapped command
+    byte-for-byte at execution time: single quotes in ``--scheduledDate``,
+    apostrophes in ``--options`` values and single quotes inside gcloud's
+    double-quoted ``--args "..."`` all reach the command intact, and exit
+    codes keep the 6.3 propagate/swallow contract."""
+
+    def test_single_quotes_inside_double_quoted_arg_survive(self):
+        """The gcloud shape: ``--args "...'...'..."``. Pins the wrapper half
+        of the contract — the old nested single-quoted ``bash -c '...'``
+        corrupted this shape even before the call-site mangling (the
+        call-site ``.replace`` removal itself is pinned by
+        ``test_gcloud_call_sites_never_mangle_the_command`` and the
+        google-guarded content tests)."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        probe = """printf '%s\\n' "--scheduledDate '2026-01-01T00:00:00+0000'" """
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command(probe, preload=False)
+        result = _run_bash(wrapped)
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert lines[-1] == "0"  # echoed return code (the XCom seam)
+        # inner single quotes are literal inside double quotes — preserved
+        assert lines[:-1] == ["--scheduledDate '2026-01-01T00:00:00+0000'"]
+
+    def test_apostrophe_in_value_survives(self):
+        """The bash-job shape: an ODD number of single quotes (an apostrophe
+        in an ``--options``/env value) unbalanced the old single-quoted
+        ``bash -c '...'`` wrapper and broke the script."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        probe = '''printf '%s\\n' "name=O'Brien"'''
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command(probe, preload=False)
+        result = _run_bash(wrapped)
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert lines == ["name=O'Brien", "0"]
+
+    def test_single_quoted_arg_consumed_exactly_once(self):
+        """``--scheduledDate '...'`` — bash must consume the quotes once
+        (one argument, no doubling, no word-splitting), exactly as the raw
+        unwrapped command would."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        probe = "printf '%s\\n' --scheduledDate '2026-01-01T00:00:00+0000'"
+        raw = _run_bash(probe)
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command(probe, preload=False)
+        result = _run_bash(wrapped)
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert lines[-1] == "0"
+        # argv identical to the raw command's
+        assert lines[:-1] == raw.stdout.splitlines() == [
+            "--scheduledDate",
+            "2026-01-01T00:00:00+0000",
+        ]
+
+    def test_preload_failing_command_exits_zero_and_echoes_code(self):
+        """6.3 swallow contract, unchanged by the flattening: the task ends
+        green, the echoed code is the last stdout line for skip_or_start."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command("false", preload=True)
+        result = _run_bash(wrapped)
+        assert result.returncode == 0
+        assert result.stdout.splitlines()[-1] == "1"
+
+    def test_preload_succeeding_command_echoes_zero(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command("true", preload=True)
+        result = _run_bash(wrapped)
+        assert result.returncode == 0
+        assert result.stdout.splitlines()[-1] == "0"
+
+    def test_non_preload_failing_command_propagates_exit_code(self):
+        """6.3 propagate contract, unchanged: the command's own exit code
+        fails the task after the echo."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command('bash -c "exit 3"', preload=False)
+        result = _run_bash(wrapped)
+        assert result.returncode == 3
+        assert result.stdout.splitlines()[-1] == "3"
+
+    def test_non_preload_succeeding_command_exits_zero(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        wrapped = StarlakeAirflowJob._sl_xcom_wrapped_command("true", preload=False)
+        result = _run_bash(wrapped)
+        assert result.returncode == 0
+        assert result.stdout.splitlines()[-1] == "0"
+
+    def test_gcloud_call_sites_never_mangle_the_command(self):
+        """Provider-free pin of the call-site half of the contract: CI
+        installs no google provider, so the google-guarded content tests
+        never run there — this source scan keeps the old
+        ``bash_command.replace("'", '"')`` pre-mangling from coming back
+        unnoticed."""
+        import os
+
+        # the gcp module is not importable without the google provider —
+        # read the file straight from the installed package instead
+        import ai.starlake.airflow as pkg
+
+        path = os.path.join(os.path.dirname(pkg.__file__), "gcp", "starlake_airflow_cloud_run_job.py")
+        with open(path) as f:
+            source = f.read()
+        assert "bash_command.replace" not in source
+
+
+class TestBashJobQuotingEndToEnd:
+    """Story 6.4 (issue #95) — end-to-end through the bash job's ``sl_load``:
+    the built (wrapped) bash_command executes with argv identical to the raw
+    command's. ``SL_STARLAKE_PATH`` points at an argv-echo probe and
+    ``scheduled_date`` is explicit so no Jinja rendering is involved."""
+
+    def _make_job(self, extra_options=None):
+        from ai.starlake.airflow.bash import StarlakeAirflowBashJob
+        options = {
+            "pre_load_strategy": "imported",
+            "SL_STARLAKE_PATH": "printf '%s\\n'",
+        }
+        options.update(extra_options or {})
+        return StarlakeAirflowBashJob(
+            filename="test_cloud_failure_propagation.py",
+            module_name=_AIRFLOW_TEST_MODULE_NAME,
+            options=options,
+        )
+
+    def test_load_scheduled_date_and_apostrophe_option_survive_execution(self):
+        job = self._make_job({"sl_env_var": '{"AUTHOR": "O\'Brien"}'})
+        with _dag():
+            task = job.sl_load(
+                task_id="load_customers",
+                domain="starbake",
+                table="customers",
+                do_xcom_push=True,
+                scheduled_date="2026-01-01T00:00:00+0000",
+            )
+        result = _run_bash(task.bash_command)
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert lines[-1] == "0"  # echoed return code (the XCom seam)
+        args = lines[:-1]
+        i = args.index("--scheduledDate")
+        # quotes consumed exactly once by bash — one intact argument
+        assert args[i + 1] == "2026-01-01T00:00:00+0000"
+        options_value = args[args.index("--options") + 1]
+        assert "AUTHOR=O'Brien" in options_value
