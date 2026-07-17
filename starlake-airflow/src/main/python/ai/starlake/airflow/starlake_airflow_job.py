@@ -689,37 +689,41 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
           AND re-raised via the active ``exit $return_code`` trailer — a
           failed job must fail the task.
 
+        The wrapper owns the quoting contract (story 6.4, issue #95): it is
+        a FLAT script — no nested ``bash -c '...'`` — so the command's own
+        quotes (``--scheduledDate '...'``, apostrophes in ``--options``
+        values, gcloud ``--format='...'``) are parsed exactly once, by the
+        same bash that runs the raw unwrapped command. Call sites must pass
+        the command untouched (no escaping, no quote substitution). No
+        ``set -e`` either: it would abort a failing command before
+        ``return_code=$?`` captures it. The echo stays the LAST line of the
+        preload variant — BashOperator pushes the last stdout line as the
+        ``return_value`` XCom that ``f_skip_or_start`` int-parses.
+
         Lives in this provider-free base module so the contract stays
         testable without the google/amazon provider packages.
         """
         if preload:
             return f"""
-                set -e
-                bash -c '
-                {command}
-                return_code=$?
+{command}
+return_code=$?
 
-                # Push the return code to XCom
-                echo $return_code
-
-                '
-                """
+# Push the return code to XCom
+echo $return_code
+"""
         else:
             return f"""
-                set -e
-                bash -c '
-                {command}
-                return_code=$?
+{command}
+return_code=$?
 
-                # Push the return code to XCom
-                echo $return_code
+# Push the return code to XCom
+echo $return_code
 
-                # Exit with the captured return code if non-zero
-                if [ $return_code -ne 0 ]; then
-                    exit $return_code
-                fi
-                '
-                """
+# Exit with the captured return code if non-zero
+if [ $return_code -ne 0 ]; then
+    exit $return_code
+fi
+"""
 
     @classmethod
     def _sl_cloud_failure_swallowed(cls, preload: bool, retry_on_failure: bool) -> bool:

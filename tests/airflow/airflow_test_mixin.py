@@ -50,7 +50,7 @@ class AirflowTestMixin:
         The bash_command format is:
             starlake <command> [--scheduledDate '...'] --flag value ...
         For xcom_push wrapped commands the starlake invocation is on its
-        own line inside a ``bash -c '...'`` block.
+        own line inside the flat wrapper script (story 6.4, issue #95).
         """
         cmd = task.bash_command
         for line in cmd.split("\n"):
