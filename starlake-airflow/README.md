@@ -819,7 +819,7 @@ Additional options may be specified to configure the **Cloud Run job**.
 | **cloud_run_service_account** | str   | the optional cloud run service account                                                                    |
 | **cloud_run_async**           | bool  | the optional flag to run the cloud run job asynchronously (`True` by default)                           |
 | **cloud_run_async_poke_interval** | float | the optional poke interval for async sensor in seconds (`30` by default)                            |
-| **retry_on_failure**          | bool  | the optional flag to retry the cloud run job on failure (`False` by default)                            |
+| **retry_on_failure**          | bool  | the optional flag governing the **pre-load** task on failure (`False` by default): `false` swallows a failed preload (the `skip_or_start` XCom gating skips downstream loads), `true` fails the task so `retries` re-run it (retries-as-poke); in async gcloud mode it also switches the completion topology (sensor with `retry_exit_code` instead of the status task). Since 0.6.4 (issue #92) a failed **load/transform/stage** job always fails the task, whatever this flag |
 | **retry_delay_in_seconds**    | float | the optional delay in seconds to wait before retrying the cloud run job (`10` by default)               |
 | **use_gcloud**                | bool  | whether to use the gcloud command or the google cloud run python operator (`True` by default)           |
 
@@ -915,7 +915,7 @@ Additional options may be specified to configure the **Fargate job**.
 | **memory**                           | int   | the optional container memory in MiB (`2048` by default)                                      |
 | **fargate_async**                    | bool  | the optional flag to run asynchronously (`True` by default)                                   |
 | **fargate_async_poke_interval**      | float | the optional poke interval for async sensor in seconds (`30` by default)                      |
-| **retry_on_failure**                 | bool  | the optional flag to retry on failure (`False` by default)                                    |
+| **retry_on_failure**                 | bool  | the optional flag governing the **pre-load** task on failure (`False` by default): `false` swallows a failed preload (its `False` XCom lets `skip_or_start` skip downstream loads), `true` fails the task so `retries` re-run it (retries-as-poke, sync mode only). Since 0.6.4 (issue #92) a failed **load/transform/stage** job always fails the task, whatever this flag |
 
 #### StarlakeAirflowFargateJob load Example
 

@@ -173,34 +173,10 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
             )
 
         if kwargs.get('do_xcom_push', False):
-            if preload:
-                command=f"""
-                set -e
-                bash -c '
-                {command}
-                return_code=$?
-
-                # Push the return code to XCom
-                echo $return_code
-
-                '
-                """
-            else:
-                command=f"""
-                set -e
-                bash -c '
-                {command}
-                return_code=$?
-
-                # Push the return code to XCom
-                echo $return_code
-
-                # Exit with the captured return code if non-zero
-                if [ $return_code -ne 0 ]; then
-                    exit $return_code
-                fi
-                '
-                """
+            # story 6.3 (issue #92) — shared wrapper builder: preload swallows
+            # the exit code (XCom-gated via skip_or_start), every other task
+            # type keeps the active `exit $return_code` trailer
+            command = self.__class__._sl_xcom_wrapped_command(command, preload)
         return StarlakeBashOperator(
             task_id=task_id,
             dataset=dataset,

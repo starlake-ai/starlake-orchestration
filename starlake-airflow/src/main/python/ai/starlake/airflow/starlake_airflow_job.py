@@ -37,12 +37,15 @@ from ai.starlake.airflow.compat import (
     BaseOperator,
     Dataset,
     EmptyOperator,
+    PokeReturnValue,
     ShortCircuitOperator,
     TaskGroup,
     get_current_context,
     supports_assets,
     supports_inlet_events,
 )
+
+from airflow.exceptions import AirflowException
 
 from airflow.models import DagRun, TaskInstance
 
@@ -668,6 +671,84 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 f"instead (retries / retry_delay options)"
                 f"{workaround_requirements.get(env_name, '')}"
             )
+
+    @classmethod
+    def _sl_xcom_wrapped_command(cls, command: str, preload: bool) -> str:
+        """Wrap a bash command in the echo/XCom wrapper (story 6.3, issue #92).
+
+        Single source for the wrapper previously duplicated across the bash
+        and cloud_run gcloud paths. Two variants, selected by the task type
+        (never by ``do_xcom_push``, which defaults to True and is forced for
+        structural XCom plumbing):
+
+        - ``preload=True``: the exit code is SWALLOWED — echoed to XCom for
+          the downstream ``skip_or_start`` ShortCircuitOperator (``0`` →
+          proceed, non-zero → skip); the task itself ends green. This is the
+          one task type designed around XCom gating.
+        - ``preload=False`` (load/transform/stage): the exit code is echoed
+          AND re-raised via the active ``exit $return_code`` trailer — a
+          failed job must fail the task.
+
+        Lives in this provider-free base module so the contract stays
+        testable without the google/amazon provider packages.
+        """
+        if preload:
+            return f"""
+                set -e
+                bash -c '
+                {command}
+                return_code=$?
+
+                # Push the return code to XCom
+                echo $return_code
+
+                '
+                """
+        else:
+            return f"""
+                set -e
+                bash -c '
+                {command}
+                return_code=$?
+
+                # Push the return code to XCom
+                echo $return_code
+
+                # Exit with the captured return code if non-zero
+                if [ $return_code -ne 0 ]; then
+                    exit $return_code
+                fi
+                '
+                """
+
+    @classmethod
+    def _sl_cloud_failure_swallowed(cls, preload: bool, retry_on_failure: bool) -> bool:
+        """Whether a cloud operator may swallow a failed job (story 6.3, issue #92).
+
+        Only PRELOAD with ``retry_on_failure=false`` swallows (its failure is
+        gated through the ``skip_or_start`` XCom composition); every other
+        combination must propagate — a failed load/transform/stage reports a
+        failed task, and ``retry_on_failure=true`` re-raises even for preload
+        (the retries-as-poke workaround documented in #91).
+        """
+        return preload and not retry_on_failure
+
+    @classmethod
+    def _sl_cloud_poke_failure(cls, preload: bool, message: str) -> PokeReturnValue:
+        """Failure verdict for a cloud completion sensor poke (story 6.3, issue #92).
+
+        For PRELOAD the sensor completes with a falsy XCom
+        (``PokeReturnValue(True, False)``) so ``skip_or_start`` skips the
+        downstream loads — the swallow is the gating design. For every other
+        task type the sensor must FAIL the chain: ``PokeReturnValue`` truthiness
+        is ``is_done``, so returning it would end the sensor green.
+
+        Raises:
+            AirflowException: when ``preload`` is False.
+        """
+        if preload:
+            return PokeReturnValue(True, False)
+        raise AirflowException(message)
 
     def skip_or_start_op(self, task_id: str, upstream_task: BaseOperator, **kwargs) -> Optional[BaseOperator]:
         """

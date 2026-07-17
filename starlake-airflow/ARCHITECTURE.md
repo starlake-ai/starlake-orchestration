@@ -329,6 +329,18 @@ Wraps Airflow's native `TaskGroup`. The context manager calls `self.group.__ente
 
 Each concrete job implements `sl_execution_environment()` and `sl_job()`:
 
+#### Cloud engine failure propagation (story 6.3, issue #92)
+
+Contract: **a failed Starlake job fails the Airflow task chain for every task type except PRELOAD**, under default options, on every cloud engine/mode. PRELOAD is the one task type designed around swallowing — its failure surfaces as a falsy `return_value` XCom that the `skip_or_start` `ShortCircuitOperator` turns into a downstream skip.
+
+Swallow-vs-propagate is keyed on `preload = task_type == TaskType.PRELOAD`, computed in each cloud `sl_job()` and threaded to operators/sensors as an explicit `preload` ctor flag — never on `do_xcom_push` (defaults to `True` on `BaseOperator`, and forced `True` for structural XCom plumbing) nor on `retry_on_failure` alone. Three provider-free seams on `StarlakeAirflowJob` pin the contract in CI (which installs no google/amazon providers):
+
+- `_sl_xcom_wrapped_command(command, preload)` — the echo/XCom bash wrapper; the preload variant swallows the exit code, the non-preload variant keeps the active `exit $return_code` trailer. Used by the bash job and both cloud_run gcloud paths (the async `_get_completion_status` task previously shipped the exit block commented out — a failed execution ended the chain green).
+- `_sl_cloud_failure_swallowed(preload, retry_on_failure)` — `True` only for preload with `retry_on_failure=false`; `retry_on_failure=true` re-raises even for preload (the #91 retries-as-poke workaround).
+- `_sl_cloud_poke_failure(preload, message)` — completion-sensor failure verdict: `PokeReturnValue(True, False)` for preload (`PokeReturnValue` truthiness is `is_done`, so returning it COMPLETES the sensor — the swallow), `AirflowException` otherwise. Used by `FargateTaskStateSensor.poke()` and `CloudRunJobCompletionSensor.poke()`.
+
+Sensors never get the exit-swallowing wrapper: a `BashSensor`'s protocol needs the true exit code (0=done, `retry_exit_code`=poke again, other=fail) — the `GCloudRunJobCompletionSensor` `retry_on_failure` wrapper (which always exited 0) was removed.
+
 #### `StarlakeAirflowBashJob` — Shell Execution
 
 **`sl_execution_environment()`** → `StarlakeExecutionEnvironment.SHELL`
@@ -338,7 +350,7 @@ Each concrete job implements `sl_execution_environment()` and `sl_job()`:
 2. For LOAD/TRANSFORM tasks: prepends `--scheduledDate` with a Jinja2 template to the arguments
 3. Merges `sl_env_vars` into the `--options` argument: if `--options` already exists in arguments, parses existing key=value pairs, merges with sl_env_vars, and rewrites. If not present, appends `--options` with all sl_env_vars. The value is **double-quoted** so env var values containing spaces survive `bash -c` word splitting (issue #49; double quotes because the `do_xcom_push` wrapper nests the command in single-quoted `bash -c`).
 4. Builds the command: `{SL_STARLAKE_PATH} {arguments}` (SL_STARLAKE_PATH defaults to "starlake")
-5. If `do_xcom_push=True`: wraps in `bash -c` with return code capture (`echo $return_code`). For PRELOAD tasks, does NOT `exit $return_code` on non-zero — the return code signals skip/proceed to `skip_or_start_op()`.
+5. If `do_xcom_push=True`: wraps via the shared `StarlakeAirflowJob._sl_xcom_wrapped_command(command, preload)` builder (story 6.3) — `bash -c` with return code capture (`echo $return_code`). For PRELOAD tasks the wrapper does NOT `exit $return_code` on non-zero — the return code signals skip/proceed to `skip_or_start_op()`; for every other task type the active `exit $return_code` trailer fails the task.
 6. Returns `StarlakeBashOperator` with `cwd=self.sl_root` and merged env vars
 
 #### `StarlakeAirflowCloudRunJob` — GCP Cloud Run Execution
@@ -389,9 +401,9 @@ Note: Dataproc is sync-only (the code explicitly pops `asynchronous` kwarg with 
 3. If sync (`wait_for_completion=True`): returns `FargateTaskOperator`
 4. If async: returns `TaskGroup` with `FargateTaskOperator(wait_for_completion=False)` >> `FargateTaskStateSensor`
 
-**`FargateTaskOperator.execute()`** — wraps `EcsRunTaskOperator.execute()`. Returns `True` on success (sync) or `None` (async). On exception, pushes `False` to XCom if `do_xcom_push=True`.
+**`FargateTaskOperator.execute()`** — wraps `EcsRunTaskOperator.execute()`. Returns `True` on success (sync) or `None` (async). On exception: re-raises for every task type except PRELOAD (story 6.3); a failed preload with `retry_on_failure=false` returns `False` (recorded as the `return_value` XCom via `do_xcom_push`, forced by `sl_pre_load` — returning it instead of an explicit `xcom_push` call keeps both Airflow majors happy), and `retry_on_failure=true` re-raises even for preload.
 
-**`FargateTaskStateSensor.poke()`** — polls ECS via `describe_tasks`, checks `lastStatus` and container `exitCode`. Returns `PokeReturnValue(True, True)` on success (exit code 0), `PokeReturnValue(True, False)` on failure.
+**`FargateTaskStateSensor.poke()`** — polls ECS via `describe_tasks`, checks `lastStatus` and container `exitCode`. Returns `PokeReturnValue(True, True)` on success (exit code 0); on failure the verdict comes from `_sl_cloud_poke_failure` (preload → sensor completes with a falsy XCom; anything else → `AirflowException`).
 
 ## Key Architectural Patterns
 
