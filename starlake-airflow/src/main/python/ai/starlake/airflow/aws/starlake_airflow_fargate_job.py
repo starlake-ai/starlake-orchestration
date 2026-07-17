@@ -56,6 +56,10 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
         """
         # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
         self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'fargate')
+        # story 6.3 (issue #92) — PRELOAD is the only task type whose failure
+        # is swallowed (XCom-gated via skip_or_start); every other task type
+        # must fail the chain on a failed job
+        preload = task_type == TaskType.PRELOAD
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
         # would reject the kwarg
         scheduled_date = kwargs.pop('scheduled_date', None)
@@ -110,6 +114,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                 network_configuration=network_configuration,
                 wait_for_completion=True,
                 retry_on_failure=self.retry_on_failure,
+                preload=preload,
                 **kwargs
             )
         else:
@@ -126,6 +131,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                     launch_type="FARGATE",
                     network_configuration=network_configuration,
                     wait_for_completion=False,
+                    preload=preload,
                     **kwargs
                 )
                 check_completion_id = task_id + '_check_completion'
@@ -137,6 +143,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                     task=run_task.output["ecs_task_arn"],
                     poke_interval=self.fargate_async_poke_interval,
                     pool=kwargs.get('pool', self.pool),
+                    preload=preload,
                 )
                 run_task >> completion_sensor
             return task_completion_sensors
@@ -165,6 +172,7 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
         network_configuration: Optional[Dict[str, Any]] = None,
         wait_for_completion: bool = True,
         retry_on_failure: bool = False,
+        preload: bool = False,
         **kwargs
     ) -> None:
         super().__init__(
@@ -182,6 +190,7 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
             **kwargs
         )
         self.retry_on_failure = retry_on_failure
+        self.preload = preload
 
     def execute(self, context):
         logger = logging.getLogger(__name__)
@@ -194,10 +203,19 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
                 return None
         except Exception as e:
             logger.exception(msg = f"Task {self.task_id} has failed")
-            if self.wait_for_completion and self.do_xcom_push:
-                self.xcom_push(context, key="return_value", value=False)
-            if self.retry_on_failure:
+            # story 6.3 (issue #92) — single verdict source: only preload with
+            # retry_on_failure=false swallows (a failed load/transform/stage
+            # always fails the task; retry_on_failure=true re-raises even for
+            # preload, the retries-as-poke workaround of #91)
+            if not StarlakeAirflowJob._sl_cloud_failure_swallowed(self.preload, self.retry_on_failure):
                 raise e
+            if self.wait_for_completion:
+                # False becomes the return_value XCom (do_xcom_push is forced
+                # by sl_pre_load) so skip_or_start skips downstream; returning
+                # it — instead of the previous explicit self.xcom_push — works
+                # on both majors (Airflow 3 operators have no xcom_push)
+                return False
+            return None
 
 class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
     """
@@ -210,6 +228,7 @@ class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
         source: Optional[str],
         cluster: str,
         task: str,
+        preload: bool = False,
         **kwargs
     ) -> None:
         super().__init__(
@@ -222,32 +241,39 @@ class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
             failure_states={EcsTaskStates.NONE},
             **kwargs
         )
+        self.preload = preload
 
     def poke(self, context):
+        # story 6.3 (issue #92) — completing the sensor with a falsy XCom
+        # (PokeReturnValue truthiness is is_done) is correct gating for
+        # preload but a silent success for every other task type: the failure
+        # verdict is keyed on the task type via _sl_cloud_poke_failure. The
+        # verdict is emitted OUTSIDE the try block so an AirflowException
+        # raised by the hook itself cannot bypass the preload swallow.
         logger = logging.getLogger(__name__)
         logger.info(f"Checking task {self.task} state")
+        failure_message = None
         try:
             tasks = self.hook.conn.describe_tasks(cluster=self.cluster, tasks=[self.task]).get("tasks", [])
-            if tasks:
-                task = tasks[0]
-                status: str = task.get("lastStatus", None)
-                if status:
-                    logger.info(f"Task {self.task} state: {status}")
-                    if EcsTaskStates(status) in self.failure_states:
-                        logger.error(msg = f"Task {self.task} has failed with status {status}")
-                        return PokeReturnValue(True, False)
-                    elif EcsTaskStates(status) == self.target_state:
-                        containers = task.get("containers", [])
-                        if containers and containers[0].get("exitCode", 1) == 0:
-                            logger.info(f"Task {self.task} has succeeded")
-                            return PokeReturnValue(True, True)
-                        else:
-                            logger.error(msg = f"Task {self.task} has failed")
-                            return PokeReturnValue(True, False)
+            if not tasks:
+                return None
+            task = tasks[0]
+            status: str = task.get("lastStatus", None)
+            if not status:
+                failure_message = f"Task {self.task} has failed with no status"
+            else:
+                logger.info(f"Task {self.task} state: {status}")
+                if EcsTaskStates(status) in self.failure_states:
+                    failure_message = f"Task {self.task} has failed with status {status}"
+                elif EcsTaskStates(status) == self.target_state:
+                    containers = task.get("containers", [])
+                    if containers and containers[0].get("exitCode", 1) == 0:
+                        logger.info(f"Task {self.task} has succeeded")
+                        return PokeReturnValue(True, True)
+                    failure_message = f"Task {self.task} has failed"
                 else:
-                    logger.error(msg = f"Task {self.task} has failed with no status")
-                    return PokeReturnValue(True, False)
-            return None
+                    return None
         except Exception as e:
-            logger.error(msg = f"Task {self.task} has failed")
-            return PokeReturnValue(True, False)
+            failure_message = f"Task {self.task} has failed: {e}"
+        logger.error(msg = failure_message)
+        return StarlakeAirflowJob._sl_cloud_poke_failure(self.preload, failure_message)

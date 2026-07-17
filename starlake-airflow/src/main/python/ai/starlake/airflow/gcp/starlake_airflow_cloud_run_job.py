@@ -112,6 +112,10 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         """
         # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
         self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'cloud_run')
+        # story 6.3 (issue #92) — PRELOAD is the only task type whose failure
+        # is swallowed (XCom-gated via skip_or_start); every other task type
+        # must fail the chain on a failed job
+        preload = task_type == TaskType.PRELOAD
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'retry_delay': timedelta(seconds=self.retry_delay_in_seconds)})
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
@@ -167,22 +171,13 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         get_completion_status_id = task_id + '_get_completion_status'
                         source_task_id=job_task.task_id
                         bash_command = (f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key=None, task_ids='{source_task_id}')}}}} --region {self.cloud_run_job_region} --project {self.project_id} --format='value(status.failedCount, status.cancelledCounts)' {self.impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -z \"$value\"")
-                        if kwargs.get('do_xcom_push', False):
-                            bash_command=f"""
-                            set -e
-                            bash -c '
-                            {bash_command.replace("'", '"')}
-                            return_code=$?
-
-                            # Push the return code to XCom
-                            echo $return_code
-
-                            # Exit with the captured return code if non-zero
-                            # if [ $return_code -ne 0 ]; then
-                            #     exit $return_code
-                            # fi
-                            '
-                            """
+                        # story 6.3 (issue #92) — do_xcom_push is forced True
+                        # above for the submission XCom (structural); it must
+                        # NOT select the exit-swallowing wrapper here: only
+                        # PRELOAD swallows, every other task type keeps the
+                        # active `exit $return_code` trailer so a failed
+                        # execution fails the chain
+                        bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command.replace("'", '"'), preload)
                         job_status = StarlakeBashOperator(
                             task_id=get_completion_status_id,
                             dataset=dataset,
@@ -210,6 +205,8 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         overrides=job_overrides,
                         mode=CloudRunMode.ASYNC,
                         impersonation_chain=self.impersonate_service_account,
+                        preload=preload,
+                        retry_on_failure=self.retry_on_failure,
                         **kwargs
                     )
                     check_completion_id = task_id + '_check_completion'
@@ -219,6 +216,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         source=self.source,
                         source_task_id=job_task.task_id,
                         impersonation_chain=self.impersonate_service_account,
+                        preload=preload,
                         **kwargs
                     )
 
@@ -235,21 +233,11 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     f"--wait --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}" #--task-timeout 300 
                 )
                 if kwargs.get('do_xcom_push', False):
-                    bash_command=f"""
-                    set -e
-                    bash -c '
-                    {bash_command.replace("'", '"')}
-                    return_code=$?
-
-                    # Push the return code to XCom
-                    echo $return_code
-
-                    # Exit with the captured return code if non-zero
-                    # if [ $return_code -ne 0 ]; then
-                    #     exit $return_code
-                    # fi
-                    '
-                    """
+                    # story 6.3 (issue #92) — wrapper variant keyed on the
+                    # task type, not on do_xcom_push: preload swallows the
+                    # exit code (XCom-gated), every other task type keeps the
+                    # active `exit $return_code` trailer
+                    bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command.replace("'", '"'), preload)
                 kwargs.pop('do_xcom_push', None)
                 return StarlakeBashOperator(
                     task_id=task_id,
@@ -277,6 +265,8 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     overrides=job_overrides,
                     mode=CloudRunMode.SYNC,
                     impersonation_chain=self.impersonate_service_account,
+                    preload=preload,
+                    retry_on_failure=self.retry_on_failure,
                     **kwargs
                 )
 
@@ -317,22 +307,11 @@ class GCloudRunJobCompletionSensor(StarlakeDatasetMixin, BashSensor):
         else:
             bash_command=(f"value=`gcloud beta run jobs executions describe {{{{task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}')}}}}  --region {cloud_run_job_region} --project {project_id} --format='value(status.completionTime, status.cancelledCounts)' {impersonate_service_account}| sed 's/[[:blank:]]//g'`; test -n \"$value\"")
 
-        if kwargs.get('do_xcom_push', False) and retry_on_failure:
-            bash_command=f"""
-            set -e
-            bash -c '
-            {bash_command.replace("'", '"')}
-            return_code=$?
-
-            # Push the return code to XCom
-            echo $return_code
-
-            # Exit with the captured return code if non-zero
-            # if [ $return_code -ne 0 ]; then
-            #     exit $return_code
-            # fi
-            '
-            """
+        # story 6.3 (issue #92) — the echo/XCom wrapper is NEVER applied to a
+        # sensor command: BashSensor's protocol needs the true exit code
+        # (0=done, retry_exit_code=2=poke again, 1=fail); the wrapper always
+        # exited 0 and would complete the sensor on the first poke regardless
+        # of the execution state
         super().__init__(
             task_id=task_id,
             dataset=dataset,
@@ -349,23 +328,27 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
 
     def __init__(
         self,
-        task_id: str, 
+        task_id: str,
         dataset: Optional[Union[StarlakeDataset, str]],
         source: Optional[str],
         mode: CloudRunMode = CloudRunMode.SYNC,
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Union[str, Sequence[str], None] = None,
+        preload: bool = False,
+        retry_on_failure: bool = False,
         **kwargs,
     ):
         super().__init__(  # type: ignore
             task_id=task_id,
             dataset=dataset,
             source=source,
-            gcp_conn_id=gcp_conn_id, 
-            impersonation_chain=impersonation_chain, 
+            gcp_conn_id=gcp_conn_id,
+            impersonation_chain=impersonation_chain,
             **kwargs
         )
         self.mode = mode
+        self.preload = preload
+        self.retry_on_failure = retry_on_failure
 
     def execute(self, context: Context):
         logger = logging.getLogger(__name__)
@@ -391,11 +374,21 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         else:
             try:
                 job = super(CloudRunJobOperator, self).execute(context)
-                if self.do_xcom_push:
+                # Airflow 3 Task-SDK operators have no xcom_push attribute —
+                # the "job" XCom is a best-effort extra, never gated on
+                if self.do_xcom_push and hasattr(self, "xcom_push"):
                     self.xcom_push(context, key="job", value=job)
                 return True
             except Exception as e:
                 logger.exception(msg=f"Task {self.task_id} has failed")
+                # story 6.3 (issue #92) — single verdict source: only preload
+                # with retry_on_failure=false swallows (the False return value
+                # feeds the skip_or_start XCom gating); a failed
+                # load/transform/stage always fails the task, and
+                # retry_on_failure=true re-raises even for preload
+                # (retries-as-poke workaround, #91)
+                if not StarlakeAirflowJob._sl_cloud_failure_swallowed(self.preload, self.retry_on_failure):
+                    raise e
                 return False
 
 class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
@@ -405,24 +398,26 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
     def __init__(
         self,
         *,
-        task_id: str, 
+        task_id: str,
         dataset: Optional[Union[StarlakeDataset, str]],
         source: Optional[str],
         source_task_id: str,
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Union[str, Sequence[str], None] = None,
+        preload: bool = False,
         **kwargs,
     ):
         super().__init__(
             task_id=task_id,
             dataset=dataset,
             source=source,
-            mode="reschedule", 
+            mode="reschedule",
             **kwargs
         )
         self.source_task_id = source_task_id
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
+        self.preload = preload
 
     def poke(self, context: Context):
         hook = CloudRunHook(
@@ -438,14 +433,17 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
             # An operation can only have one of those two combinations: if it is failed, then
             # the error field will be populated, else, then the response field will be.
             if operation.error.SerializeToString():
-                if self.do_xcom_push:
-                    self.log.error(
-                        f"{operation.error.message} [{operation.error.code}]"
-                    )
-                    return PokeReturnValue(True, False)
-                else:
-                    raise AirflowException(
-                        f"{operation.error.message} [{operation.error.code}]"
-                    )
+                self.log.error(
+                    f"{operation.error.message} [{operation.error.code}]"
+                )
+                # story 6.3 (issue #92) — verdict keyed on the task type, NOT
+                # on do_xcom_push (which defaults to True on BaseOperator and
+                # silently selected the swallow branch for every task type):
+                # preload completes with a falsy XCom (skip_or_start gating),
+                # anything else raises
+                return StarlakeAirflowJob._sl_cloud_poke_failure(
+                    self.preload,
+                    f"{operation.error.message} [{operation.error.code}]",
+                )
             return PokeReturnValue(True, True)
         return PokeReturnValue(False, False)
