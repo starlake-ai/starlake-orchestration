@@ -129,10 +129,17 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             kwargs.update({'params': params})
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
+            # issue #99 — the scheduledDate value must NOT be single-quoted here.
+            # No cloud_run consumption path has a shell that consumes the quotes:
+            # the gcloud paths embed the value inside the double-quoted --args
+            # "..." (bash keeps single quotes inside double quotes) and the API
+            # path passes the argument list verbatim to the Cloud Run container.
+            # Literal quotes reach the container CLI; LoadCmd strips them but
+            # TransformCmd does not, so TRANSFORM audit/SQL saw a quoted date.
             if scheduled_date:
-                tmp_arguments.append(f"\'{scheduled_date}\'")
+                tmp_arguments.append(f"{scheduled_date}")
             else:
-                tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+                tmp_arguments.append("{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
         command = f'^{self.separator}^' + self.separator.join(arguments)

@@ -425,12 +425,14 @@ Cloud Run and Fargate both support async execution using the same pattern: a `Ta
 
 ### 4. Scheduled Date Injection
 
-All execution environments inject `--scheduledDate` for LOAD and TRANSFORM tasks using the same Jinja2 template:
+All execution environments inject `--scheduledDate` for LOAD and TRANSFORM tasks using the same Jinja2 template body:
 ```python
-"'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}'"
+"{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}"
 ```
 
 The `ts_as_datetime` macro first checks XCom for a `data_interval_end` pushed by `start_op()`, falling back to Airflow's native `data_interval_end`.
+
+**Quoting differs by engine (issues #99 / #101).** The bash job wraps the value in single quotes (`'{{...}}'`) — a real shell runs the command and consumes them. The cloud engines (Cloud Run, Dataproc, Fargate) pass the value **unquoted**: none of their consumption paths has a shell to consume the quotes — Cloud Run gcloud embeds it inside the double-quoted `--args "..."` (bash keeps single quotes there), the Cloud Run API / Dataproc `spark_job.args` / Fargate ECS `command` all hand the argument list to the container verbatim. Literal quotes used to reach the container CLI, where `LoadCmd` strips them but `TransformCmd` does not — so a TRANSFORM run saw a quoted scheduledDate in SQL substitution/audit.
 
 ### 5. Caller Globals Injection
 
