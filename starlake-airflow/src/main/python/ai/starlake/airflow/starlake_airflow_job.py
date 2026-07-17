@@ -628,6 +628,47 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         kwargs.update({'doc': kwargs.get('doc', f'Pre-load for tables {",".join(list(tables or []))} within {domain} using {pre_load_strategy.value} strategy.')})
         return super().sl_pre_load(domain=domain, tables=tables, pre_load_strategy=pre_load_strategy, **kwargs)
 
+    @classmethod
+    def _reject_pre_load_sensor_kwargs(cls, kwargs: dict, env_name: str) -> None:
+        """Pop the pre-load sensor kwargs and reject sensor mode (story 6.2).
+
+        Sensor mode (``pre_load_sensor=true``) is only supported on the shell
+        execution environment: a cloud "poke" would pay the full
+        job-submission overhead on every attempt and needs per-engine
+        terminal-state interpretation.  Cloud ``sl_job`` implementations call
+        this helper before building operators so a popped-but-false flag can
+        never leak into an operator constructor.
+
+        Lives in this provider-free base module so it stays testable without
+        the google/amazon provider packages.
+
+        Raises:
+            ValueError: when ``pre_load_sensor`` is truthy.
+        """
+        pre_load_sensor = kwargs.pop('pre_load_sensor', False)
+        kwargs.pop('pre_load_poke_interval', None)
+        kwargs.pop('pre_load_timeout', None)
+        kwargs.pop('pre_load_sensor_soft_fail', None)
+        if pre_load_sensor:
+            orchestrator = cls.sl_orchestrator() or "unknown"
+            # The retries-as-poke workaround only re-runs preload when the
+            # task actually FAILS on a non-zero preload exit: fargate swallows
+            # failures unless retry_on_failure=true and only re-submits the
+            # job in synchronous mode; cloud_run's gcloud paths swallow the
+            # exit code entirely (echo/XCom wrapper). Dataproc re-raises and
+            # needs no extra options.
+            workaround_requirements = {
+                'fargate': " (on fargate the workaround additionally requires fargate_async=false and retry_on_failure=true)",
+                'cloud_run': " (on cloud_run the workaround additionally requires cloud_run_async=false and use_gcloud=false)",
+            }
+            raise ValueError(
+                f"[{orchestrator}] sl_pre_load: sensor mode (pre_load_sensor=true) is not "
+                f"supported on the '{env_name}' execution environment — only the shell "
+                f"execution environment supports it; use the retries-as-poke workaround "
+                f"instead (retries / retry_delay options)"
+                f"{workaround_requirements.get(env_name, '')}"
+            )
+
     def skip_or_start_op(self, task_id: str, upstream_task: BaseOperator, **kwargs) -> Optional[BaseOperator]:
         """
         Args:

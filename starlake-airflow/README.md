@@ -207,7 +207,11 @@ The following options can be specified in all concrete factory classes. Options 
 | **retry_delay**                    | int  | optional delay between retries in seconds (`300` by default)                                |
 | **pre_load_strategy**              | str  | one of `none` (default), `imported`, `pending` or `ack`                                     |
 | **global_ack_file_path**           | str  | path to the ack file (`{SL_DATASETS}/pending/{domain}/{{{{ds}}}}.ack` by default)          |
-| **ack_wait_timeout**               | int  | timeout in seconds to wait for the ack file (`1 hour` by default)                           |
+| **ack_wait_timeout**               | int  | timeout in seconds to wait for the ack file (`1 hour` by default); ignored in sensor mode   |
+| **pre_load_sensor**                | bool | `true`/`false` (default `false`) — build the pre-load task as a `BashSensor` (reschedule mode) that pokes `starlake preload` until files arrive. SHELL execution environment only: cloud engines (cloud_run, dataproc, fargate) reject it with a `ValueError` at DAG-definition time — use the retries-as-poke workaround there (`retries` / `retry_delay` options). The workaround only re-runs preload when the task actually fails on a non-zero exit: on dataproc it works as-is (the operator re-raises); on fargate it additionally requires `fargate_async=false` + `retry_on_failure=true` (sync failures are otherwise swallowed, and async retries re-poke the finished ECS task without re-running preload); on cloud_run it requires `cloud_run_async=false` + `use_gcloud=false` (the gcloud paths swallow the preload exit code) |
+| **pre_load_poke_interval**         | int  | seconds between two pokes in sensor mode (`300` by default)                                 |
+| **pre_load_timeout**               | int  | wall-clock timeout in seconds for the pre-load sensor (`3600` by default); on timeout the sensor fails (or is skipped with `pre_load_sensor_soft_fail`) and the downstream loads are skipped |
+| **pre_load_sensor_soft_fail**      | bool | `true`/`false` (default `false`) — on sensor timeout mark the sensor SKIPPED instead of FAILED (run stays green) |
 | **dataset_triggering_strategy**    | str  | the dataset triggering strategy to use                                                      |
 | **max_active_runs**                | int  | maximum number of active DAG runs (`3` by default)                                          |
 

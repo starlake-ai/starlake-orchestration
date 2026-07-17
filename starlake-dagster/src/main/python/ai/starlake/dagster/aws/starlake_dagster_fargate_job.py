@@ -67,6 +67,8 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
         Returns:
             NodeDefinition: The Dagster node.
         """
+        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
+        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'fargate')
         env = self.sl_env(args=arguments)
 
         fargate = StarlakeFargateHelper(job=self, arguments=arguments, **kwargs)

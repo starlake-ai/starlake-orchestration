@@ -80,6 +80,8 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
         Returns:
             NodeDefinition: The Dagster node.
         """
+        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
+        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'cloud_run')
         env = self.sl_env(args=arguments)
 
         sl_command = f"{self.__class__.get_context_var('GOOGLE_CLOUD_SDK', '/usr/local/google-cloud-sdk', self.options)}/bin/gcloud beta run jobs execute {self.cloud_run_job_name} "

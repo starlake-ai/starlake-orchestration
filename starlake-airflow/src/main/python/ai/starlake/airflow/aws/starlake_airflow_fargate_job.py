@@ -54,6 +54,8 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
         Returns:
             BaseOperator: The Airflow task.
         """
+        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
+        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'fargate')
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
         # would reject the kwarg
         scheduled_date = kwargs.pop('scheduled_date', None)

@@ -140,6 +140,8 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
         Returns:
             NodeDefinition: The Dagster node.
         """
+        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
+        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'dataproc')
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",")
         main_class = __class__.get_context_var("spark_job_main_class", "ai.starlake.job.Main", self.options)
 

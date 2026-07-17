@@ -304,6 +304,8 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
         Returns:
             BaseOperator: The Airflow task.
         """
+        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
+        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'dataproc')
         return self.cluster.submit_starlake_job(
             task_id=task_id,
             arguments=arguments,

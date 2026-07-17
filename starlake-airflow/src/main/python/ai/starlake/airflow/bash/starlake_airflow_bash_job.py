@@ -22,7 +22,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, Starla
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
 
-from ai.starlake.airflow.compat import BaseOperator, BashOperator, PythonOperator
+from ai.starlake.airflow.compat import BaseOperator, BashOperator, BashSensor, PythonOperator
 
 class StarlakeAirflowBashJob(StarlakeAirflowJob):
     """Airflow Starlake Bash Job."""
@@ -136,8 +136,41 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
         if task_type and task_type==TaskType.PRELOAD:
             preload = True
 
+        # story 6.2 (issue #86) — sensor-mode kwargs are popped unconditionally:
+        # BaseOperator would reject the unknown kwargs
+        pre_load_sensor = bool(kwargs.pop('pre_load_sensor', False))
+        pre_load_poke_interval = kwargs.pop('pre_load_poke_interval', 300)
+        pre_load_timeout = kwargs.pop('pre_load_timeout', 3600)
+        pre_load_sensor_soft_fail = bool(kwargs.pop('pre_load_sensor_soft_fail', False))
+
         command = __class__.get_context_var("SL_STARLAKE_PATH", "starlake", self.options) + f" {' '.join(arguments)}"
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
+
+        if preload and pre_load_sensor:
+            # a retried sensor restarts the whole poke window — default retries
+            # to 0; an explicit retries kwarg or an explicitly provided retries
+            # option still wins (story 6.1 precedence contract)
+            if 'retries' not in kwargs:
+                if 'retries' in (self.options or {}):
+                    kwargs['retries'] = self.retries # already resolved from the option by core
+                else:
+                    kwargs['retries'] = 0
+            kwargs.setdefault('mode', 'reschedule')
+            # BashSensor has no cwd parameter (unlike BashOperator) — cd into
+            # sl_root (double-quoted: paths may contain spaces, cf. #51). The
+            # RAW command is used (no xcom echo-wrapper) so the true exit code
+            # drives the poke: non-zero → poke again, 0 → done.
+            return StarlakePreloadBashSensor(
+                task_id=task_id,
+                dataset=dataset,
+                source=self.source,
+                bash_command=f'cd "{self.sl_root}" && {command}',
+                env=env,
+                poke_interval=pre_load_poke_interval,
+                timeout=pre_load_timeout,
+                soft_fail=pre_load_sensor_soft_fail,
+                **kwargs
+            )
 
         if kwargs.get('do_xcom_push', False):
             if preload:
@@ -199,17 +232,52 @@ class StarlakePythonOperator(StarlakeDatasetMixin, PythonOperator):
 class StarlakeBashOperator(StarlakeDatasetMixin, BashOperator):
     """Starlake Bash Operator."""
     def __init__(
-            self, 
-            task_id: str, 
+            self,
+            task_id: str,
             dataset: Optional[Union[StarlakeDataset, str]],
             source: Optional[str],
-            bash_command: str, 
+            bash_command: str,
             **kwargs
         ):
         super().__init__(
-            task_id=task_id, 
-            dataset=dataset, 
-            source=source, 
-            bash_command=bash_command, 
+            task_id=task_id,
+            dataset=dataset,
+            source=source,
+            bash_command=bash_command,
             **kwargs
         )
+
+class StarlakePreloadBashSensor(StarlakeDatasetMixin, BashSensor):
+    """Starlake Preload Bash Sensor (story 6.2, issue #86).
+
+    Pokes the raw ``starlake preload`` command until it exits 0 within the
+    wall-clock ``timeout``.  ``retry_exit_code`` stays ``None`` so ANY
+    non-zero exit pokes again (a genuinely broken CLI invocation therefore
+    pokes until timeout instead of failing fast — same behavior class as any
+    bash sensor).
+
+    ``execute`` returns ``True`` so the ``do_xcom_push=True`` forced by
+    ``StarlakeAirflowJob.sl_pre_load`` records a truthy ``return_value`` on
+    success and the downstream ``skip_or_start`` ShortCircuitOperator
+    proceeds; on timeout (soft-fail skip or hard fail) no XCom exists,
+    ``f_skip_or_start`` pulls ``None`` and the downstream loads are skipped.
+    """
+    def __init__(
+            self,
+            task_id: str,
+            dataset: Optional[Union[StarlakeDataset, str]],
+            source: Optional[str],
+            bash_command: str,
+            **kwargs
+        ):
+        super().__init__(
+            task_id=task_id,
+            dataset=dataset,
+            source=source,
+            bash_command=bash_command,
+            **kwargs
+        )
+
+    def execute(self, context):
+        super().execute(context)
+        return True

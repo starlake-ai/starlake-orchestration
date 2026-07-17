@@ -86,7 +86,14 @@ class StubJob(IStarlakeJob):
         task_type=TaskType.EMPTY,
         **kwargs,
     ):
-        return {"task_id": task_id, "arguments": arguments, "task_type": task_type}
+        # "kwargs" captures what actually reaches sl_job — story 6.2 asserts
+        # the zero-change-when-off guarantee against it.
+        return {
+            "task_id": task_id,
+            "arguments": arguments,
+            "task_type": task_type,
+            "kwargs": kwargs,
+        }
 
     def dummy_op(self, task_id, events=None, task_type=TaskType.EMPTY, **kwargs):
         return {"task_id": task_id, "events": events}

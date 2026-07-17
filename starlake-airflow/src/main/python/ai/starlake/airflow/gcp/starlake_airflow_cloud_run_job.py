@@ -110,6 +110,8 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         Returns:
             BaseOperator: The Airflow task.
         """
+        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
+        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'cloud_run')
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'retry_delay': timedelta(seconds=self.retry_delay_in_seconds)})
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
