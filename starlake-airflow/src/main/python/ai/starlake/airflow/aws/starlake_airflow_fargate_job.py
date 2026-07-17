@@ -20,7 +20,7 @@ from ai.starlake.dataset import StarlakeDataset
 
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment, TaskType
 
-from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
+from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin, StarlakeCloudPreloadSensor, PreLoadWait
 
 from ai.starlake.aws import StarlakeFargateHelper
 
@@ -54,12 +54,18 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
         Returns:
             BaseOperator: The Airflow task.
         """
-        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
-        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'fargate')
         # story 6.3 (issue #92) — PRELOAD is the only task type whose failure
         # is swallowed (XCom-gated via skip_or_start); every other task type
         # must fail the chain on a failed job
         preload = task_type == TaskType.PRELOAD
+        # story 6.5 (issue #93) — cloud pre-load waiting (deferrable-first,
+        # sensor-flavor fallback). Pops the four pre_load_* sensor kwargs;
+        # returns None when sensor mode is off, so the one-shot construction
+        # below stays byte-identical to today. Only PRELOAD carries these
+        # kwargs (core injects them for PRELOAD only).
+        pre_load_wait = self.__class__._sl_resolve_cloud_pre_load_wait(
+            kwargs, self.options, EcsRunTaskOperator
+        )
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
         # would reject the kwarg
         scheduled_date = kwargs.pop('scheduled_date', None)
@@ -106,6 +112,66 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
         kwargs.pop("wait_for_completion", None)
 
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
+
+        if pre_load_wait is not None:
+            # story 6.5 (issue #93) — PRELOAD waiting. Shared ECS run parameters
+            # for both the deferrable operator and the sensor-flavor's per-poke
+            # submission.
+            common = dict(
+                task_definition=fargate.task_definition,
+                cluster=fargate.cluster,
+                overrides=overrides,
+                aws_conn_id=aws_conn_id,
+                region=fargate.region,
+                launch_type="FARGATE",
+                network_configuration=network_configuration,
+            )
+            if pre_load_wait.mode == 'deferrable':
+                # a single deferrable task submits + defers to the triggerer (no
+                # worker slot held), resumes on completion and raises on failure;
+                # retries/retry_delay re-submit preload (retry = poke). The
+                # retries mapping IS the poke window here — it overrides any
+                # ambient default_args retries.
+                kwargs.update({
+                    'retries': pre_load_wait.retries,
+                    'retry_delay': pre_load_wait.retry_delay,
+                })
+                return FargateTaskOperator(
+                    task_id=task_id,
+                    dataset=dataset,
+                    source=self.source,
+                    wait_for_completion=True,
+                    deferrable=True,
+                    preload=True,
+                    pre_load_wait=pre_load_wait,
+                    **common,
+                    **kwargs
+                )
+            # sensor-flavor fallback (deferrable unsupported or opted out): one
+            # ECS run submitted + awaited per poke. A bare EcsRunTaskOperator
+            # RAISES on a non-zero container exit (no files) — the sensor's poke
+            # catches it and pokes again. A retried sensor restarts the whole
+            # window, so retries default to 0.
+            def _submit_and_wait(context, _common=common):
+                run_op = EcsRunTaskOperator(
+                    task_id=f"{task_id}_poke",
+                    wait_for_completion=True,
+                    do_xcom_push=False,
+                    **_common
+                )
+                run_op.execute(context)
+                return True
+            kwargs.setdefault('retries', 0)
+            return StarlakeCloudPreloadSensor(
+                task_id=task_id,
+                dataset=dataset,
+                source=self.source,
+                submit_and_wait=_submit_and_wait,
+                poke_interval=pre_load_wait.poke_interval,
+                timeout=pre_load_wait.timeout,
+                soft_fail=pre_load_wait.soft_fail,
+                **kwargs
+            )
 
         if wait_for_completion:
             return FargateTaskOperator(
@@ -180,6 +246,7 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
         wait_for_completion: bool = True,
         retry_on_failure: bool = False,
         preload: bool = False,
+        pre_load_wait: Optional[PreLoadWait] = None,
         **kwargs
     ) -> None:
         super().__init__(
@@ -198,10 +265,19 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
         )
         self.retry_on_failure = retry_on_failure
         self.preload = preload
+        # story 6.5 (issue #93) — set on the deferrable pre-load waiting task
+        # only; None for one-shot preload and every non-preload task.
+        self.pre_load_wait = pre_load_wait
 
     def execute(self, context):
         logger = logging.getLogger(__name__)
         logger.info(f"Running fargate task {self.task_id}")
+        # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer,
+        # the verdict is applied on resume in execute_complete. Bypass the 6.3
+        # swallow entirely: EcsRunTaskOperator.execute raises TaskDeferred as
+        # control flow, which the swallow's except-block would otherwise catch.
+        if self.preload and self.pre_load_wait is not None:
+            return super().execute(context)
         try:
             super().execute(context)
             if self.wait_for_completion:
@@ -223,6 +299,30 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
                 # on both majors (Airflow 3 operators have no xcom_push)
                 return False
             return None
+
+    def execute_complete(self, context, event=None):
+        # story 6.5 (issue #93) — deferrable pre-load waiting resume. Success →
+        # truthy XCom (skip_or_start proceeds). A failure (EcsRunTaskOperator
+        # raises on a non-success event or a non-zero container exit) is NOT the
+        # 6.3 swallow: a within-window failure re-raises so Airflow retries
+        # (re-submit = next poke); the terminal attempt maps to a skip
+        # (soft_fail) or a hard failure. Never routes through
+        # _sl_cloud_failure_swallowed.
+        if not (self.preload and self.pre_load_wait is not None):
+            return super().execute_complete(context, event)
+        try:
+            super().execute_complete(context, event)
+        except Exception as e:
+            ti = context["ti"]
+            last = StarlakeAirflowJob._sl_is_last_attempt(ti.try_number, ti.max_tries)
+            return StarlakeAirflowJob._sl_deferrable_pre_load_verdict(
+                False,
+                last,
+                self.pre_load_wait.soft_fail,
+                f"Preload for task {self.task_id} did not succeed on attempt {ti.try_number} "
+                f"(no files yet, or a submission error): {e}",
+            )
+        return True
 
 class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
     """

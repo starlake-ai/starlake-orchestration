@@ -28,7 +28,7 @@ from ai.starlake.gcp import StarlakeDataprocClusterConfig, StarlakeDataprocMaste
 
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment, TaskType
 
-from ai.starlake.airflow import StarlakeAirflowJob, StarlakeAirflowOptions, StarlakeDatasetMixin
+from ai.starlake.airflow import StarlakeAirflowJob, StarlakeAirflowOptions, StarlakeDatasetMixin, StarlakeCloudPreloadSensor, PreLoadWait
 
 from ai.starlake.airflow.compat import BaseOperator, TriggerRule
 
@@ -208,6 +208,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
         dataset: Optional[Union[StarlakeDataset, str]]=None,
         source: Optional[str]=None,
         task_type: Optional[TaskType] = None,
+        pre_load_wait: Optional[PreLoadWait] = None,
         **kwargs) -> BaseOperator:
         """Create a dataproc job on the specified cluster"""
         cluster_id = self.cluster_config.cluster_id if not cluster_id else cluster_id
@@ -263,29 +264,94 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
 
         job_id = task_id + "_" + str(uuid.uuid4())[:8]
 
+        job = {
+            "reference": {
+                "project_id": self.cluster_config.project_id,
+                "job_id": job_id
+            },
+            "placement": {
+                "cluster_name": cluster_name
+            },
+            "spark_job": {
+                "jar_file_uris": jar_list,
+                "main_class": main_class,
+                "args": arguments,
+                "properties": {
+                    **spark_config.__config__()
+                }
+            }
+        }
+
+        if pre_load_wait is not None:
+            # story 6.5 (issue #93) — PRELOAD waiting on dataproc. Every poke /
+            # retry is a NEW dataproc submission, and Dataproc rejects a
+            # re-submitted job_id with AlreadyExists — so the frozen parse-time
+            # job_id above must be made unique PER submission or the wait can
+            # never observe files that arrive after the first (empty) poke.
+            if pre_load_wait.mode == 'deferrable':
+                # a single deferrable submit defers to the triggerer and raises
+                # on a failed job; retries/retry_delay re-submit preload (retry
+                # = poke). The retries mapping IS the poke window. `job` is a
+                # template field, so a Jinja job_id keyed on the run + attempt
+                # renders a fresh id on every retry (re-rendered each try).
+                job["reference"]["job_id"] = f"{task_id}-{{{{ ts_nodash }}}}-{{{{ ti.try_number }}}}"
+                kwargs.update({
+                    'retries': pre_load_wait.retries,
+                    'retry_delay': pre_load_wait.retry_delay,
+                })
+                return DataprocJobOperator(
+                    task_id=task_id,
+                    dataset=dataset,
+                    source=source,
+                    project_id=self.cluster_config.project_id,
+                    region=self.cluster_config.region,
+                    job=job,
+                    deferrable=True,
+                    preload=True,
+                    pre_load_wait=pre_load_wait,
+                    **kwargs
+                )
+            # sensor-flavor fallback: one synchronous dataproc submit per poke.
+            # DataprocSubmitJobOperator RAISES on a failed job (no files) — the
+            # sensor's poke catches it and pokes again. A retried sensor
+            # restarts the whole window, so retries default to 0. The ad-hoc
+            # poke operator is NOT a real task instance, so its `job` template is
+            # never rendered — mint a fresh uuid job_id per poke directly.
+            import copy
+            project_id = self.cluster_config.project_id
+            region = self.cluster_config.region
+            def _submit_and_wait(context, _job=job, _project_id=project_id, _region=region):
+                poke_job = copy.deepcopy(_job)
+                poke_job.setdefault("reference", {})["job_id"] = task_id + "_" + str(uuid.uuid4())[:8]
+                run_op = DataprocSubmitJobOperator(
+                    task_id=f"{task_id}_poke",
+                    project_id=_project_id,
+                    region=_region,
+                    job=poke_job,
+                    asynchronous=False,
+                    do_xcom_push=False,
+                )
+                run_op.execute(context)
+                return True
+            kwargs.setdefault('retries', 0)
+            return StarlakeCloudPreloadSensor(
+                task_id=task_id,
+                dataset=dataset,
+                source=source,
+                submit_and_wait=_submit_and_wait,
+                poke_interval=pre_load_wait.poke_interval,
+                timeout=pre_load_wait.timeout,
+                soft_fail=pre_load_wait.soft_fail,
+                **kwargs
+            )
+
         return DataprocJobOperator(
             task_id=task_id,
             dataset=dataset,
             source=source,
             project_id=self.cluster_config.project_id,
             region=self.cluster_config.region,
-            job={
-                "reference": {
-                    "project_id": self.cluster_config.project_id,
-                    "job_id": job_id
-                },
-                "placement": {
-                    "cluster_name": cluster_name
-                },
-                "spark_job": {
-                    "jar_file_uris": jar_list,
-                    "main_class": main_class,
-                    "args": arguments,
-                    "properties": {
-                        **spark_config.__config__()
-                    }
-                }
-            },
+            job=job,
             **kwargs
         )
 
@@ -309,8 +375,13 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
         Returns:
             BaseOperator: The Airflow task.
         """
-        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
-        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'dataproc')
+        # story 6.5 (issue #93) — cloud pre-load waiting (deferrable-first,
+        # sensor-flavor fallback). Pops the four pre_load_* sensor kwargs; None
+        # when sensor mode is off (byte-identical one-shot construction below).
+        from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
+        pre_load_wait = self.__class__._sl_resolve_cloud_pre_load_wait(
+            kwargs, self.options, DataprocSubmitJobOperator
+        )
         return self.cluster.submit_starlake_job(
             task_id=task_id,
             arguments=arguments,
@@ -318,6 +389,7 @@ class StarlakeAirflowDataprocJob(StarlakeAirflowJob):
             dataset=dataset,
             source=self.source,
             task_type=task_type,
+            pre_load_wait=pre_load_wait,
             **kwargs
         )
 
@@ -349,13 +421,15 @@ from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobO
 class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
     """Dataproc Job Operator"""
     def __init__(
-            self, 
-            task_id: str, 
+            self,
+            task_id: str,
             dataset: Optional[Union[StarlakeDataset, str]],
             source: Optional[str],
-            project_id: str, 
-            region: str, 
-            job: dict, 
+            project_id: str,
+            region: str,
+            job: dict,
+            preload: bool = False,
+            pre_load_wait: Optional[PreLoadWait] = None,
             **kwargs
         ):
         kwargs.pop("asynchronous", None) # TODO handle asynchronous dataproc jobs
@@ -363,14 +437,24 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
             task_id=task_id,
             dataset=dataset,
             source=source,
-            project_id=project_id, 
-            region=region, 
-            job=job, 
-            asynchronous=False, 
+            project_id=project_id,
+            region=region,
+            job=job,
+            asynchronous=False,
             **kwargs
         )
+        self.preload = preload
+        # story 6.5 (issue #93) — set on the deferrable pre-load waiting task
+        # only; None otherwise.
+        self.pre_load_wait = pre_load_wait
 
     def execute(self, context):
+        # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer,
+        # verdict applied on resume in execute_complete. Bypass the xcom
+        # bookkeeping below (its except-block would catch the TaskDeferred
+        # control-flow exception).
+        if self.preload and self.pre_load_wait is not None:
+            return super().execute(context)
         try:
             job_id = super().execute(context)
             if self.do_xcom_push:
@@ -382,3 +466,25 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
             if self.do_xcom_push:
                 self.xcom_push(context, key="return_value", value=False)
             raise e
+
+    def execute_complete(self, context, event=None):
+        # story 6.5 (issue #93) — deferrable pre-load waiting resume. Success →
+        # truthy XCom (skip_or_start proceeds). A within-window failure
+        # (DataprocSubmitJobOperator raises on job ERROR/CANCELLED = no files)
+        # re-raises so Airflow retries (re-submit = next poke); the terminal
+        # attempt maps to a skip (soft_fail) or a hard failure.
+        if not (self.preload and self.pre_load_wait is not None):
+            return super().execute_complete(context, event)
+        try:
+            super().execute_complete(context, event)
+        except Exception as e:
+            ti = context["ti"]
+            last = StarlakeAirflowJob._sl_is_last_attempt(ti.try_number, ti.max_tries)
+            return StarlakeAirflowJob._sl_deferrable_pre_load_verdict(
+                False,
+                last,
+                self.pre_load_wait.soft_fail,
+                f"Preload for task {self.task_id} did not succeed on attempt {ti.try_number} "
+                f"(no files yet, or a submission error): {e}",
+            )
+        return True

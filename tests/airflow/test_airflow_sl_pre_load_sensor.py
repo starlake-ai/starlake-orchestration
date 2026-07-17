@@ -232,14 +232,24 @@ class TestSensorDagWiring:
 
 
 # ---------------------------------------------------------------------------
-# 6. Cloud engines rejected explicitly (provider-free helper)
+# 6. Cloud engines now RESOLVE sensor mode (story 6.5, issue #93) — the
+#    story-6.2 rejection is superseded. Full cloud-waiting coverage lives in
+#    test_airflow_cloud_preload_waiting.py; here we only pin the inversion.
 # ---------------------------------------------------------------------------
 
-class TestCloudEngineRejection:
+class TestCloudEngineWaitingSupersedesRejection:
 
-    @pytest.mark.parametrize("env_name", ["cloud_run", "dataproc", "fargate"])
-    def test_sensor_flag_raises_naming_environment(self, env_name):
+    def test_rejection_helper_is_gone(self):
         from ai.starlake.airflow import StarlakeAirflowJob
+        # story 6.5 removed the shell-only rejection — cloud engines wait now
+        assert not hasattr(StarlakeAirflowJob, "_reject_pre_load_sensor_kwargs")
+
+    def test_resolver_honors_sensor_mode_without_raising(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        class _FakeDeferrable:
+            def __init__(self, task_id, deferrable=False, **kwargs):
+                pass
 
         kwargs = {
             "pre_load_sensor": True,
@@ -247,23 +257,12 @@ class TestCloudEngineRejection:
             "pre_load_timeout": 120,
             "pre_load_sensor_soft_fail": False,
         }
-        with pytest.raises(ValueError) as exc_info:
-            StarlakeAirflowJob._reject_pre_load_sensor_kwargs(kwargs, env_name)
-        message = str(exc_info.value)
-        assert env_name in message
-        assert "pre_load_sensor" in message
-        # points at the retries-as-poke workaround
-        assert "retries" in message
-        # engine-specific workaround requirements (the workaround only
-        # re-runs preload when the task actually fails on a non-zero exit)
-        if env_name == "fargate":
-            assert "fargate_async=false" in message
-            assert "retry_on_failure=true" in message
-        elif env_name == "cloud_run":
-            assert "cloud_run_async=false" in message
-            assert "use_gcloud=false" in message
+        wait = StarlakeAirflowJob._sl_resolve_cloud_pre_load_wait(kwargs, {}, _FakeDeferrable)
+        assert wait is not None
+        assert wait.mode == "deferrable"
+        assert kwargs == {}  # the four sensor kwargs consumed
 
-    def test_without_flag_kwargs_popped_cleanly(self):
+    def test_resolver_off_returns_none_and_pops_cleanly(self):
         from ai.starlake.airflow import StarlakeAirflowJob
 
         kwargs = {
@@ -273,12 +272,6 @@ class TestCloudEngineRejection:
             "pre_load_sensor_soft_fail": False,
             "pool": "default_pool",
         }
-        StarlakeAirflowJob._reject_pre_load_sensor_kwargs(kwargs, "cloud_run")
-        assert kwargs == {"pool": "default_pool"}
-
-    def test_absent_kwargs_no_raise(self):
-        from ai.starlake.airflow import StarlakeAirflowJob
-
-        kwargs = {"pool": "default_pool"}
-        StarlakeAirflowJob._reject_pre_load_sensor_kwargs(kwargs, "fargate")
+        wait = StarlakeAirflowJob._sl_resolve_cloud_pre_load_wait(kwargs, {}, None)
+        assert wait is None
         assert kwargs == {"pool": "default_pool"}
