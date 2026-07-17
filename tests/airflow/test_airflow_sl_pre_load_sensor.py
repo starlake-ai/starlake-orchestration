@@ -254,6 +254,14 @@ class TestCloudEngineRejection:
         assert "pre_load_sensor" in message
         # points at the retries-as-poke workaround
         assert "retries" in message
+        # engine-specific workaround requirements (the workaround only
+        # re-runs preload when the task actually fails on a non-zero exit)
+        if env_name == "fargate":
+            assert "fargate_async=false" in message
+            assert "retry_on_failure=true" in message
+        elif env_name == "cloud_run":
+            assert "cloud_run_async=false" in message
+            assert "use_gcloud=false" in message
 
     def test_without_flag_kwargs_popped_cleanly(self):
         from ai.starlake.airflow import StarlakeAirflowJob

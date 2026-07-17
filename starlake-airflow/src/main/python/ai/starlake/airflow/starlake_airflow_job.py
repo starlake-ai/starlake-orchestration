@@ -651,11 +651,22 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         kwargs.pop('pre_load_sensor_soft_fail', None)
         if pre_load_sensor:
             orchestrator = cls.sl_orchestrator() or "unknown"
+            # The retries-as-poke workaround only re-runs preload when the
+            # task actually FAILS on a non-zero preload exit: fargate swallows
+            # failures unless retry_on_failure=true and only re-submits the
+            # job in synchronous mode; cloud_run's gcloud paths swallow the
+            # exit code entirely (echo/XCom wrapper). Dataproc re-raises and
+            # needs no extra options.
+            workaround_requirements = {
+                'fargate': " (on fargate the workaround additionally requires fargate_async=false and retry_on_failure=true)",
+                'cloud_run': " (on cloud_run the workaround additionally requires cloud_run_async=false and use_gcloud=false)",
+            }
             raise ValueError(
                 f"[{orchestrator}] sl_pre_load: sensor mode (pre_load_sensor=true) is not "
                 f"supported on the '{env_name}' execution environment — only the shell "
                 f"execution environment supports it; use the retries-as-poke workaround "
                 f"instead (retries / retry_delay options)"
+                f"{workaround_requirements.get(env_name, '')}"
             )
 
     def skip_or_start_op(self, task_id: str, upstream_task: BaseOperator, **kwargs) -> Optional[BaseOperator]:

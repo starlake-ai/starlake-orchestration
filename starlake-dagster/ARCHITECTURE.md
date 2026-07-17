@@ -187,7 +187,7 @@ Base job factory. Unlike Airflow, does NOT override `get_context_var()` (no Dags
 
 - `sl_orchestrator()` → `StarlakeOrchestrator.DAGSTER`
 - `sl_pre_load()` — adds `skip_or_start=True`, `retries=0` when strategy ≠ NONE
-- `_reject_pre_load_sensor_kwargs(kwargs, env_name)` — classmethod called by the cloud variants' `sl_job` (cloud_run, dataproc, fargate): pops the four `pre_load_*` sensor kwargs and raises `ValueError` when `pre_load_sensor` is truthy (sensor mode is shell-only; the retries-as-poke workaround applies on cloud engines)
+- `_reject_pre_load_sensor_kwargs(kwargs, env_name)` — classmethod called by the cloud variants' `sl_job` (cloud_run, dataproc, fargate): pops the four `pre_load_*` sensor kwargs and raises `ValueError` when `pre_load_sensor` is truthy (sensor mode is shell-only; on cloud engines pre-load stays one-shot — `sl_pre_load` forces `retries=0`, so no retry-based workaround exists on Dagster)
 - `dummy_op()` — `@op` yielding `Output(value=task_id)` + `AssetMaterialization` per event
 
 #### Pre-load sensor mode (story 6.2, issue #86)

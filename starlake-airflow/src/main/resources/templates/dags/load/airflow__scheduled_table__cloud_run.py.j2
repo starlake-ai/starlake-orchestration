@@ -13,7 +13,7 @@
 # - pre_load_strategy(none): The optional pre-load strategy to use to conditionaly load a domain, one of imported, ack, pending or none (if not set, the default 'none' strategy will be used) [OPTIONAL]
 # - global_ack_file_path: when the domain preloading strategy has been set to 'ack', the path to the global ack file [OPTIONAL]
 # - ack_wait_timeout(3600): when the domain preloading strategy has been set to 'ack', the timeout in seconds to wait for the ack file [OPTIONAL]
-# NOTE: pre_load_sensor — sensor mode is NOT supported on this execution environment (shell only) — setting it fails at DAG-definition time; use retries/retry_delay as a poke workaround (not an option of this template)
+# NOTE: pre_load_sensor — sensor mode is NOT supported on this execution environment (shell only) — setting it fails at DAG-definition time; the retries/retry_delay poke workaround additionally requires cloud_run_async=false and use_gcloud=false (the gcloud paths swallow the preload exit code, and in async mode retries re-poke the finished execution instead of re-running preload)
 # - tags: a list of tags to be applied to the dag [OPTIONAL]
 # - start_date: the start date of the dag (eg. 2022-01-01) [OPTIONAL]
 # - end_date: the end date of the dag (eg. 2024-12-31) [OPTIONAL]

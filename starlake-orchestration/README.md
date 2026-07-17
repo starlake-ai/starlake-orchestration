@@ -273,7 +273,7 @@ The following options are available for all concrete factory classes derived fro
 | **pre_load_strategy** | `str` | One of `none` (default), `imported`, `pending`, or `ack` |
 | **global_ack_file_path** | `str` | Path to the ack file (`{SL_DATASETS}/pending/{domain}/{{ds}}.ack` by default) |
 | **ack_wait_timeout** | `int` | Timeout in seconds to wait for the ack file (`1 hour` by default); ignored in sensor mode (`pre_load_timeout` is the wall-clock window there) |
-| **pre_load_sensor** | `bool` | `true`/`false` (default `false`) — turn the pre-load task into a sensor that pokes `starlake preload` until files arrive. SHELL execution environment only: cloud engines (cloud_run, dataproc, fargate) reject it with a `ValueError` at DAG-definition time — use the retries-as-poke workaround there (`retries` / `retry_delay` options) |
+| **pre_load_sensor** | `bool` | `true`/`false` (default `false`) — turn the pre-load task into a sensor that pokes `starlake preload` until files arrive. SHELL execution environment only: cloud engines (cloud_run, dataproc, fargate) reject it with a `ValueError` at DAG-definition time — pre-load stays one-shot there (see each orchestrator's README for whether a retry-based workaround exists and its engine-specific requirements) |
 | **pre_load_poke_interval** | `int` | Seconds between two pokes in sensor mode (`300` by default) |
 | **pre_load_timeout** | `int` | Wall-clock timeout in seconds for the pre-load sensor (`3600` by default); must be >= `pre_load_poke_interval` |
 | **pre_load_sensor_soft_fail** | `bool` | `true`/`false` (default `false`) — on sensor timeout, skip the downstream loads instead of failing the run |

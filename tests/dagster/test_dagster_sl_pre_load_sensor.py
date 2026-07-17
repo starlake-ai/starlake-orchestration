@@ -271,7 +271,11 @@ class TestCloudVariantRejection:
         message = str(exc_info.value)
         assert env_name in message
         assert "pre_load_sensor" in message
-        assert "retries" in message
+        # no retry-based workaround on Dagster: sl_pre_load forces retries=0
+        # on every pre-load op, so the message must say one-shot, not point
+        # at the retries/retry_delay options
+        assert "retries=0" in message
+        assert "one-shot" in message
 
     def test_without_flag_kwargs_popped_cleanly(self):
         from ai.starlake.dagster import StarlakeDagsterJob

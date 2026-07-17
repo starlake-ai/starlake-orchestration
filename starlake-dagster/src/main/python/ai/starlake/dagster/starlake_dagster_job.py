@@ -93,11 +93,15 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
         kwargs.pop('pre_load_sensor_soft_fail', None)
         if pre_load_sensor:
             orchestrator = cls.sl_orchestrator() or "unknown"
+            # Unlike Airflow there is no retry-based workaround to point at:
+            # sl_pre_load forces retries=0 on every pre-load op, so the
+            # retries/retry_delay options never reach it.
             raise ValueError(
                 f"[{orchestrator}] sl_pre_load: sensor mode (pre_load_sensor=true) is not "
                 f"supported on the '{env_name}' execution environment — only the shell "
-                f"execution environment supports it; use the retries-as-poke workaround "
-                f"instead (retries / retry_delay options)"
+                f"execution environment supports it; pre-load runs one-shot there "
+                f"(Dagster forces retries=0 on pre-load ops, so there is no retry-based "
+                f"poke workaround) and skip_or_start skips the loads when no files arrived"
             )
 
     def sl_import(self, task_id: str, domain: str, tables: set=set(), **kwargs) -> NodeDefinition:
