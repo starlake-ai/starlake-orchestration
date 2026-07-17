@@ -555,7 +555,12 @@ class TestCloudRunGcloudWrapperSelection:
                 do_xcom_push=True,
             )
         cmd = task.bash_command
-        assert "--scheduledDate '{{sl_scheduled_date" in cmd
+        # issue #99 — the scheduledDate value is now UNQUOTED on the cloud_run
+        # paths (no shell consumes the quotes inside --args "..."); the template
+        # body keeps its own strftime('...') quotes. Full unquoting behaviour is
+        # covered by test_airflow_cloud_run_scheduled_date.py.
+        assert "--scheduledDate {{sl_scheduled_date" in cmd
+        assert "--scheduledDate '{{" not in cmd
         assert "strftime('%Y-%m-%dT%H:%M:%S%z')" in cmd
         assert "--format='get(metadata.name)'" in cmd
         # no trace of the old mangling

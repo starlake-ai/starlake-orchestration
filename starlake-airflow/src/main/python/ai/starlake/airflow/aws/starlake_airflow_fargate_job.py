@@ -71,10 +71,17 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
             kwargs.update({'params': params})
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
+            # issue #101 (companion to #99) — no single quotes: these arguments
+            # flow through StarlakeFargateHelper into the ECS
+            # containerOverrides[].command (exec form, no shell) and into the
+            # generated aws-cli script as --overrides '{json}', where an embedded
+            # single quote breaks the shell argument outright. No shell consumes
+            # the quotes, so literal quotes would reach the container CLI
+            # (TransformCmd, unlike LoadCmd, does not strip them).
             if scheduled_date:
-                tmp_arguments.append(f"\'{scheduled_date}\'")
+                tmp_arguments.append(f"{scheduled_date}")
             else:
-                tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+                tmp_arguments.append("{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
 
