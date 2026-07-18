@@ -16,7 +16,11 @@
 # - pre_load_strategy(none): The optional pre-load strategy to use to conditionaly load a domain, one of imported, ack, pending or none (if not set, the default 'none' strategy will be used) [OPTIONAL]
 # - global_ack_file_path: when the domain preloading strategy has been set to 'ack', the path to the global ack file [OPTIONAL]
 # - ack_wait_timeout(3600): when the domain preloading strategy has been set to 'ack', the timeout in seconds to wait for the ack file [OPTIONAL]
-# NOTE: pre_load_sensor — sensor mode is NOT supported on this execution environment (shell only) — setting it fails at DAG-definition time; the retries/retry_delay poke workaround additionally requires fargate_async=false and retry_on_failure=true (a failed preload is otherwise swallowed in sync mode, and in async mode retries re-poke the finished ECS task instead of re-running preload)
+# - pre_load_sensor(false): when true, the pre-load task waits (a deferrable ECS operator or a reschedule sensor) polling 'starlake preload' until files arrive [OPTIONAL]
+# - pre_load_poke_interval(300): seconds between two pokes while waiting [OPTIONAL]
+# - pre_load_timeout(3600): wall-clock timeout in seconds for the pre-load wait; on timeout downstream loads are skipped [OPTIONAL]
+# - pre_load_sensor_soft_fail(false): when true, a wait timeout marks the task SKIPPED instead of FAILED [OPTIONAL]
+# - pre_load_deferrable(true): when true, use a deferrable operator (needs a running triggerer) if supported; set false to force the reschedule sensor fallback [OPTIONAL]
 # - tags: a list of tags to be applied to the dag [OPTIONAL]
 # - start_date: the start date of the dag (eg. 2022-01-01) [OPTIONAL]
 # - end_date: the end date of the dag (eg. 2024-12-31) [OPTIONAL]

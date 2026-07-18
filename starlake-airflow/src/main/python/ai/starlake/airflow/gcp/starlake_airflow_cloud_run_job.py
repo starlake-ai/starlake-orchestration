@@ -26,9 +26,9 @@ from ai.starlake.dataset import StarlakeDataset
 
 from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, StarlakeExecutionEnvironment, TaskType
 
-from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
+from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin, StarlakeCloudPreloadSensor, PreLoadWait
 
-from ai.starlake.airflow.bash import StarlakeBashOperator
+from ai.starlake.airflow.bash import StarlakeBashOperator, StarlakePreloadBashSensor
 
 from airflow.exceptions import AirflowException
 
@@ -110,12 +110,20 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         Returns:
             BaseOperator: The Airflow task.
         """
-        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
-        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'cloud_run')
         # story 6.3 (issue #92) — PRELOAD is the only task type whose failure
         # is swallowed (XCom-gated via skip_or_start); every other task type
         # must fail the chain on a failed job
         preload = task_type == TaskType.PRELOAD
+        # story 6.5 (issue #93) — cloud pre-load waiting (deferrable-first,
+        # sensor-flavor fallback). Pops the four pre_load_* sensor kwargs; None
+        # when off (byte-identical one-shot construction below). The gcloud path
+        # has no deferrable operator, so pass operator_cls=None there to force
+        # the sensor-flavor.
+        pre_load_wait = self.__class__._sl_resolve_cloud_pre_load_wait(
+            kwargs,
+            self.options,
+            None if self.use_gcloud else CloudRunExecuteJobOperator,
+        )
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'retry_delay': timedelta(seconds=self.retry_delay_in_seconds)})
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
@@ -143,6 +151,105 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
         command = f'^{self.separator}^' + self.separator.join(arguments)
+
+        if pre_load_wait is not None:
+            # story 6.5 (issue #93) — PRELOAD waiting on cloud_run.
+            if self.use_gcloud:
+                # gcloud path: no deferrable operator — a reschedule BashSensor
+                # pokes `gcloud ... run jobs execute --wait`. The TRUE exit code
+                # drives the poke (0=files present=done, non-zero=no files=poke
+                # again), so the RAW command (no echo/XCom wrapper); the shell
+                # preload sensor's execute→True records the truthy skip_or_start
+                # XCom on success.
+                bash_command = (
+                    f"gcloud beta run jobs execute {self.cloud_run_job_name} "
+                    f"--args \"{command}\" "
+                    f"{self.update_env_vars} "
+                    f"--wait --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}"
+                )
+                kwargs.pop('retry_delay', None)
+                kwargs.setdefault('retries', 0)
+                return StarlakePreloadBashSensor(
+                    task_id=task_id,
+                    dataset=dataset,
+                    source=self.source,
+                    bash_command=bash_command,
+                    poke_interval=pre_load_wait.poke_interval,
+                    timeout=pre_load_wait.timeout,
+                    soft_fail=pre_load_wait.soft_fail,
+                    mode='reschedule',
+                    **kwargs
+                )
+            # python path. Engine kwargs (explicit CloudRunExecuteJobOperator
+            # params such as gcp_conn_id) are split off: they belong on the
+            # Cloud Run submission, not on the sensor, whose BaseSensorOperator
+            # ctor would reject them at DAG parse.
+            engine_kwargs = self.__class__._sl_pop_engine_kwargs(kwargs, CloudRunExecuteJobOperator)
+            engine_kwargs.pop('deferrable', None)
+            engine_kwargs.pop('overrides', None)
+            common = dict(
+                project_id=self.project_id,
+                job_name=self.cloud_run_job_name,
+                region=self.cloud_run_job_region,
+                impersonation_chain=self.impersonate_service_account,
+            )
+            common.update(engine_kwargs)
+            container_overrides: Dict[str, Any] = {
+                "env": [
+                    {"name": key, "value": value} for key, value in self.sl_env_vars.items()
+                ]
+            }
+            container_overrides["args"] = arguments
+            job_overrides = {"container_overrides": [container_overrides]}
+            if pre_load_wait.mode == 'deferrable':
+                # a single deferrable execution defers to the triggerer and
+                # raises on a failed execution; retries/retry_delay re-submit
+                # preload (retry = poke). The retries mapping IS the poke window.
+                kwargs.update({
+                    'retries': pre_load_wait.retries,
+                    'retry_delay': pre_load_wait.retry_delay,
+                })
+                return CloudRunJobOperator(
+                    task_id=task_id,
+                    dataset=dataset,
+                    source=self.source,
+                    overrides=job_overrides,
+                    mode=CloudRunMode.SYNC,
+                    deferrable=True,
+                    preload=True,
+                    pre_load_wait=pre_load_wait,
+                    **common,
+                    **kwargs
+                )
+            # python sensor-flavor: one execution submitted + awaited per poke.
+            # A bare CloudRunExecuteJobOperator RAISES on a failed execution (no
+            # files) — the sensor's poke catches it and pokes again. The
+            # overrides payload is rendered by the sensor (template field) and
+            # handed to the closure — the ad-hoc operator below is never a live
+            # task instance, so it cannot render Jinja itself.
+            def _submit_and_wait(context, payload, _common=common):
+                run_op = CloudRunExecuteJobOperator(
+                    task_id=f"{task_id}_poke",
+                    overrides=payload,
+                    do_xcom_push=False,
+                    **_common
+                )
+                run_op.execute(context)
+                return True
+            kwargs.pop('retry_delay', None)
+            kwargs.setdefault('retries', 0)
+            return StarlakeCloudPreloadSensor(
+                task_id=task_id,
+                dataset=dataset,
+                source=self.source,
+                submit_and_wait=_submit_and_wait,
+                payload=job_overrides,
+                poke_interval=pre_load_wait.poke_interval,
+                timeout=pre_load_wait.timeout,
+                soft_fail=pre_load_wait.soft_fail,
+                **kwargs
+            )
+
         if self.cloud_run_async: # asynchronous job
             with TaskGroup(group_id=f'{task_id}_wait') as task_completion_sensors:
                 if self.use_gcloud: # use gcloud
@@ -350,6 +457,7 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         impersonation_chain: Union[str, Sequence[str], None] = None,
         preload: bool = False,
         retry_on_failure: bool = False,
+        pre_load_wait: Optional[PreLoadWait] = None,
         **kwargs,
     ):
         super().__init__(  # type: ignore
@@ -363,9 +471,27 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         self.mode = mode
         self.preload = preload
         self.retry_on_failure = retry_on_failure
+        # story 6.5 (issue #93) — set on the deferrable pre-load waiting task
+        # only; None otherwise.
+        self.pre_load_wait = pre_load_wait
 
     def execute(self, context: Context):
         logger = logging.getLogger(__name__)
+        # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer via
+        # the native CloudRunExecuteJobOperator (self.deferrable=True), the
+        # verdict is applied on resume in execute_complete. Bypass both the ASYNC
+        # custom-hook path and the SYNC swallow. TaskDeferred is a BaseException,
+        # so the except below cannot catch the defer control flow. A SUBMISSION-
+        # phase failure (cloud API error before the defer) routes through the
+        # same waiting verdict as the resume phase, so soft_fail is honored
+        # whichever phase the terminal attempt fails in.
+        if self.preload and self.pre_load_wait is not None:
+            try:
+                return super(CloudRunJobOperator, self).execute(context)
+            except Exception as e:
+                return StarlakeAirflowJob._sl_deferrable_wait_failure(
+                    context, self.pre_load_wait, self.task_id, e
+                )
         if self.mode == CloudRunMode.ASYNC:
             hook: CloudRunHook = CloudRunHook(
                 gcp_conn_id=self.gcp_conn_id,
@@ -404,6 +530,23 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
                 if not StarlakeAirflowJob._sl_cloud_failure_swallowed(self.preload, self.retry_on_failure):
                     raise e
                 return False
+
+    def execute_complete(self, context: Context, event: dict = None):
+        # story 6.5 (issue #93) — deferrable pre-load waiting resume. Success →
+        # truthy XCom (skip_or_start proceeds). A within-window failure
+        # (CloudRunExecuteJobOperator raises on a failed execution = no files)
+        # re-raises so Airflow retries (re-submit = next poke); the terminal
+        # attempt maps to a skip (soft_fail) or a hard failure. Never routes
+        # through the #92 swallow.
+        if not (self.preload and self.pre_load_wait is not None):
+            return super().execute_complete(context, event)
+        try:
+            super().execute_complete(context, event)
+        except Exception as e:
+            return StarlakeAirflowJob._sl_deferrable_wait_failure(
+                context, self.pre_load_wait, self.task_id, e
+            )
+        return True
 
 class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
 

@@ -80,6 +80,11 @@ try:
 except ImportError:
     from airflow.utils.trigger_rule import TriggerRule  # Airflow 2.x
 
+try:
+    from airflow.sdk.exceptions import AirflowSkipException  # Airflow 3.x
+except ImportError:
+    from airflow.exceptions import AirflowSkipException  # Airflow 2.x
+
 __all__ = [
     "BaseHook",
     "Dataset",
@@ -94,6 +99,7 @@ __all__ = [
     "ShortCircuitOperator",
     "BashSensor",
     "TriggerRule",
+    "AirflowSkipException",
     "airflow_version",
     "supports_datasets",
     "supports_inlet_events",

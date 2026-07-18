@@ -5,7 +5,7 @@
 # - pre_load_strategy(none): The optional pre-load strategy to use to conditionaly load a domain, one of imported, ack, pending or none (if not set, the default 'none' strategy will be used) [OPTIONAL]
 # - global_ack_file_path: when the domain preloading strategy has been set to 'ack', the path to the global ack file [OPTIONAL]
 # - ack_wait_timeout(3600): when the domain preloading strategy has been set to 'ack', the timeout in seconds to wait for the ack file (ignored in sensor mode) [OPTIONAL]
-# - pre_load_sensor(false): when true, the pre-load task is built as a BashSensor (reschedule mode) that pokes 'starlake preload' until files arrive — shell execution environment only [OPTIONAL]
+# - pre_load_sensor(false): when true, the pre-load task is built as a BashSensor (reschedule mode) that pokes 'starlake preload' until files arrive [OPTIONAL]
 # - pre_load_poke_interval(300): seconds between two pokes in sensor mode [OPTIONAL]
 # - pre_load_timeout(3600): wall-clock timeout in seconds for the pre-load sensor; on timeout downstream loads are skipped [OPTIONAL]
 # - pre_load_sensor_soft_fail(false): when true, a sensor timeout marks the sensor SKIPPED instead of FAILED [OPTIONAL]
