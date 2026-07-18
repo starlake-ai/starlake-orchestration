@@ -137,9 +137,8 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
             if dataset:
                 attempt_assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset, **kwargs))
 
-            from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
-            logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
+            logical_datetime: str = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             # read WITHOUT mutating (issue #111): `arguments` is the closure
             # list — a RetryPolicy re-execution of this op function would
             # otherwise pop the next element as the command

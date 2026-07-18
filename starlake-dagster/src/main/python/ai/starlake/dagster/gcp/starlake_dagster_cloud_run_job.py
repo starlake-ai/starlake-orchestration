@@ -136,9 +136,8 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
 
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
-            logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
+            logical_datetime: str = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             # UNQUOTED (issue #113, mirrors Airflow #99/#101): the value sits
             # INSIDE the double-quoted --args string, so the local shell
             # never consumes the quotes and gcloud would ship them literally
