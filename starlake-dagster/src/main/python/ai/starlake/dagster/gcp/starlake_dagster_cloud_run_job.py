@@ -80,8 +80,9 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
         Returns:
             NodeDefinition: The Dagster node.
         """
-        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
-        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'cloud_run')
+        # story 6.7 (issue #94) — sensor mode: popped BEFORE the op
+        # construction and captured by the op closure below
+        pre_load_poke = self.__class__._sl_resolve_pre_load_poke(kwargs)
         env = self.sl_env(args=arguments)
 
         sl_command = f"{self.__class__.get_context_var('GOOGLE_CLOUD_SDK', '/usr/local/google-cloud-sdk', self.options)}/bin/gcloud beta run jobs execute {self.cloud_run_job_name} "
@@ -170,14 +171,38 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                 output, return_code = f"Starlake command {command} execution skipped due to dry run mode.", 0
                 context.log.info(output)
             else:
-                output, return_code = execute_shell_command(
-                    shell_command=command,
-                    output_logging="STREAM",
-                    log=context.log,
+                def _run_command():
+                    # execute the Cloud Run job and wait for its terminal
+                    # state (gcloud --wait propagates it as the exit code)
+                    return execute_shell_command(
+                        shell_command=command,
+                        output_logging="STREAM",
+                        log=context.log,
     #                cwd=self.sl_root,
-                    env=env,
-                    log_shell_command=True,
-                )
+                        env=env,
+                        log_shell_command=True,
+                    )
+
+                if pre_load_poke:
+                    # story 6.7 (issue #94) — cloud poke = a full Cloud Run
+                    # execution re-submission per attempt (shared wall-clock
+                    # loop; the op holds its executor slot while poking, the
+                    # heavy work runs cloud-side between checks). Soft-fail
+                    # deadline → None → bare return (optional-output skip);
+                    # hard timeout Failure raised inside the loop so the
+                    # skip_or_start bare-return branch below cannot swallow it.
+                    poked = self.__class__._sl_pre_load_poke_loop(
+                        context,
+                        _run_command,
+                        lambda result: not result[1],
+                        pre_load_poke,
+                        command,
+                    )
+                    if poked is None:
+                        return
+                    output, return_code = poked
+                else:
+                    output, return_code = _run_command()
 
             if return_code:
                 value=f"Starlake command {command} execution failed with output: {output}"

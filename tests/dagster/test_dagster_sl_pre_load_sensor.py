@@ -21,6 +21,12 @@ loop around ``execute_shell_command`` (the op holds its executor slot while
 poking).  Soft-fail timeout routes to the existing optional-output skip;
 hard timeout raises ``Failure`` and must NOT be swallowed by the forced
 ``skip_or_start=True``.
+
+Story 6.7 (issue #94) extended the loop to the cloud variants through the
+shared ``StarlakeDagsterJob`` seams and removed the 6.2 cloud rejection —
+the rejection tests that used to live here were deleted, replaced by the
+acceptance coverage in ``test_dagster_sl_pre_load_cloud_sensor.py``.  This
+file remains the shell-variant behavior pin.
 """
 
 from __future__ import annotations
@@ -251,48 +257,7 @@ class TestHardFailTimeout:
 
 
 # ---------------------------------------------------------------------------
-# 5. Cloud variants reject sensor mode
-# ---------------------------------------------------------------------------
-
-class TestCloudVariantRejection:
-
-    @pytest.mark.parametrize("env_name", ["cloud_run", "dataproc", "fargate"])
-    def test_sensor_flag_raises_naming_environment(self, env_name):
-        from ai.starlake.dagster import StarlakeDagsterJob
-
-        kwargs = {
-            "pre_load_sensor": True,
-            "pre_load_poke_interval": 42,
-            "pre_load_timeout": 120,
-            "pre_load_sensor_soft_fail": False,
-        }
-        with pytest.raises(ValueError) as exc_info:
-            StarlakeDagsterJob._reject_pre_load_sensor_kwargs(kwargs, env_name)
-        message = str(exc_info.value)
-        assert env_name in message
-        assert "pre_load_sensor" in message
-        # no retry-based workaround on Dagster: sl_pre_load forces retries=0
-        # on every pre-load op, so the message must say one-shot, not point
-        # at the retries/retry_delay options
-        assert "retries=0" in message
-        assert "one-shot" in message
-
-    def test_without_flag_kwargs_popped_cleanly(self):
-        from ai.starlake.dagster import StarlakeDagsterJob
-
-        kwargs = {
-            "pre_load_sensor": False,
-            "pre_load_poke_interval": 42,
-            "pre_load_timeout": 120,
-            "pre_load_sensor_soft_fail": False,
-            "retries": 0,
-        }
-        StarlakeDagsterJob._reject_pre_load_sensor_kwargs(kwargs, "cloud_run")
-        assert kwargs == {"retries": 0}
-
-
-# ---------------------------------------------------------------------------
-# 6. RetryPolicy stays None on the preload op
+# 5. RetryPolicy stays None on the preload op
 # ---------------------------------------------------------------------------
 
 class TestPreloadRetryPolicy:
