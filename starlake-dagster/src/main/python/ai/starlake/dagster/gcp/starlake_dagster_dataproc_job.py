@@ -147,6 +147,21 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
         # story 6.7 (issue #94) — sensor mode: popped BEFORE the op
         # construction and captured by the op closure below
         pre_load_poke = self.__class__._sl_resolve_pre_load_poke(kwargs)
+        # issue #109 — the sensor-off path polls the job to its terminal
+        # state; the wait budget is configurable (dagster-gcp's 20-minute
+        # default is too short for real Spark jobs)
+        raw_wait_timeout = __class__.get_context_var('dataproc_job_wait_timeout', '3600', self.options)
+        # isdigit keeps the parse strict: "+120", "1_000" or "-5" are rejected
+        # (plain int() would accept the first two)
+        if str(raw_wait_timeout).strip().isdigit():
+            job_wait_timeout = int(str(raw_wait_timeout).strip())
+        else:
+            job_wait_timeout = None
+        if job_wait_timeout is None or job_wait_timeout <= 0:
+            raise ValueError(
+                f"[{self.__class__.sl_orchestrator()}] sl_job: invalid value '{raw_wait_timeout}' "
+                f"for option 'dataproc_job_wait_timeout' — expected a positive integer number of seconds"
+            )
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",")
         main_class = __class__.get_context_var("spark_job_main_class", "ai.starlake.job.Main", self.options)
 
@@ -231,8 +246,11 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             tmp_arguments.append(f"\'{logical_datetime}\'")
-            command = arguments.pop(0)
-            command_with_arguments = [command] + tmp_arguments + arguments
+            # read WITHOUT mutating (issue #111): `arguments` is the closure
+            # list — a RetryPolicy re-execution of this op function would
+            # otherwise pop the next element as the command
+            command = arguments[0]
+            command_with_arguments = [command] + tmp_arguments + arguments[1:]
 
             if transform:
                 opts = command_with_arguments[-1].split(",")
@@ -252,7 +270,11 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 job["spark_job"] = spark_job
                 job_details["job"] = job
 
-            effective_job_id = job_id
+            # issue #109 — job ids are unique per project: generate a fresh id
+            # per ATTEMPT at execute time (a RetryPolicy retry must not reuse
+            # the previous attempt's id); poke mode re-generates one per poke
+            # and injects its own id into job_details
+            effective_job_id = task_id + "_" + str(uuid.uuid4())[:8]
 
             if config.dry_run:
                 output = f"Starlake command {' '.join(command_with_arguments)} execution skipped due to dry run mode."
@@ -284,7 +306,8 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                         # or a transient submission error — a failed poke, not
                         # an op crash: the wall-clock window and soft_fail
                         # keep governing the outcome
-                        context.log.info(f"Preload job {poke_job_id} did not succeed: {e}")
+                        import traceback
+                        context.log.warning(f"Preload job {poke_job_id} did not succeed: {e}\n{traceback.format_exc()}")
                         return poke_job_id, {"status": {"state": "ERROR", "details": str(e)}}
 
                 poked = self.__class__._sl_pre_load_poke_loop(
@@ -298,11 +321,31 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                     return
                 effective_job_id, result = poked
             else:
+                job_details["job"]["reference"]["job_id"] = effective_job_id
                 context.log.info(f"Submitting Spark job {effective_job_id} to Dataproc cluster {self.__dataproc__.cluster_name} with job details: \n{json.dumps(job_details, indent=2)}")
-                result = self.__client__().submit_job(job_details=job_details)
+                client = self.__client__()
+                try:
+                    client.submit_job(job_details=job_details)
+                    # the submission response is NOT terminal (state PENDING —
+                    # submit_job just submits): poll the job to its terminal
+                    # state before interpreting it (issue #109)
+                    client.wait_for_job(job_id=effective_job_id, wait_timeout=job_wait_timeout)
+                    result = client.get_job(job_id=effective_job_id)
+                except Exception as e:
+                    # DataprocError (job ERROR/CANCELLED or poll timeout) or a
+                    # transient submission error — routed into the failure
+                    # branch below so the retry_policy / failure-output /
+                    # skip_or_start semantics keep applying. NOTE: a poll
+                    # timeout ABANDONS the still-running job (the dagster-gcp
+                    # client has no cancel primitive) — a retry then submits a
+                    # fresh-id duplicate while the abandoned job may still
+                    # complete; size dataproc_job_wait_timeout accordingly.
+                    import traceback
+                    context.log.warning(f"Spark job {effective_job_id} did not succeed: {e}\n{traceback.format_exc()}")
+                    result = {"status": {"state": "ERROR", "details": str(e)}}
 
             if result.get("status", {}).get("state") != "DONE":
-                value=f"Spark job {effective_job_id} submission failed with result: {result}"
+                value=f"Spark job {effective_job_id} did not succeed with result: {result}"
                 if retry_policy:
                     retry_count = context.retry_number
                     if retry_count < retry_policy.max_retries:
