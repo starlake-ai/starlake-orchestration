@@ -603,27 +603,6 @@ class TestDataprocPokeLoop:
             options={**DATAPROC_OPTIONS, **options},
         )
 
-    def _patch_client(self, monkeypatch, states):
-        """Sensor-OFF seam: the off path interprets the SUBMISSION response
-        (byte-identical pre-6.7 behavior — see issue #109)."""
-        import copy
-
-        from ai.starlake.dagster.gcp import StarlakeDagsterDataprocJob
-
-        submitted = []
-
-        class FakeClient:
-            def submit_job(self, job_details):
-                # job_details is mutated between pokes — snapshot it
-                submitted.append(copy.deepcopy(job_details))
-                state = states[min(len(submitted), len(states)) - 1]
-                return {"status": {"state": state}}
-
-        monkeypatch.setattr(
-            StarlakeDagsterDataprocJob, "__client__", lambda self: FakeClient()
-        )
-        return submitted
-
     def _patch_poke_client(self, monkeypatch, states):
         """Poke-mode seam: submit_job returns a NON-terminal submission
         response (PENDING, as the real dagster-gcp client does); the terminal
@@ -664,11 +643,15 @@ class TestDataprocPokeLoop:
         ]
 
     def test_sensor_off_single_submission(self, monkeypatch):
-        submitted = self._patch_client(monkeypatch, ["DONE"])
+        # since story 6.8 (issue #109) the off path ALSO polls to the
+        # terminal state — full off-path coverage lives in
+        # test_dagster_dataproc_terminal_state.py
+        submitted, waited = self._patch_poke_client(monkeypatch, ["DONE"])
         node = _make_preload_node(self._make_job({"pre_load_strategy": "imported"}))
         result = _execute(node)
         assert result.success
         assert len(submitted) == 1
+        assert len(waited) == 1
         assert result.output_for_node(PRELOAD_TASK_ID, "result") == self._job_ids(
             submitted
         )[0]
