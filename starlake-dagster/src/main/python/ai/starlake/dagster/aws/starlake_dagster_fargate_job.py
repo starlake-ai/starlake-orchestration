@@ -118,8 +118,13 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
             tmp_arguments.append(f"\'{logical_datetime}\'")
-            command = arguments.pop(0)
-            command_with_arguments = [command] + tmp_arguments + arguments
+            # read WITHOUT mutating (issue #111): `arguments` is the closure
+            # list — a RetryPolicy re-execution of this op function would
+            # otherwise pop the next element as the command
+            # (and the fargate helper JOINS this same list lazily: popping the
+            # verb corrupted even the FIRST attempt of non-transform tasks)
+            command = arguments[0]
+            command_with_arguments = [command] + tmp_arguments + arguments[1:]
 
             if transform:
                 opts = command_with_arguments[-1].split(",")

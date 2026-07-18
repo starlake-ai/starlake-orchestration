@@ -135,12 +135,15 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
             from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
             logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
-            command = arguments.pop(0)
+            # read WITHOUT mutating (issue #111): `arguments` is the closure
+            # list — a RetryPolicy re-execution of this op function would
+            # otherwise pop the next element as the command
+            command = arguments[0]
             if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
                 tmp_arguments = ["--scheduledDate", f"\'{logical_datetime}\'"]
-                command_with_arguments = [command] + tmp_arguments + arguments
+                command_with_arguments = [command] + tmp_arguments + arguments[1:]
             else:
-                command_with_arguments = [command] + arguments
+                command_with_arguments = [command] + arguments[1:]
 
             if transform:
                 opts = command_with_arguments[-1].split(",")
