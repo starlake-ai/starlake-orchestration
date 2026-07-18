@@ -75,6 +75,11 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         self.cloud_run_job_name = __class__.get_context_var(var_name='cloud_run_job_name', options=self.options) if not cloud_run_job_name else cloud_run_job_name
         self.cloud_run_job_region = __class__.get_context_var('cloud_run_job_region', default_value=os.getenv("GCP_REGION"), options=self.options) if not cloud_run_job_region else cloud_run_job_region
         self.cloud_run_service_account = __class__.get_context_var(var_name='cloud_run_service_account', default_value="", options=self.options) if not cloud_run_service_account else cloud_run_service_account
+        # issue #104 — two impersonation consumers, two formats: the gcloud
+        # command strings interpolate the CLI fragment below, while every
+        # provider `impersonation_chain=` site must receive the bare
+        # service-account email (`self.cloud_run_service_account or None`) —
+        # the Google auth layer cannot use the fragment
         if self.cloud_run_service_account:
             self.impersonate_service_account = f"--impersonate-service-account {self.cloud_run_service_account}"
         else:
@@ -191,7 +196,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                 project_id=self.project_id,
                 job_name=self.cloud_run_job_name,
                 region=self.cloud_run_job_region,
-                impersonation_chain=self.impersonate_service_account,
+                impersonation_chain=self.cloud_run_service_account or None,
             )
             common.update(engine_kwargs)
             container_overrides: Dict[str, Any] = {
@@ -320,7 +325,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         region=self.cloud_run_job_region,
                         overrides=job_overrides,
                         mode=CloudRunMode.ASYNC,
-                        impersonation_chain=self.impersonate_service_account,
+                        impersonation_chain=self.cloud_run_service_account or None,
                         preload=preload,
                         retry_on_failure=self.retry_on_failure,
                         **kwargs
@@ -331,7 +336,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         dataset=dataset,
                         source=self.source,
                         source_task_id=job_task.task_id,
-                        impersonation_chain=self.impersonate_service_account,
+                        impersonation_chain=self.cloud_run_service_account or None,
                         preload=preload,
                         **kwargs
                     )
@@ -385,7 +390,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     region=self.cloud_run_job_region,
                     overrides=job_overrides,
                     mode=CloudRunMode.SYNC,
-                    impersonation_chain=self.impersonate_service_account,
+                    impersonation_chain=self.cloud_run_service_account or None,
                     preload=preload,
                     retry_on_failure=self.retry_on_failure,
                     **kwargs
