@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-from typing import List, Optional, Union
+from typing import Callable, List, NamedTuple, Optional, TypeVar, Union
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, TaskType
 
@@ -22,7 +22,7 @@ from ai.starlake.common import is_valid_cron, sl_cron_start_end_dates, sl_timest
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
-from dagster import AssetKey, Output, Out, op, AssetMaterialization, OpExecutionContext
+from dagster import AssetKey, Failure, Output, Out, op, AssetMaterialization, OpExecutionContext
 
 from dagster._core.definitions import NodeDefinition
 
@@ -32,10 +32,23 @@ from datetime import datetime
 
 import pytz
 
+# used as time.monotonic()/time.sleep() (module-attribute calls) so tests can
+# patch the poke-loop clock (stories 6.2/6.7)
+import time
+
 class DagsterDataset(AbstractEvent[AssetKey]):
     @classmethod
     def to_event(cls, dataset: StarlakeDataset, source: Optional[str] = None) -> AssetKey:
         return AssetKey(dataset.uri)
+
+class PreLoadPoke(NamedTuple):
+    """Resolved pre-load sensor configuration for the in-op wall-clock poke
+    loop (story 6.2 shell, story 6.7 cloud variants — issue #94)."""
+    poke_interval: int
+    timeout: int
+    soft_fail: bool
+
+T = TypeVar("T")
 
 class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions, DagsterDataset):
     def __init__(self, filename: str=None, module_name: str=None, pre_load_strategy: Union[StarlakePreLoadStrategy, str, None]=None, options: dict=None, **kwargs) -> None:
@@ -74,35 +87,94 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
         return super().sl_pre_load(domain=domain, tables=tables, pre_load_strategy=pre_load_strategy, **kwargs)
 
     @classmethod
-    def _reject_pre_load_sensor_kwargs(cls, kwargs: dict, env_name: str) -> None:
-        """Pop the pre-load sensor kwargs and reject sensor mode (story 6.2).
+    def _sl_resolve_pre_load_poke(cls, kwargs: dict) -> Optional[PreLoadPoke]:
+        """Pop the four ``pre_load_*`` sensor kwargs and resolve the poke-loop
+        configuration (story 6.7, issue #94 — supersedes the story 6.2 cloud
+        rejection).
 
-        Sensor mode (``pre_load_sensor=true``) is only supported on the shell
-        execution environment: a cloud "poke" would pay the full
-        job-submission overhead on every attempt and needs per-engine
-        terminal-state interpretation.  Cloud ``sl_job`` implementations call
-        this helper before building ops so a popped-but-false flag can never
-        leak into an op construction.
+        Returns ``None`` when sensor mode is off — the kwargs are popped so the
+        one-shot op construction is byte-identical to today (zero-change
+        guarantee; a popped-but-false flag can never leak into an op).  The
+        kwargs are popped FIRST (even an invalid value must not leak), then
+        parsed strictly with the NFR11 core helpers: core ``sl_pre_load``
+        already validates the pipeline path; the strict re-parse here covers
+        direct ``sl_job`` calls (``bool('false')`` would otherwise silently
+        turn sensor mode ON, and a zero/negative interval would hot-loop).
+        """
+        raw_sensor = kwargs.pop('pre_load_sensor', False)
+        raw_poke_interval = kwargs.pop('pre_load_poke_interval', 300)
+        raw_timeout = kwargs.pop('pre_load_timeout', 3600)
+        raw_soft_fail = kwargs.pop('pre_load_sensor_soft_fail', False)
+        pre_load_sensor = cls._sl_parse_strict_bool('pre_load_sensor', raw_sensor)
+        if not pre_load_sensor:
+            return None
+        poke_interval = cls._sl_parse_strict_positive_int('pre_load_poke_interval', raw_poke_interval)
+        timeout = cls._sl_parse_strict_positive_int('pre_load_timeout', raw_timeout)
+        soft_fail = cls._sl_parse_strict_bool('pre_load_sensor_soft_fail', raw_soft_fail)
+        if timeout < poke_interval:
+            raise cls._sl_pre_load_option_error(
+                'pre_load_timeout', raw_timeout,
+                f"an integer number of seconds >= pre_load_poke_interval ({poke_interval})",
+            )
+        return PreLoadPoke(poke_interval=poke_interval, timeout=timeout, soft_fail=soft_fail)
+
+    @classmethod
+    def _sl_pre_load_poke_loop(
+        cls,
+        context,
+        run_once: Callable[[], T],
+        is_success: Callable[[T], bool],
+        poke: PreLoadPoke,
+        command_label: str,
+    ) -> Optional[T]:
+        """In-op wall-clock poke loop shared by the shell and cloud variants
+        (story 6.2 shape, extracted for story 6.7 / issue #94).
+
+        Dagster has no reschedule primitive, so the op HOLDS ITS EXECUTOR SLOT
+        while poking (up to ``poke.timeout`` seconds).  Each iteration calls
+        ``run_once()`` — a full (re-)submission on the cloud variants — and
+        interprets its result with ``is_success``.  ``time.monotonic()`` /
+        ``time.sleep()`` are called through the ``time`` module so tests can
+        patch the clock.
+
+        Returns the successful ``run_once`` result, or ``None`` when the
+        deadline is reached with ``poke.soft_fail`` — the caller must then
+        bare-``return`` so the existing optional-output gating skips the
+        downstream tasks.  The loop therefore presumes the PRELOAD op
+        composition (``sl_pre_load`` forces ``skip_or_start=True`` → optional
+        output): a direct ``sl_job`` call combining ``pre_load_sensor=True``
+        with a required output or a ``failure=`` output is unsupported (the
+        soft-fail bare-return would violate the required output, and the hard
+        timeout raises instead of routing to the failure output).
+
+        The deadline is only evaluated BETWEEN pokes: a single hung
+        ``run_once`` submission can hold the executor slot past
+        ``poke.timeout`` (engines should bound their own submission wait).
 
         Raises:
-            ValueError: when ``pre_load_sensor`` is truthy.
+            Failure: on deadline without ``soft_fail`` — raised HERE so the
+                forced ``skip_or_start`` bare-return branch of the callers
+                cannot swallow the hard timeout.
         """
-        pre_load_sensor = kwargs.pop('pre_load_sensor', False)
-        kwargs.pop('pre_load_poke_interval', None)
-        kwargs.pop('pre_load_timeout', None)
-        kwargs.pop('pre_load_sensor_soft_fail', None)
-        if pre_load_sensor:
-            orchestrator = cls.sl_orchestrator() or "unknown"
-            # Unlike Airflow there is no retry-based workaround to point at:
-            # sl_pre_load forces retries=0 on every pre-load op, so the
-            # retries/retry_delay options never reach it.
-            raise ValueError(
-                f"[{orchestrator}] sl_pre_load: sensor mode (pre_load_sensor=true) is not "
-                f"supported on the '{env_name}' execution environment — only the shell "
-                f"execution environment supports it; pre-load runs one-shot there "
-                f"(Dagster forces retries=0 on pre-load ops, so there is no retry-based "
-                f"poke workaround) and skip_or_start skips the loads when no files arrived"
-            )
+        deadline = time.monotonic() + poke.timeout
+        while True:
+            result = run_once()
+            if is_success(result):
+                return result
+            # sleep only when another poke still fits in the window
+            if time.monotonic() + poke.poke_interval >= deadline:
+                timeout_message = (
+                    f"Starlake command {command_label} timed out waiting "
+                    f"for files after {poke.timeout}s"
+                )
+                if poke.soft_fail:
+                    context.log.info(
+                        f"{timeout_message} — skipping downstream tasks "
+                        f"(pre_load_sensor_soft_fail=true)."
+                    )
+                    return None
+                raise Failure(description=timeout_message)
+            time.sleep(poke.poke_interval)
 
     def sl_import(self, task_id: str, domain: str, tables: set=set(), **kwargs) -> NodeDefinition:
         """Overrides IStarlakeJob.sl_import()

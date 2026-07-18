@@ -67,8 +67,10 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
         Returns:
             NodeDefinition: The Dagster node.
         """
-        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
-        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'fargate')
+        # story 6.7 (issue #94) — sensor mode: popped BEFORE the op
+        # construction (and before the fargate helper receives **kwargs) and
+        # captured by the op closure below
+        pre_load_poke = self.__class__._sl_resolve_pre_load_poke(kwargs)
         env = self.sl_env(args=arguments)
 
         fargate = StarlakeFargateHelper(job=self, arguments=arguments, **kwargs)
@@ -146,28 +148,58 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
 
             command = fargate.command
 
-            tmp_file_path = fargate.generate_script()
+            def _run_command():
+                # each call generates (and always cleans up) a fresh task
+                # script — on the poke loop every attempt re-submits a new
+                # Fargate task
+                tmp_file_path = fargate.generate_script()
 
-            tmp_path = os.path.dirname(tmp_file_path)
-            context.log.info("Using temporary directory: %s" % tmp_path)
+                tmp_path = os.path.dirname(tmp_file_path)
+                context.log.info("Using temporary directory: %s" % tmp_path)
 
-            tmp_file = os.path.basename(tmp_file_path)
-            context.log.info(f"Temporary script location: {tmp_file}")
+                tmp_file = os.path.basename(tmp_file_path)
+                context.log.info(f"Temporary script location: {tmp_file}")
 
-            if config.dry_run:
-                output, return_code = f"Starlake command {command} execution skipped due to dry run mode.", 0
-                context.log.info(output)
+                try:
+                    if config.dry_run:
+                        dry_output = f"Starlake command {command} execution skipped due to dry run mode."
+                        context.log.info(dry_output)
+                        return dry_output, 0
+                    return execute_shell_script(
+                            shell_script_path=tmp_file,
+                            output_logging="STREAM",
+                            log=context.log,
+                            cwd=tmp_path,
+                            env=env,
+                            log_shell_command=True,
+                        )
+                finally:
+                    try:
+                        os.unlink(tmp_file_path)
+                    except FileNotFoundError:
+                        # externally removed — must not mask the poke result
+                        pass
+
+            if pre_load_poke and not config.dry_run:
+                # story 6.7 (issue #94) — cloud poke = a full Fargate task
+                # re-submission per attempt (shared wall-clock loop; the op
+                # holds its executor slot while poking, the heavy work runs
+                # cloud-side between checks). Soft-fail deadline → None →
+                # bare return (optional-output skip); hard timeout Failure
+                # raised inside the loop so the skip_or_start bare-return
+                # branch below cannot swallow it.
+                poked = self.__class__._sl_pre_load_poke_loop(
+                    context,
+                    _run_command,
+                    lambda result: not result[1],
+                    pre_load_poke,
+                    command,
+                )
+                if poked is None:
+                    return
+                output, return_code = poked
             else:
-                output, return_code = execute_shell_script(
-                        shell_script_path=tmp_file,
-                        output_logging="STREAM",
-                        log=context.log,
-                        cwd=tmp_path,
-                        env=env,
-                        log_shell_command=True,
-                    )
-
-            os.unlink(tmp_file_path)
+                output, return_code = _run_command()
 
             if return_code:
                 value=f"Starlake command {command} execution failed with output: {output}"

@@ -14,7 +14,11 @@
 # limitations under the License.
 #
 
-from __future__ import annotations
+# NOTE (issue #107): do NOT add `from __future__ import annotations` here —
+# postponed evaluation turns the op functions' `config:
+# DagsterLogicalDatetimeConfig` annotations into strings that Dagster's
+# pythonic-config inspection cannot resolve, and every @op in the module
+# raises at definition time.
 
 import json
 
@@ -75,7 +79,7 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
         """Get the Dataproc client."""
         return self.__dataproc__.get_client()
 
-    def pre_tasks(self, *args, **kwargs) -> NodeDefinition | None:
+    def pre_tasks(self, *args, **kwargs) -> Optional[NodeDefinition]:
         """Overrides IStarlakeJob.pre_tasks()"""
         task_id = kwargs.get('task_id', f"create_{self.cluster_config.cluster_id.replace('-', '_')}_cluster")
         kwargs.pop('task_id', None)
@@ -100,7 +104,7 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
 
         return create_dataproc_cluster
 
-    def post_tasks(self, *args, **kwargs) -> NodeDefinition | None:
+    def post_tasks(self, *args, **kwargs) -> Optional[NodeDefinition]:
         """Overrides IStarlakeJob.post_tasks()"""
 
         task_id = kwargs.get('task_id', f"delete_{self.cluster_config.cluster_id.replace('-', '_')}_cluster")
@@ -140,8 +144,9 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
         Returns:
             NodeDefinition: The Dagster node.
         """
-        # story 6.2 — sensor mode is shell-only: pop the kwargs and fail fast
-        self.__class__._reject_pre_load_sensor_kwargs(kwargs, 'dataproc')
+        # story 6.7 (issue #94) — sensor mode: popped BEFORE the op
+        # construction and captured by the op closure below
+        pre_load_poke = self.__class__._sl_resolve_pre_load_poke(kwargs)
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",")
         main_class = __class__.get_context_var("spark_job_main_class", "ai.starlake.job.Main", self.options)
 
@@ -247,16 +252,57 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 job["spark_job"] = spark_job
                 job_details["job"] = job
 
+            effective_job_id = job_id
+
             if config.dry_run:
                 output = f"Starlake command {' '.join(command_with_arguments)} execution skipped due to dry run mode."
                 context.log.info(output)
                 result = {"status": {"state": "DONE"}}
+            elif pre_load_poke:
+                # story 6.7 (issue #94) — cloud poke = a full Dataproc job
+                # re-submission per attempt (shared wall-clock loop; the op
+                # holds its executor slot while poking, the heavy work runs
+                # cloud-side between checks). A Dataproc job id is unique per
+                # project, so every poke MUST re-submit with a fresh id.
+                # Soft-fail deadline → None → bare return (optional-output
+                # skip); hard timeout Failure raised inside the loop so the
+                # skip_or_start bare-return branch below cannot swallow it.
+                def _submit_once():
+                    poke_job_id = task_id + "_" + str(uuid.uuid4())[:8]
+                    job_details["job"]["reference"]["job_id"] = poke_job_id
+                    context.log.info(f"Submitting Spark job {poke_job_id} to Dataproc cluster {self.__dataproc__.cluster_name} with job details: \n{json.dumps(job_details, indent=2)}")
+                    client = self.__client__()
+                    try:
+                        client.submit_job(job_details=job_details)
+                        # the submission response is NOT terminal (state
+                        # PENDING — submit_job just submits): poll the job to
+                        # its terminal state before interpreting it
+                        client.wait_for_job(job_id=poke_job_id, wait_timeout=pre_load_poke.timeout)
+                        return poke_job_id, client.get_job(job_id=poke_job_id)
+                    except Exception as e:
+                        # DataprocError (job ERROR/CANCELLED or poll timeout)
+                        # or a transient submission error — a failed poke, not
+                        # an op crash: the wall-clock window and soft_fail
+                        # keep governing the outcome
+                        context.log.info(f"Preload job {poke_job_id} did not succeed: {e}")
+                        return poke_job_id, {"status": {"state": "ERROR", "details": str(e)}}
+
+                poked = self.__class__._sl_pre_load_poke_loop(
+                    context,
+                    _submit_once,
+                    lambda submission: submission[1].get("status", {}).get("state") == "DONE",
+                    pre_load_poke,
+                    ' '.join(command_with_arguments),
+                )
+                if poked is None:
+                    return
+                effective_job_id, result = poked
             else:
-                context.log.info(f"Submitting Spark job {job_id} to Dataproc cluster {self.__dataproc__.cluster_name} with job details: \n{json.dumps(job_details, indent=2)}")
+                context.log.info(f"Submitting Spark job {effective_job_id} to Dataproc cluster {self.__dataproc__.cluster_name} with job details: \n{json.dumps(job_details, indent=2)}")
                 result = self.__client__().submit_job(job_details=job_details)
 
             if result.get("status", {}).get("state") != "DONE":
-                value=f"Spark job {job_id} submission failed with result: {result}"
+                value=f"Spark job {effective_job_id} submission failed with result: {result}"
                 if retry_policy:
                     retry_count = context.retry_number
                     if retry_count < retry_policy.max_retries:
@@ -270,10 +316,10 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                     raise Failure(description=value)
             else:
                 for asset in assets:
-                    yield AssetMaterialization(asset_key=asset.path, description=f"Spark job {job_id} submitted to Dataproc cluster {self.__dataproc__.cluster_name}")
+                    yield AssetMaterialization(asset_key=asset.path, description=f"Spark job {effective_job_id} submitted to Dataproc cluster {self.__dataproc__.cluster_name}")
                 if dataset:
                     yield StarlakeDagsterUtils.get_materialization(context, config, dataset, extra=extra, **kwargs)
 
-                yield Output(value=job_id, output_name=out)
+                yield Output(value=effective_job_id, output_name=out)
 
         return submit_dataproc_job
