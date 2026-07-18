@@ -49,6 +49,40 @@ TASK_ID = PRELOAD_TASK_ID  # reuse the RUN_CONFIG op name from the helpers
 RETRY_OPTIONS = {"retry_delay": "1"}
 
 
+def patch_fargate(monkeypatch, return_codes):
+    """Shared fargate seam (6.9 pattern, reused by the 6.10 test files).
+
+    Patches ``StarlakeFargateHelper.generate_script`` to snapshot what the
+    generated script would actually ship (the helper joins ``self.arguments``
+    LAZILY) and ``execute_shell_script`` for per-attempt exit codes.  Returns
+    a namespace with ``seen_arguments``, ``seen_environments`` and ``calls``.
+    """
+    import types
+
+    import ai.starlake.dagster.aws.starlake_dagster_fargate_job as mod
+    from ai.starlake.aws import StarlakeFargateHelper
+
+    seam = types.SimpleNamespace(seen_arguments=[], seen_environments=[], calls=[])
+
+    def fake_generate_script(self):
+        seam.seen_arguments.append(list(self.arguments))
+        seam.seen_environments.append([dict(entry) for entry in self.environment])
+        fd, path = tempfile.mkstemp(suffix=".sh", prefix="sl_fargate_seam_")
+        os.close(fd)
+        return path
+
+    def fake_execute(shell_script_path, **kwargs):
+        seam.calls.append(shell_script_path)
+        code = return_codes[min(len(seam.calls), len(return_codes)) - 1]
+        return ("out", code)
+
+    monkeypatch.setattr(
+        StarlakeFargateHelper, "generate_script", fake_generate_script
+    )
+    monkeypatch.setattr(mod, "execute_shell_script", fake_execute)
+    return seam
+
+
 def _make_load_node(job):
     return job.sl_load(
         task_id=TASK_ID,
@@ -148,30 +182,8 @@ class TestFargateRetryArguments:
         )
 
     def _patch_fargate(self, monkeypatch, return_codes):
-        import ai.starlake.dagster.aws.starlake_dagster_fargate_job as mod
-        from ai.starlake.aws import StarlakeFargateHelper
-
-        seen_arguments = []
-        calls = []
-
-        def fake_generate_script(self):
-            # the helper joins self.arguments LAZILY — snapshot what the
-            # generated script would actually ship
-            seen_arguments.append(list(self.arguments))
-            fd, path = tempfile.mkstemp(suffix=".sh", prefix="sl_fargate_retry_")
-            os.close(fd)
-            return path
-
-        def fake_execute(shell_script_path, **kwargs):
-            calls.append(shell_script_path)
-            code = return_codes[min(len(calls), len(return_codes)) - 1]
-            return ("out", code)
-
-        monkeypatch.setattr(
-            StarlakeFargateHelper, "generate_script", fake_generate_script
-        )
-        monkeypatch.setattr(mod, "execute_shell_script", fake_execute)
-        return seen_arguments, calls
+        seam = patch_fargate(monkeypatch, return_codes)
+        return seam.seen_arguments, seam.calls
 
     def test_first_attempt_container_command_keeps_verb(self, monkeypatch):
         # issue #111 fargate facet: the helper shares the op's arguments

@@ -129,8 +129,13 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
         )
         def job(context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, **kwargs):
 
+            # per-attempt copy (issue #115): appending to the closure list
+            # would make a RetryPolicy re-execution yield one duplicate
+            # AssetMaterialization per prior attempt (and the list is the
+            # caller's kwargs list, shared across graph rebuilds)
+            attempt_assets: List[AssetKey] = list(assets)
             if dataset:
-                assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset, **kwargs))
+                attempt_assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset, **kwargs))
 
             from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
@@ -217,7 +222,7 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
                 else:
                     raise Failure(description=value)
             else:
-                for asset in assets:
+                for asset in attempt_assets:
                     yield AssetMaterialization(asset_key=asset.path, description=kwargs.get("description", f"Starlake command {command} execution succeeded"))
                 if dataset:
                     yield StarlakeDagsterUtils.get_materialization(context, config, dataset, extra=extra, **kwargs)
