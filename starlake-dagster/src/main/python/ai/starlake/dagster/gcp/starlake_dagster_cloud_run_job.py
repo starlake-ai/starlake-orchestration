@@ -126,15 +126,28 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
             retry_policy=retry_policy,
         )
         def job(context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, **kwargs):
+            # per-attempt copy (issue #115): appending to the closure list
+            # would make a RetryPolicy re-execution yield one duplicate
+            # AssetMaterialization per prior attempt (and the list is the
+            # caller's kwargs list, shared across graph rebuilds)
+            attempt_assets: List[AssetKey] = list(assets)
             if dataset:
-                assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset))
+                attempt_assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset))
+
+            # per-attempt copy (issue #119, same closure class): updating the
+            # captured env dict would leak one run's transform/runtime pairs
+            # into the next run's subprocess environment
+            attempt_env = dict(env)
 
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
-            logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
-            tmp_arguments.append(f"\'{logical_datetime}\'")
+            logical_datetime: str = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
+            # UNQUOTED (issue #113, mirrors Airflow #99/#101): the value sits
+            # INSIDE the double-quoted --args string, so the local shell
+            # never consumes the quotes and gcloud would ship them literally
+            # into the container argv; sl_timestamp_format is space-free
+            tmp_arguments.append(logical_datetime)
             # read WITHOUT mutating (issue #111): `arguments` is the closure
             # list — a RetryPolicy re-execution of this op function would
             # otherwise pop the next element as the command
@@ -142,24 +155,40 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
             command_with_arguments = [command] + tmp_arguments + arguments[1:]
 
             if transform:
-                opts = command_with_arguments[-1].split(",")
-                transform_opts = StarlakeDagsterUtils.get_transform_options(context, config, params).split(',')
-                env.update({
+                # --options may be ABSENT (core sl_transform only appends it
+                # when there ARE options) — locate it instead of assuming the
+                # last argument (issue #114: splitting/rejoining [-1] used to
+                # comma-merge the runtime options into the transform --name)
+                extra_opts = [
+                    opt
+                    for opt in StarlakeDagsterUtils.get_transform_options(context, config, params).split(',')
+                    if opt
+                ]
+                attempt_env.update({
                     key: value
-                    for opt in transform_opts
+                    for opt in extra_opts
                     if "=" in opt  # Only process valid key=value pairs
                     for key, value in [opt.split("=")]
                 })
-                opts.extend(transform_opts)
                 # runtime sl_options carried by the run (sensor RunRequest or manual
                 # launch) — appended last so they override the static ones (starlake
                 # keeps the last occurrence of a duplicate key): precedence
                 # static < 'all' < task-specific.
                 runtime_options = StarlakeDagsterUtils.get_sl_options(context, config, task_id)
                 if runtime_options:
-                    env.update({key: str(value) for key, value in runtime_options.items()})
-                    opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
-                command_with_arguments[-1] = ",".join(opts)
+                    attempt_env.update({key: str(value) for key, value in runtime_options.items()})
+                    extra_opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
+                options_index = None
+                for i, arg in enumerate(command_with_arguments[:-1]):
+                    if arg == "--options":
+                        options_index = i + 1
+                        break
+                if options_index is not None:
+                    command_with_arguments[options_index] = ",".join(
+                        command_with_arguments[options_index].split(",") + extra_opts
+                    )
+                elif extra_opts:
+                    command_with_arguments.extend(["--options", ",".join(extra_opts)])
 
             args = f'^{separator}^' + separator.join(command_with_arguments)
 
@@ -182,7 +211,7 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                         output_logging="STREAM",
                         log=context.log,
     #                cwd=self.sl_root,
-                        env=env,
+                        env=attempt_env,
                         log_shell_command=True,
                     )
 
@@ -221,7 +250,7 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                 else:
                     raise Failure(description=value)
             else:
-                for asset in assets:
+                for asset in attempt_assets:
                     yield AssetMaterialization(asset_key=asset.path, description=kwargs.get("description", f"Starlake command {command} execution succeeded"))
                 if dataset:
                     yield StarlakeDagsterUtils.get_materialization(context, config, dataset, extra=extra, **kwargs)

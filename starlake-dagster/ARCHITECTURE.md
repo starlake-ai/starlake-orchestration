@@ -191,6 +191,8 @@ Base job factory. Unlike Airflow, does NOT override `get_context_var()` (no Dags
 - `_sl_pre_load_poke_loop(context, run_once, is_success, poke, command_label)` — classmethod implementing the shared in-op wall-clock poke loop; `time.monotonic()`/`time.sleep()` are module-attribute calls (test seam)
 - `dummy_op()` — `@op` yielding `Output(value=task_id)` + `AssetMaterialization` per event
 - All variants' op bodies read the captured `arguments` list WITHOUT mutating it (issue #111 — applies to every task type, not just sensor mode): a `RetryPolicy` re-execution re-submits the same command, and the fargate helper — which shares the very same list and joins it lazily — keeps its command verb
+- Same non-mutating principle for the captured `assets` list (issue #115) and the captured subprocess `env` dict on fargate/cloud_run (issue #119): each attempt works on a per-attempt copy, so retries never yield duplicate `AssetMaterialization`s and one run's transform/runtime env pairs never leak into the next
+- The cloud variants (cloud_run, dataproc, fargate) ship `--scheduledDate` for ALL task types and ship it UNQUOTED (issues #113/#114, mirrors Airflow #99/#101 — no consuming shell on any cloud path; the shell variant keeps the quotes); their transform branches locate `--options` instead of assuming it is the last argument (core `sl_transform` omits it when there are no options — the old `[-1]` merge corrupted `--name`), and fargate merges only the transform-derived pairs into the ECS container environment (`List[dict]` format — never the local `os.environ` copy)
 
 #### Pre-load sensor mode (story 6.2, issue #86; extended to the cloud variants by story 6.7, issue #94)
 

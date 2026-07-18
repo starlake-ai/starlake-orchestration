@@ -237,15 +237,22 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
             retry_policy=retry_policy,
         )
         def submit_dataproc_job(context: OpExecutionContext, config: DagsterLogicalDatetimeConfig, **kwargs):
+            # per-attempt copy (issue #115): appending to the closure list
+            # would make a RetryPolicy re-execution yield one duplicate
+            # AssetMaterialization per prior attempt (and the list is the
+            # caller's kwargs list, shared across graph rebuilds)
+            attempt_assets: List[AssetKey] = list(assets)
             if dataset:
-                assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset))
+                attempt_assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset))
 
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
-            from datetime import datetime
             from ai.starlake.common import sl_timestamp_format
-            logical_datetime: datetime = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
-            tmp_arguments.append(f"\'{logical_datetime}\'")
+            logical_datetime: str = StarlakeDagsterUtils.get_logical_datetime(context, config).strftime(sl_timestamp_format)
+            # UNQUOTED (issue #113, mirrors Airflow #99/#101): spark_job.args
+            # reach the Spark job argv directly — no shell ever consumes
+            # quotes on this path
+            tmp_arguments.append(logical_datetime)
             # read WITHOUT mutating (issue #111): `arguments` is the closure
             # list — a RetryPolicy re-execution of this op function would
             # otherwise pop the next element as the command
@@ -253,22 +260,43 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
             command_with_arguments = [command] + tmp_arguments + arguments[1:]
 
             if transform:
-                opts = command_with_arguments[-1].split(",")
-                transform_opts = StarlakeDagsterUtils.get_transform_options(context, config, params).split(',')
-                opts.extend(transform_opts)
+                # --options may be ABSENT (core sl_transform only appends it
+                # when there ARE options) — locate it instead of assuming the
+                # last argument (issue #114: splitting/rejoining [-1] used to
+                # comma-merge the runtime options into the transform --name)
+                extra_opts = [
+                    opt
+                    for opt in StarlakeDagsterUtils.get_transform_options(context, config, params).split(',')
+                    if opt
+                ]
                 # runtime sl_options carried by the run (sensor RunRequest or manual
                 # launch) — appended last so they override the static ones (starlake
                 # keeps the last occurrence of a duplicate key): precedence
                 # static < 'all' < task-specific.
                 runtime_options = StarlakeDagsterUtils.get_sl_options(context, config, task_id)
                 if runtime_options:
-                    opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
-                command_with_arguments[-1] = ",".join(opts)
-                job = job_details.get("job", {})
-                spark_job = job.get("spark_job", {})
-                spark_job["args"] = command_with_arguments
-                job["spark_job"] = spark_job
-                job_details["job"] = job
+                    extra_opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
+                options_index = None
+                for i, arg in enumerate(command_with_arguments[:-1]):
+                    if arg == "--options":
+                        options_index = i + 1
+                        break
+                if options_index is not None:
+                    command_with_arguments[options_index] = ",".join(
+                        command_with_arguments[options_index].split(",") + extra_opts
+                    )
+                elif extra_opts:
+                    command_with_arguments.extend(["--options", ",".join(extra_opts)])
+
+            # ship the scheduledDate-carrying vector for ALL task types
+            # (issue #113): args stayed at the build-time `arguments` outside
+            # the transform branch, so the Spark CLI fell back to its own
+            # current time on every non-transform task
+            job = job_details.get("job", {})
+            spark_job = job.get("spark_job", {})
+            spark_job["args"] = command_with_arguments
+            job["spark_job"] = spark_job
+            job_details["job"] = job
 
             # issue #109 — job ids are unique per project: generate a fresh id
             # per ATTEMPT at execute time (a RetryPolicy retry must not reuse
@@ -358,7 +386,7 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 else:
                     raise Failure(description=value)
             else:
-                for asset in assets:
+                for asset in attempt_assets:
                     yield AssetMaterialization(asset_key=asset.path, description=f"Spark job {effective_job_id} submitted to Dataproc cluster {self.__dataproc__.cluster_name}")
                 if dataset:
                     yield StarlakeDagsterUtils.get_materialization(context, config, dataset, extra=extra, **kwargs)
