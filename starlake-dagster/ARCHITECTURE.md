@@ -190,6 +190,7 @@ Base job factory. Unlike Airflow, does NOT override `get_context_var()` (no Dags
 - `_sl_resolve_pre_load_poke(kwargs)` — classmethod called first by EVERY variant's `sl_job` (shell, cloud_run, dataproc, fargate): pops the four `pre_load_*` sensor kwargs unconditionally (a popped-but-false flag never leaks into an op) and returns `None` (off) or a `PreLoadPoke(poke_interval, timeout, soft_fail)` after a strict NFR11 re-parse (covers direct `sl_job` calls — `bool('false')` would silently enable sensor mode). Replaces the story 6.2 cloud rejection `_reject_pre_load_sensor_kwargs` (story 6.7, issue #94)
 - `_sl_pre_load_poke_loop(context, run_once, is_success, poke, command_label)` — classmethod implementing the shared in-op wall-clock poke loop; `time.monotonic()`/`time.sleep()` are module-attribute calls (test seam)
 - `dummy_op()` — `@op` yielding `Output(value=task_id)` + `AssetMaterialization` per event
+- All variants' op bodies read the captured `arguments` list WITHOUT mutating it (issue #111 — applies to every task type, not just sensor mode): a `RetryPolicy` re-execution re-submits the same command, and the fargate helper — which shares the very same list and joins it lazily — keeps its command verb
 
 #### Pre-load sensor mode (story 6.2, issue #86; extended to the cloud variants by story 6.7, issue #94)
 
