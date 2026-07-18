@@ -208,12 +208,17 @@ class TestFargateTransformBranch:
         }
         assert env_by_name["jdbc_url"] == "jdbc:pg://h?user=x"
 
-        # second run, no runtime options: the container environment must be
-        # rebuilt from the build-time snapshot, not accumulate
+        # the local subprocess env carries the runtime pair too (issue #119)
+        assert seam.seen_subprocess_envs[0]["jdbc_url"] == "jdbc:pg://h?user=x"
+
+        # second run, no runtime options: neither the container environment
+        # (rebuilt from the build-time snapshot) nor the local subprocess env
+        # (per-attempt copy, issue #119) may inherit the previous run's pair
         result2 = _execute(node)
         assert result2.success
         env_names_2 = [entry["name"] for entry in seam.seen_environments[1]]
         assert "jdbc_url" not in env_names_2
+        assert "jdbc_url" not in seam.seen_subprocess_envs[1]
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +280,52 @@ class TestCloudRunTransformBranch:
         options_value = _options_value(shipped)
         assert options_value.startswith("K1=V1,")
         _assert_interval_options(options_value)
+
+    def test_transform_runtime_options_do_not_accumulate_in_subprocess_env(
+        self, monkeypatch
+    ):
+        # issue #119: the closure env dict fed to the gcloud subprocess must
+        # not inherit a previous run's runtime pairs
+        import json
+
+        import ai.starlake.dagster.gcp.starlake_dagster_cloud_run_job as mod
+        from dagster import GraphDefinition
+
+        seen_envs = []
+
+        def fake_execute(shell_command, **kwargs):
+            seen_envs.append(dict(kwargs.get("env") or {}))
+            return ("out", 0)
+
+        monkeypatch.setattr(mod, "execute_shell_command", fake_execute)
+
+        node = self._make_job({}).sl_transform(
+            task_id=PRELOAD_TASK_ID,
+            transform_name=TRANSFORM_NAME,
+        )
+        run_config_with_options = {
+            "ops": {
+                PRELOAD_TASK_ID: {
+                    "config": {
+                        "logical_datetime": "2026-07-18T00:00:00+00:00",
+                        "dry_run": False,
+                        "sl_options": json.dumps(
+                            {"all": {"jdbc_url": "jdbc:pg://h?user=x"}}
+                        ),
+                    }
+                }
+            }
+        }
+        graph = GraphDefinition(
+            name="cloud_run_runtime_env_graph", node_defs=[node]
+        )
+        assert graph.execute_in_process(
+            run_config=run_config_with_options
+        ).success
+        assert seen_envs[0]["jdbc_url"] == "jdbc:pg://h?user=x"
+
+        assert _execute(node).success
+        assert "jdbc_url" not in seen_envs[1]
 
 
 # ---------------------------------------------------------------------------

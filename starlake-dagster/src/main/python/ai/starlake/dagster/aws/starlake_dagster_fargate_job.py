@@ -123,6 +123,11 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
             if dataset:
                 attempt_assets.append(StarlakeDagsterUtils.get_asset(context, config, dataset))
 
+            # per-attempt copy (issue #119, same closure class): updating the
+            # captured env dict would leak one run's transform/runtime pairs
+            # into the next run's subprocess environment
+            attempt_env = dict(env)
+
             tmp_arguments = []
             tmp_arguments.append("--scheduledDate")
             from ai.starlake.common import sl_timestamp_format
@@ -151,7 +156,7 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
                     for opt in StarlakeDagsterUtils.get_transform_options(context, config, params).split(',')
                     if opt
                 ]
-                env.update({
+                attempt_env.update({
                     key: value
                     for opt in extra_opts
                     if "=" in opt  # Only process valid key=value pairs
@@ -163,7 +168,7 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
                 # static < 'all' < task-specific.
                 runtime_options = StarlakeDagsterUtils.get_sl_options(context, config, task_id)
                 if runtime_options:
-                    env.update({key: str(value) for key, value in runtime_options.items()})
+                    attempt_env.update({key: str(value) for key, value in runtime_options.items()})
                     extra_opts.extend([f"{key}={value}" for key, value in runtime_options.items()])
                 options_index = None
                 for i, arg in enumerate(command_with_arguments[:-1]):
@@ -224,7 +229,7 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
                             output_logging="STREAM",
                             log=context.log,
                             cwd=tmp_path,
-                            env=env,
+                            env=attempt_env,
                             log_shell_command=True,
                         )
                 finally:

@@ -55,14 +55,17 @@ def patch_fargate(monkeypatch, return_codes):
     Patches ``StarlakeFargateHelper.generate_script`` to snapshot what the
     generated script would actually ship (the helper joins ``self.arguments``
     LAZILY) and ``execute_shell_script`` for per-attempt exit codes.  Returns
-    a namespace with ``seen_arguments``, ``seen_environments`` and ``calls``.
+    a namespace with ``seen_arguments``, ``seen_environments``,
+    ``seen_subprocess_envs`` and ``calls``.
     """
     import types
 
     import ai.starlake.dagster.aws.starlake_dagster_fargate_job as mod
     from ai.starlake.aws import StarlakeFargateHelper
 
-    seam = types.SimpleNamespace(seen_arguments=[], seen_environments=[], calls=[])
+    seam = types.SimpleNamespace(
+        seen_arguments=[], seen_environments=[], seen_subprocess_envs=[], calls=[]
+    )
 
     def fake_generate_script(self):
         seam.seen_arguments.append(list(self.arguments))
@@ -73,6 +76,7 @@ def patch_fargate(monkeypatch, return_codes):
 
     def fake_execute(shell_script_path, **kwargs):
         seam.calls.append(shell_script_path)
+        seam.seen_subprocess_envs.append(dict(kwargs.get("env") or {}))
         code = return_codes[min(len(seam.calls), len(return_codes)) - 1]
         return ("out", code)
 
