@@ -74,7 +74,25 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         self.project_id = __class__.get_context_var(var_name='cloud_run_project_id', default_value=os.getenv("GCP_PROJECT"), options=self.options) if not project_id else project_id
         self.cloud_run_job_name = __class__.get_context_var(var_name='cloud_run_job_name', options=self.options) if not cloud_run_job_name else cloud_run_job_name
         self.cloud_run_job_region = __class__.get_context_var('cloud_run_job_region', default_value=os.getenv("GCP_REGION"), options=self.options) if not cloud_run_job_region else cloud_run_job_region
-        self.cloud_run_service_account = __class__.get_context_var(var_name='cloud_run_service_account', default_value="", options=self.options) if not cloud_run_service_account else cloud_run_service_account
+        cloud_run_service_account = __class__.get_context_var(var_name='cloud_run_service_account', default_value="", options=self.options) if not cloud_run_service_account else cloud_run_service_account
+        # issue #105 — a single email string only: a sequence would render its
+        # Python repr into the gcloud fragment, and a comma/space-joined chain
+        # would reach the provider as one malformed principal; a delegation
+        # chain belongs in the per-call impersonation_chain kwarg
+        # (python-operator paths only)
+        if not isinstance(cloud_run_service_account, str) or any(c in cloud_run_service_account.strip() for c in ', '):
+            raise ValueError(
+                f"[{__class__.sl_orchestrator() or 'unknown'}] cloud_run: invalid value "
+                f"'{cloud_run_service_account}' for option 'cloud_run_service_account' — expected a single "
+                f"service-account email string (pass a delegation chain via the "
+                f"impersonation_chain kwarg on the python-operator paths)"
+            )
+        self.cloud_run_service_account = cloud_run_service_account.strip()
+        # issue #104 — two impersonation consumers, two formats: the gcloud
+        # command strings interpolate the CLI fragment below, while every
+        # provider `impersonation_chain=` site must receive the bare
+        # service-account email (`self.cloud_run_service_account or None`) —
+        # the Google auth layer cannot use the fragment
         if self.cloud_run_service_account:
             self.impersonate_service_account = f"--impersonate-service-account {self.cloud_run_service_account}"
         else:
@@ -129,6 +147,17 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
         # would reject the kwarg
         scheduled_date = kwargs.pop('scheduled_date', None)
+        # issue #105 — an explicit impersonation_chain kwarg (bare email or a
+        # delegation chain, both valid for the Google provider) is honored on
+        # the python-operator paths, resolved ONCE so the async operator and
+        # its completion sensor see the same value (it used to collide with
+        # the explicit ctor kwarg → TypeError at DAG parse). The gcloud paths
+        # keep rejecting it: a chain has no gcloud-fragment equivalent, and a
+        # silent pop would swallow user intent.
+        if not self.use_gcloud:
+            impersonation_chain = kwargs.pop('impersonation_chain', self.cloud_run_service_account or None)
+        else:
+            impersonation_chain = self.cloud_run_service_account or None
         if task_type is not None and (task_type == TaskType.LOAD or task_type == TaskType.TRANSFORM):
             arguments = [] if not arguments else arguments
             params: dict = kwargs.get('params', dict())
@@ -191,7 +220,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                 project_id=self.project_id,
                 job_name=self.cloud_run_job_name,
                 region=self.cloud_run_job_region,
-                impersonation_chain=self.impersonate_service_account,
+                impersonation_chain=impersonation_chain,
             )
             common.update(engine_kwargs)
             container_overrides: Dict[str, Any] = {
@@ -320,7 +349,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         region=self.cloud_run_job_region,
                         overrides=job_overrides,
                         mode=CloudRunMode.ASYNC,
-                        impersonation_chain=self.impersonate_service_account,
+                        impersonation_chain=impersonation_chain,
                         preload=preload,
                         retry_on_failure=self.retry_on_failure,
                         **kwargs
@@ -331,7 +360,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         dataset=dataset,
                         source=self.source,
                         source_task_id=job_task.task_id,
-                        impersonation_chain=self.impersonate_service_account,
+                        impersonation_chain=impersonation_chain,
                         preload=preload,
                         **kwargs
                     )
@@ -385,7 +414,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     region=self.cloud_run_job_region,
                     overrides=job_overrides,
                     mode=CloudRunMode.SYNC,
-                    impersonation_chain=self.impersonate_service_account,
+                    impersonation_chain=impersonation_chain,
                     preload=preload,
                     retry_on_failure=self.retry_on_failure,
                     **kwargs
@@ -407,6 +436,10 @@ class GCloudRunJobCompletionSensor(StarlakeDatasetMixin, BashSensor):
                  impersonate_service_account: str=None, 
                  **kwargs
         ) -> None:
+        # issue #105 — a None param must not interpolate the literal string
+        # "None" into the gcloud commands (only direct construction hits it —
+        # the job always passes the fragment or "")
+        impersonate_service_account = impersonate_service_account or ""
         if retry_on_failure:
             kwargs.update({'retry_exit_code': 2})
             bash_command = (
@@ -414,7 +447,11 @@ class GCloudRunJobCompletionSensor(StarlakeDatasetMixin, BashSensor):
                 f"{{{{ task_instance.xcom_pull(key='return_value', task_ids='{source_task_id}') }}}} "
                 f"--region {cloud_run_job_region} "
                 f"--project {project_id} "
-                "--format='value(status.completionTime, status.cancelledCounts)' "
+                # issue #105 — the completion probe needs the impersonation
+                # fragment too: without it, credentials whose only Cloud Run
+                # grant is impersonation get a 403 on every poke and the
+                # sensor never completes
+                f"--format='value(status.completionTime, status.cancelledCounts)' {impersonate_service_account}"
                 "| sed 's/[[:blank:]]//g'`; "
                 "if [ -z \"$check_completion\" ]; then exit 2; else "
                 "check_status=`gcloud beta run jobs executions describe "

@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.6.7")
+version = os.environ.get("PROJECT_VERSION", "0.6.8")
 
 setup(name='starlake-airflow',
       version=version,
