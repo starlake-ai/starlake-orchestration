@@ -128,14 +128,25 @@ class TestImpersonationSourcePin:
         assert "impersonation_chain=self.impersonate_service_account" not in self._source()
 
     def test_bare_email_sites_present_at_expected_multiplicity(self):
-        # sync operator, async operator + completion sensor, and the 6.5
-        # preload-waiting `common` dict (which feeds both the deferrable
-        # operator and the sensor-flavor closure)
+        # four sl_job sites — sync operator, async operator + completion
+        # sensor, and the 6.5 preload-waiting `common` dict (which feeds both
+        # the deferrable operator and the sensor-flavor closure) — all consume
+        # the once-per-call resolution (issue #105: explicit kwarg wins over
+        # the derived bare email); the fifth match is CloudRunJobOperator's
+        # ctor pass-through to the provider operator
         source = self._source()
-        assert source.count("impersonation_chain=self.cloud_run_service_account or None") == 4
+        assert source.count("impersonation_chain=impersonation_chain,") == 5
+        assert "kwargs.pop('impersonation_chain', self.cloud_run_service_account or None)" in source
 
     def test_gcloud_fragment_construction_still_present(self):
         assert 'f"--impersonate-service-account {self.cloud_run_service_account}"' in self._source()
+
+    def test_completion_probes_all_carry_the_fragment(self):
+        """Issue #105 — the retry-flavor sensor's completionTime probe used to
+        omit the fragment. All three `executions describe` probe sites in
+        GCloudRunJobCompletionSensor now interpolate it (fragment placeholder
+        right after the --format value, before the sed pipe)."""
+        assert self._source().count("cancelledCounts)' {impersonate_service_account}") == 3
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +209,86 @@ class TestImpersonationChainBareEmail:
             task = job.sl_load(task_id="load_customers", domain="starbake", table="customers")
         assert task.impersonation_chain is None
 
+    def test_explicit_chain_kwarg_wins_on_sync_api_path(self):
+        """Issue #105 — an explicit impersonation_chain kwarg (here a
+        delegation chain, valid for the provider) used to raise TypeError
+        ('got multiple values') at DAG parse; it now wins over the derived
+        bare email."""
+        chain = ["sa1@p.iam.gserviceaccount.com", "sa2@p.iam.gserviceaccount.com"]
+        job = _make_job({"use_gcloud": "false", "cloud_run_async": "false"})
+        with _dag():
+            task = job.sl_load(
+                task_id="load_customers", domain="starbake", table="customers",
+                impersonation_chain=chain,
+            )
+        assert task.impersonation_chain == chain
+
+    def test_explicit_chain_kwarg_reaches_async_operator_and_sensor(self):
+        chain = ["sa1@p.iam.gserviceaccount.com", "sa2@p.iam.gserviceaccount.com"]
+        job = _make_job({"use_gcloud": "false", "cloud_run_async": "true"})
+        with _dag() as dag:
+            job.sl_load(
+                task_id="load_customers", domain="starbake", table="customers",
+                impersonation_chain=chain,
+            )
+        assert dag.get_task("load_customers_wait.load_customers").impersonation_chain == chain
+        assert dag.get_task("load_customers_wait.load_customers_check_completion").impersonation_chain == chain
+
+    def test_explicit_chain_kwarg_reaches_preload_deferrable(self):
+        chain = ["sa1@p.iam.gserviceaccount.com", "sa2@p.iam.gserviceaccount.com"]
+        job = _make_job(dict(SENSOR_OPTIONS, use_gcloud="false"))
+        with _dag():
+            task = job.sl_pre_load(domain="starbake", tables={"customers"}, impersonation_chain=chain)
+        assert task.impersonation_chain == chain
+
+    def test_explicit_none_kwarg_opts_out_of_impersonation(self):
+        """Explicit ``impersonation_chain=None`` is an intentional opt-out
+        (the provider's own "no impersonation" value) — it wins over the
+        configured service account, like any other explicit kwarg."""
+        job = _make_job({"use_gcloud": "false", "cloud_run_async": "false"})
+        with _dag():
+            task = job.sl_load(
+                task_id="load_customers", domain="starbake", table="customers",
+                impersonation_chain=None,
+            )
+        assert task.impersonation_chain is None
+
+    def test_explicit_chain_kwarg_reaches_preload_sensor_closure(self, monkeypatch):
+        from airflow.providers.google.cloud.operators.cloud_run import CloudRunExecuteJobOperator
+        chain = ["sa1@p.iam.gserviceaccount.com", "sa2@p.iam.gserviceaccount.com"]
+        job = _make_job(dict(SENSOR_OPTIONS, use_gcloud="false", pre_load_deferrable="false"))
+        with _dag():
+            sensor = job.sl_pre_load(domain="starbake", tables={"customers"}, impersonation_chain=chain)
+        seen = {}
+
+        def capture(self, context):
+            seen["chain"] = self.impersonation_chain
+        monkeypatch.setattr(CloudRunExecuteJobOperator, "execute", capture)
+        sensor._submit_and_wait({}, {"container_overrides": [{"args": []}]})
+        assert seen["chain"] == chain
+
+    @pytest.mark.parametrize("cloud_run_async", ["false", "true"])
+    def test_explicit_chain_kwarg_still_rejected_on_gcloud_paths(self, cloud_run_async):
+        """A chain has no gcloud-fragment equivalent — the kwarg must keep
+        failing loudly (the operator ctor rejects it by name) rather than
+        being silently swallowed, on every gcloud branch."""
+        job = _make_job({"use_gcloud": "true", "cloud_run_async": cloud_run_async})
+        with pytest.raises(Exception, match="impersonation_chain"):
+            with _dag():
+                job.sl_load(
+                    task_id="load_customers", domain="starbake", table="customers",
+                    impersonation_chain=["sa1@p.iam.gserviceaccount.com"],
+                )
+
+    def test_explicit_chain_kwarg_still_rejected_on_gcloud_preload_sensor(self):
+        job = _make_job(dict(SENSOR_OPTIONS, use_gcloud="true"))
+        with pytest.raises(Exception, match="impersonation_chain"):
+            with _dag():
+                job.sl_pre_load(
+                    domain="starbake", tables={"customers"},
+                    impersonation_chain=["sa1@p.iam.gserviceaccount.com"],
+                )
+
     def test_no_service_account_async_and_deferrable_are_none(self):
         job = _make_job({"use_gcloud": "false", "cloud_run_async": "true"}, service_account=None)
         with _dag() as dag:
@@ -231,11 +322,21 @@ class TestGcloudFragmentUnchanged:
         assert FLAG in dag.get_task("load_customers_wait.load_customers_check_completion").bash_command
         assert FLAG in dag.get_task("load_customers_wait.load_customers_get_completion_status").bash_command
 
-    def test_async_retry_on_failure_sensor_keeps_flag(self):
+    def test_async_retry_on_failure_sensor_keeps_flag_on_both_probes(self):
+        """Issue #105 — the retry flavor runs TWO `executions describe` probes
+        (completionTime then failedCount); the first used to omit the fragment,
+        so credentials whose only Cloud Run grant is impersonation got a 403 on
+        every poke. Per-probe pin: the flag appears exactly twice."""
         job = _make_job({"use_gcloud": "true", "cloud_run_async": "true", "retry_on_failure": "true"})
         with _dag() as dag:
             job.sl_load(task_id="load_customers", domain="starbake", table="customers")
-        assert FLAG in dag.get_task("load_customers_wait.load_customers_check_completion").bash_command
+        assert dag.get_task("load_customers_wait.load_customers_check_completion").bash_command.count(FLAG) == 2
+
+    def test_async_non_retry_sensor_single_probe_keeps_flag(self):
+        job = _make_job({"use_gcloud": "true", "cloud_run_async": "true"})
+        with _dag() as dag:
+            job.sl_load(task_id="load_customers", domain="starbake", table="customers")
+        assert dag.get_task("load_customers_wait.load_customers_check_completion").bash_command.count(FLAG) == 1
 
     def test_preload_waiting_gcloud_sensor_keeps_flag(self):
         job = _make_job(dict(SENSOR_OPTIONS, use_gcloud="true"))
@@ -261,3 +362,46 @@ class TestGcloudFragmentUnchanged:
         with _dag():
             task = job.sl_pre_load(domain="starbake", tables={"customers"})
         assert "--impersonate-service-account" not in task.bash_command
+
+
+# ---------------------------------------------------------------------------
+# 4. Provider-guarded — input hygiene on the service-account option (#105)
+# ---------------------------------------------------------------------------
+
+@google_only
+class TestServiceAccountHygiene:
+
+    def test_padded_service_account_is_stripped(self):
+        job = _make_job(service_account=f"  {SA}  ")
+        assert job.cloud_run_service_account == SA
+        assert job.impersonate_service_account == FLAG
+
+    def test_whitespace_only_service_account_means_no_impersonation(self):
+        job = _make_job({"use_gcloud": "false", "cloud_run_async": "false"}, service_account="   ")
+        assert job.cloud_run_service_account == ""
+        assert job.impersonate_service_account == ""
+        with _dag():
+            task = job.sl_load(task_id="load_customers", domain="starbake", table="customers")
+        assert task.impersonation_chain is None
+
+    def test_sequence_service_account_rejected_at_construction(self):
+        """A sequence would render its Python repr into the gcloud fragment —
+        rejected up front; delegation chains go through the per-call
+        impersonation_chain kwarg (python-operator paths)."""
+        with pytest.raises(ValueError, match="cloud_run_service_account"):
+            _make_job(service_account=["sa1@p.iam.gserviceaccount.com", "sa2@p.iam.gserviceaccount.com"])
+
+    def test_direct_sensor_construction_without_param_has_no_literal_none(self):
+        from ai.starlake.airflow.gcp.starlake_airflow_cloud_run_job import GCloudRunJobCompletionSensor
+        for retry_on_failure in (False, True):
+            with _dag():
+                sensor = GCloudRunJobCompletionSensor(
+                    task_id=f"probe_{retry_on_failure}",
+                    dataset=None,
+                    source=None,
+                    project_id="test-project",
+                    cloud_run_job_region="europe-west1",
+                    source_task_id="job",
+                    retry_on_failure=retry_on_failure,
+                )
+            assert "None" not in sensor.bash_command, retry_on_failure
