@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import copy
 import sys
 
 import uuid
@@ -288,13 +289,27 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             # re-submitted job_id with AlreadyExists — so the frozen parse-time
             # job_id above must be made unique PER submission or the wait can
             # never observe files that arrive after the first (empty) poke.
+            # Engine kwargs (explicit DataprocSubmitJobOperator params such as
+            # gcp_conn_id or impersonation_chain) are split off: they belong on
+            # the dataproc submission, not on the sensor, whose
+            # BaseSensorOperator ctor would reject them at DAG parse.
+            engine_kwargs = StarlakeAirflowJob._sl_pop_engine_kwargs(kwargs, DataprocSubmitJobOperator)
+            engine_kwargs.pop('deferrable', None)
+            engine_kwargs.pop('job', None)
+            engine_kwargs.pop('asynchronous', None)
+            common = dict(
+                project_id=self.cluster_config.project_id,
+                region=self.cluster_config.region,
+            )
+            common.update(engine_kwargs)
             if pre_load_wait.mode == 'deferrable':
                 # a single deferrable submit defers to the triggerer and raises
                 # on a failed job; retries/retry_delay re-submit preload (retry
-                # = poke). The retries mapping IS the poke window. `job` is a
-                # template field, so a Jinja job_id keyed on the run + attempt
-                # renders a fresh id on every retry (re-rendered each try).
-                job["reference"]["job_id"] = f"{task_id}-{{{{ ts_nodash }}}}-{{{{ ti.try_number }}}}"
+                # = poke). The retries mapping IS the poke window. The unique
+                # per-attempt job_id is minted at EXECUTE time by
+                # DataprocJobOperator (execute re-runs on every retry) — not by
+                # a Jinja template, which would break on Airflow 3 runs without
+                # a logical_date and collide on a deleted-and-retriggered run.
                 kwargs.update({
                     'retries': pre_load_wait.retries,
                     'retry_delay': pre_load_wait.retry_delay,
@@ -303,33 +318,30 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
                     task_id=task_id,
                     dataset=dataset,
                     source=source,
-                    project_id=self.cluster_config.project_id,
-                    region=self.cluster_config.region,
                     job=job,
                     deferrable=True,
                     preload=True,
                     pre_load_wait=pre_load_wait,
+                    **common,
                     **kwargs
                 )
             # sensor-flavor fallback: one synchronous dataproc submit per poke.
             # DataprocSubmitJobOperator RAISES on a failed job (no files) — the
             # sensor's poke catches it and pokes again. A retried sensor
-            # restarts the whole window, so retries default to 0. The ad-hoc
-            # poke operator is NOT a real task instance, so its `job` template is
-            # never rendered — mint a fresh uuid job_id per poke directly.
-            import copy
-            project_id = self.cluster_config.project_id
-            region = self.cluster_config.region
-            def _submit_and_wait(context, _job=job, _project_id=project_id, _region=region):
-                poke_job = copy.deepcopy(_job)
+            # restarts the whole window, so retries default to 0. The `job`
+            # payload is rendered by the sensor (template field) and handed to
+            # the closure — the ad-hoc poke operator is NOT a real task
+            # instance, so it can render neither the payload nor a job_id
+            # template: mint a fresh uuid job_id per poke directly.
+            def _submit_and_wait(context, payload, _common=common):
+                poke_job = copy.deepcopy(payload)
                 poke_job.setdefault("reference", {})["job_id"] = task_id + "_" + str(uuid.uuid4())[:8]
                 run_op = DataprocSubmitJobOperator(
                     task_id=f"{task_id}_poke",
-                    project_id=_project_id,
-                    region=_region,
                     job=poke_job,
                     asynchronous=False,
                     do_xcom_push=False,
+                    **_common
                 )
                 run_op.execute(context)
                 return True
@@ -339,6 +351,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
                 dataset=dataset,
                 source=source,
                 submit_and_wait=_submit_and_wait,
+                payload=job,
                 poke_interval=pre_load_wait.poke_interval,
                 timeout=pre_load_wait.timeout,
                 soft_fail=pre_load_wait.soft_fail,
@@ -451,10 +464,32 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
     def execute(self, context):
         # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer,
         # verdict applied on resume in execute_complete. Bypass the xcom
-        # bookkeeping below (its except-block would catch the TaskDeferred
-        # control-flow exception).
+        # bookkeeping below (TaskDeferred is a BaseException, so the except
+        # blocks here cannot catch the defer control flow).
         if self.preload and self.pre_load_wait is not None:
-            return super().execute(context)
+            # mint a unique dataproc job_id per ATTEMPT: Dataproc rejects a
+            # re-submitted job_id (AlreadyExists) and execute re-runs on every
+            # retry (= poke). Minting at execute time is Airflow-major-proof —
+            # a Jinja job_id keyed on ts_nodash breaks on Airflow 3 runs
+            # without a logical_date (StrictUndefined render error) and
+            # collides when a run is deleted and re-triggered for the same
+            # logical date (try_number restarts).
+            # dataproc job ids allow only [a-zA-Z0-9_-] (self.task_id may carry
+            # a dotted TaskGroup prefix) and cap at 100 chars
+            import re
+            safe_task_id = re.sub(r'[^a-zA-Z0-9_-]', '_', self.task_id)[:90]
+            job = copy.deepcopy(self.job)
+            job.setdefault("reference", {})["job_id"] = f"{safe_task_id}_{str(uuid.uuid4())[:8]}"
+            self.job = job
+            # a SUBMISSION-phase failure routes through the same waiting
+            # verdict as the resume phase, so soft_fail is honored whichever
+            # phase the terminal attempt fails in.
+            try:
+                return super().execute(context)
+            except Exception as e:
+                return StarlakeAirflowJob._sl_deferrable_wait_failure(
+                    context, self.pre_load_wait, self.task_id, e
+                )
         try:
             job_id = super().execute(context)
             if self.do_xcom_push:
@@ -478,13 +513,7 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
         try:
             super().execute_complete(context, event)
         except Exception as e:
-            ti = context["ti"]
-            last = StarlakeAirflowJob._sl_is_last_attempt(ti.try_number, ti.max_tries)
-            return StarlakeAirflowJob._sl_deferrable_pre_load_verdict(
-                False,
-                last,
-                self.pre_load_wait.soft_fail,
-                f"Preload for task {self.task_id} did not succeed on attempt {ti.try_number} "
-                f"(no files yet, or a submission error): {e}",
+            return StarlakeAirflowJob._sl_deferrable_wait_failure(
+                context, self.pre_load_wait, self.task_id, e
             )
         return True

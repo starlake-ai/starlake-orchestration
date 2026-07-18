@@ -180,7 +180,20 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     mode='reschedule',
                     **kwargs
                 )
-            # python path
+            # python path. Engine kwargs (explicit CloudRunExecuteJobOperator
+            # params such as gcp_conn_id) are split off: they belong on the
+            # Cloud Run submission, not on the sensor, whose BaseSensorOperator
+            # ctor would reject them at DAG parse.
+            engine_kwargs = self.__class__._sl_pop_engine_kwargs(kwargs, CloudRunExecuteJobOperator)
+            engine_kwargs.pop('deferrable', None)
+            engine_kwargs.pop('overrides', None)
+            common = dict(
+                project_id=self.project_id,
+                job_name=self.cloud_run_job_name,
+                region=self.cloud_run_job_region,
+                impersonation_chain=self.impersonate_service_account,
+            )
+            common.update(engine_kwargs)
             container_overrides: Dict[str, Any] = {
                 "env": [
                     {"name": key, "value": value} for key, value in self.sl_env_vars.items()
@@ -200,33 +213,26 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     task_id=task_id,
                     dataset=dataset,
                     source=self.source,
-                    project_id=self.project_id,
-                    job_name=self.cloud_run_job_name,
-                    region=self.cloud_run_job_region,
                     overrides=job_overrides,
                     mode=CloudRunMode.SYNC,
-                    impersonation_chain=self.impersonate_service_account,
                     deferrable=True,
                     preload=True,
                     pre_load_wait=pre_load_wait,
+                    **common,
                     **kwargs
                 )
             # python sensor-flavor: one execution submitted + awaited per poke.
             # A bare CloudRunExecuteJobOperator RAISES on a failed execution (no
-            # files) — the sensor's poke catches it and pokes again.
-            project_id = self.project_id
-            region = self.cloud_run_job_region
-            job_name = self.cloud_run_job_name
-            impersonation_chain = self.impersonate_service_account
-            def _submit_and_wait(context, _overrides=job_overrides):
+            # files) — the sensor's poke catches it and pokes again. The
+            # overrides payload is rendered by the sensor (template field) and
+            # handed to the closure — the ad-hoc operator below is never a live
+            # task instance, so it cannot render Jinja itself.
+            def _submit_and_wait(context, payload, _common=common):
                 run_op = CloudRunExecuteJobOperator(
                     task_id=f"{task_id}_poke",
-                    project_id=project_id,
-                    region=region,
-                    job_name=job_name,
-                    overrides=_overrides,
-                    impersonation_chain=impersonation_chain,
+                    overrides=payload,
                     do_xcom_push=False,
+                    **_common
                 )
                 run_op.execute(context)
                 return True
@@ -237,6 +243,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                 dataset=dataset,
                 source=self.source,
                 submit_and_wait=_submit_and_wait,
+                payload=job_overrides,
                 poke_interval=pre_load_wait.poke_interval,
                 timeout=pre_load_wait.timeout,
                 soft_fail=pre_load_wait.soft_fail,
@@ -473,10 +480,18 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer via
         # the native CloudRunExecuteJobOperator (self.deferrable=True), the
         # verdict is applied on resume in execute_complete. Bypass both the ASYNC
-        # custom-hook path and the SYNC swallow (whose except-block would catch
-        # the TaskDeferred control-flow exception).
+        # custom-hook path and the SYNC swallow. TaskDeferred is a BaseException,
+        # so the except below cannot catch the defer control flow. A SUBMISSION-
+        # phase failure (cloud API error before the defer) routes through the
+        # same waiting verdict as the resume phase, so soft_fail is honored
+        # whichever phase the terminal attempt fails in.
         if self.preload and self.pre_load_wait is not None:
-            return super(CloudRunJobOperator, self).execute(context)
+            try:
+                return super(CloudRunJobOperator, self).execute(context)
+            except Exception as e:
+                return StarlakeAirflowJob._sl_deferrable_wait_failure(
+                    context, self.pre_load_wait, self.task_id, e
+                )
         if self.mode == CloudRunMode.ASYNC:
             hook: CloudRunHook = CloudRunHook(
                 gcp_conn_id=self.gcp_conn_id,
@@ -528,14 +543,8 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         try:
             super().execute_complete(context, event)
         except Exception as e:
-            ti = context["ti"]
-            last = StarlakeAirflowJob._sl_is_last_attempt(ti.try_number, ti.max_tries)
-            return StarlakeAirflowJob._sl_deferrable_pre_load_verdict(
-                False,
-                last,
-                self.pre_load_wait.soft_fail,
-                f"Preload for task {self.task_id} did not succeed on attempt {ti.try_number} "
-                f"(no files yet, or a submission error): {e}",
+            return StarlakeAirflowJob._sl_deferrable_wait_failure(
+                context, self.pre_load_wait, self.task_id, e
             )
         return True
 

@@ -730,18 +730,33 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         ``None`` when the engine has no deferrable operator (e.g. the cloud_run
         gcloud/bash path) to force the sensor-flavor.
         """
-        pre_load_sensor = bool(kwargs.pop('pre_load_sensor', False))
-        poke_interval = int(kwargs.pop('pre_load_poke_interval', 300))
-        timeout = int(kwargs.pop('pre_load_timeout', 3600))
-        soft_fail = bool(kwargs.pop('pre_load_sensor_soft_fail', False))
+        # pop the four kwargs FIRST (even an invalid value must not leak into a
+        # provider operator ctor), then parse strictly. Core sl_pre_load already
+        # validates the pipeline path; the strict re-parse here covers direct
+        # sl_job/submit_starlake_job calls with the same NFR11 error shape
+        # (bool('false') would otherwise silently turn sensor mode ON, and a
+        # zero/negative interval would hot-loop the sensor flavor).
+        raw_sensor = kwargs.pop('pre_load_sensor', False)
+        raw_poke_interval = kwargs.pop('pre_load_poke_interval', 300)
+        raw_timeout = kwargs.pop('pre_load_timeout', 3600)
+        raw_soft_fail = kwargs.pop('pre_load_sensor_soft_fail', False)
         # pre_load_deferrable is a cloud-Airflow-only option core knows nothing
         # about — pop it UNCONDITIONALLY (even when sensor mode is off) so it can
         # never leak into a provider operator constructor as an unexpected kwarg.
         # A per-call kwarg wins over the option (consistent with the four sensor
         # kwargs, which core resolves kwarg > option).
         deferrable_kwarg = kwargs.pop('pre_load_deferrable', None)
+        pre_load_sensor = cls._sl_parse_strict_bool('pre_load_sensor', raw_sensor)
         if not pre_load_sensor:
             return None
+        poke_interval = cls._sl_parse_strict_positive_int('pre_load_poke_interval', raw_poke_interval)
+        timeout = cls._sl_parse_strict_positive_int('pre_load_timeout', raw_timeout)
+        soft_fail = cls._sl_parse_strict_bool('pre_load_sensor_soft_fail', raw_soft_fail)
+        if timeout < poke_interval:
+            raise cls._sl_pre_load_option_error(
+                'pre_load_timeout', raw_timeout,
+                f"an integer number of seconds >= pre_load_poke_interval ({poke_interval})",
+            )
         deferrable_enabled = cls._sl_parse_strict_bool(
             'pre_load_deferrable',
             deferrable_kwarg if deferrable_kwarg is not None
@@ -796,6 +811,62 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         if is_last_attempt and soft_fail:
             raise AirflowSkipException(message)
         raise AirflowException(message)
+
+    @classmethod
+    def _sl_deferrable_wait_failure(cls, context, pre_load_wait: 'PreLoadWait', task_id: str, error: BaseException) -> bool:
+        """Single failure verdict for a deferrable pre-load waiting attempt,
+        shared by BOTH phases of the three cloud operators: the submission
+        phase (``execute`` — cloud API error before the defer) and the resume
+        phase (``execute_complete`` — the provider raises on a failed run).
+
+        Routing the submission phase through the same verdict keeps
+        ``pre_load_sensor_soft_fail`` honored whichever phase the terminal
+        attempt fails in (previously a terminal submission error ended the
+        task FAILED even with soft_fail=true). Residual gap (documented): a
+        deferral-trigger timeout fails the task without re-entering operator
+        code, so it cannot map to a skip.
+        """
+        ti = context["ti"]
+        last = cls._sl_is_last_attempt(ti.try_number, ti.max_tries)
+        return cls._sl_deferrable_pre_load_verdict(
+            False,
+            last,
+            pre_load_wait.soft_fail,
+            f"Preload for task {task_id} did not succeed on attempt {ti.try_number} "
+            f"(no files yet, or a submission error): {error}",
+        )
+
+    @classmethod
+    def _sl_pop_engine_kwargs(cls, kwargs: dict, operator_cls) -> dict:
+        """Pop and return the kwargs explicitly declared by
+        ``operator_cls.__init__`` (engine kwargs, e.g. ``gcp_conn_id`` or
+        ``capacity_provider_strategy``).
+
+        In waiting mode the real task is a sensor whose ``BaseSensorOperator``
+        ctor would reject engine kwargs with a TypeError at DAG parse; they
+        belong on the per-poke submission operator built inside the closure
+        (and on the deferrable operator, where they also pre-empt a duplicate
+        keyword against the engine's own defaults). Provider ctors forward
+        BaseOperator kwargs via ``**kwargs`` so their explicitly-declared
+        parameters are exactly the engine surface. Provider-free and
+        never-raising like ``_sl_operator_supports_deferrable``.
+        """
+        import inspect
+        if operator_cls is None:
+            return {}
+        try:
+            params = inspect.signature(operator_cls.__init__).parameters
+        except (TypeError, ValueError):
+            return {}
+        engine_kwargs = {}
+        for name, param in params.items():
+            if name in ('self', 'task_id'):
+                continue
+            if param.kind not in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
+                continue
+            if name in kwargs:
+                engine_kwargs[name] = kwargs.pop(name)
+        return engine_kwargs
 
     @classmethod
     def _sl_xcom_wrapped_command(cls, command: str, preload: bool) -> str:
@@ -1193,6 +1264,15 @@ class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
     accepted against the 300 s default interval. ``submit_and_wait`` is a
     closure so this sensor stays provider-free and unit-testable; the gcp/aws
     modules supply the provider-specific submission.
+
+    ``payload`` is the engine submission payload (ECS/Cloud Run overrides,
+    the Dataproc job dict). On the real provider operators it is a template
+    field, rendered per attempt — but the ad-hoc per-poke operator built
+    inside the closure is never a live task instance, so any Jinja in it
+    (e.g. an ack-strategy ``{{ds}}`` file path) would reach the container as
+    a literal. The sensor IS a live task instance: ``payload`` is declared a
+    template field here, rendered fresh on every poke, and handed to the
+    closure as its second argument.
     """
     def __init__(
         self,
@@ -1201,6 +1281,7 @@ class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
         dataset: Optional[Union[str, StarlakeDataset]],
         source: Optional[str],
         submit_and_wait,
+        payload=None,
         **kwargs
     ) -> None:
         kwargs.setdefault('mode', 'reschedule')
@@ -1211,10 +1292,12 @@ class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
             **kwargs
         )
         self._submit_and_wait = submit_and_wait
+        self.sl_payload = payload
+        self.template_fields = tuple(getattr(self, "template_fields", ()) or ()) + ("sl_payload",)
 
     def poke(self, context) -> Optional[PokeReturnValue]:
         try:
-            succeeded = bool(self._submit_and_wait(context))
+            succeeded = bool(self._submit_and_wait(context, self.sl_payload))
         except Exception as e:
             # A failed submission (no files yet, or a transient error) pokes
             # again — the wall-clock timeout/soft_fail window is the terminal

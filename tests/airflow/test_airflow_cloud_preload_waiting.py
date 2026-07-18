@@ -129,8 +129,17 @@ class TestDeferrableCapabilityDetection:
 
     def test_unintrospectable_never_raises(self):
         from ai.starlake.airflow import StarlakeAirflowJob
-        # a builtin whose __init__ signature cannot be introspected → False
+        # inspect.signature(object.__init__) SUCCEEDS in CPython (the generic
+        # (*args, **kwargs) wrapper), so `object` only exercises the normal
+        # no-deferrable-param path...
         assert StarlakeAirflowJob._sl_operator_supports_deferrable(object) is False
+        # ...the except guard needs a signature lookup that genuinely raises:
+        # a non-Signature __signature__ makes inspect.signature raise TypeError
+        def _bad_init(self):
+            pass
+        _bad_init.__signature__ = "not a signature"
+        Unintrospectable = type("Unintrospectable", (), {"__init__": _bad_init})
+        assert StarlakeAirflowJob._sl_operator_supports_deferrable(Unintrospectable) is False
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +293,98 @@ class TestResolveCloudPreLoadWait:
         assert wait is None
         assert kwargs == {"pool": "default_pool"}
 
+    # -- strict parsing on direct sl_job calls (core validates the pipeline
+    # -- path; the resolver must not silently coerce boundary values)
+
+    def test_string_false_keeps_sensor_off(self):
+        """bool('false') is True — the resolver must strict-parse, not truthy-cast."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+        kwargs = {"pre_load_sensor": "false", "pool": "default_pool"}
+        wait = StarlakeAirflowJob._sl_resolve_cloud_pre_load_wait(kwargs, {}, _FakeDeferrable)
+        assert wait is None
+        assert kwargs == {"pool": "default_pool"}
+
+    def test_invalid_sensor_value_raises_nfr11(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+        with pytest.raises(ValueError) as exc:
+            StarlakeAirflowJob._sl_resolve_cloud_pre_load_wait(
+                {"pre_load_sensor": "maybe"}, {}, _FakeDeferrable
+            )
+        assert "pre_load_sensor" in str(exc.value)
+
+    def test_invalid_poke_interval_raises_nfr11(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+        with pytest.raises(ValueError) as exc:
+            StarlakeAirflowJob._sl_resolve_cloud_pre_load_wait(
+                {"pre_load_sensor": True, "pre_load_poke_interval": "5m"}, {}, _FakeDeferrable
+            )
+        assert "pre_load_poke_interval" in str(exc.value)
+
+    def test_zero_poke_interval_raises_nfr11(self):
+        """A zero interval must fail loudly at definition time — stored raw it
+        would hot-loop the sensor flavor (one cloud submission per scheduler
+        heartbeat with no gap)."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+        with pytest.raises(ValueError) as exc:
+            StarlakeAirflowJob._sl_resolve_cloud_pre_load_wait(
+                {"pre_load_sensor": True, "pre_load_poke_interval": 0}, {}, _FakeDeferrable
+            )
+        assert "pre_load_poke_interval" in str(exc.value)
+
+    def test_timeout_below_poke_interval_raises_nfr11(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+        with pytest.raises(ValueError) as exc:
+            StarlakeAirflowJob._sl_resolve_cloud_pre_load_wait(
+                {"pre_load_sensor": True, "pre_load_poke_interval": 300, "pre_load_timeout": 30},
+                {}, _FakeDeferrable,
+            )
+        assert "pre_load_timeout" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 4b. Provider-free — engine-kwargs splitting for waiting mode
+# ---------------------------------------------------------------------------
+
+class _FakeEngineOperator:
+    def __init__(self, task_id, cluster=None, gcp_conn_id="default", deferrable=False, **kwargs):
+        pass
+
+
+class TestPopEngineKwargs:
+
+    def test_pops_only_explicit_engine_params(self):
+        """Engine kwargs move to the submission; BaseOperator kwargs (pool,
+        retries — forwarded via **kwargs by every provider ctor) stay for the
+        sensor."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+        kwargs = {"cluster": "c", "gcp_conn_id": "g", "retries": 3, "pool": "p"}
+        engine = StarlakeAirflowJob._sl_pop_engine_kwargs(kwargs, _FakeEngineOperator)
+        assert engine == {"cluster": "c", "gcp_conn_id": "g"}
+        assert kwargs == {"retries": 3, "pool": "p"}
+
+    def test_task_id_is_never_popped(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+        kwargs = {"task_id": "t"}
+        assert StarlakeAirflowJob._sl_pop_engine_kwargs(kwargs, _FakeEngineOperator) == {}
+        assert kwargs == {"task_id": "t"}
+
+    def test_none_operator_returns_empty(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+        kwargs = {"cluster": "c"}
+        assert StarlakeAirflowJob._sl_pop_engine_kwargs(kwargs, None) == {}
+        assert kwargs == {"cluster": "c"}
+
+    def test_unintrospectable_returns_empty(self):
+        from ai.starlake.airflow import StarlakeAirflowJob
+
+        def _bad_init(self):
+            pass
+        _bad_init.__signature__ = "not a signature"
+        Unintrospectable = type("Unintrospectable", (), {"__init__": _bad_init})
+        kwargs = {"cluster": "c"}
+        assert StarlakeAirflowJob._sl_pop_engine_kwargs(kwargs, Unintrospectable) == {}
+        assert kwargs == {"cluster": "c"}
+
 
 # ---------------------------------------------------------------------------
 # 5. Provider-free — verdict helpers (distinct from the #92 swallow)
@@ -347,7 +448,7 @@ class TestIsLastAttempt:
 
 class TestCloudPreloadSensorPoke:
 
-    def _make_sensor(self, submit_and_wait):
+    def _make_sensor(self, submit_and_wait, payload=None):
         from ai.starlake.airflow import StarlakeCloudPreloadSensor
         with _dag():
             return StarlakeCloudPreloadSensor(
@@ -355,33 +456,53 @@ class TestCloudPreloadSensorPoke:
                 dataset=None,
                 source=None,
                 submit_and_wait=submit_and_wait,
+                payload=payload,
                 poke_interval=30,
                 timeout=120,
                 soft_fail=True,
             )
 
     def test_defaults_to_reschedule_mode(self):
-        sensor = self._make_sensor(lambda ctx: True)
+        sensor = self._make_sensor(lambda ctx, payload: True)
         assert sensor.mode == "reschedule"
         assert sensor.poke_interval == 30
         assert sensor.timeout == 120
         assert sensor.soft_fail is True
 
     def test_success_completes_truthy(self):
-        sensor = self._make_sensor(lambda ctx: True)
+        sensor = self._make_sensor(lambda ctx, payload: True)
         verdict = sensor.poke(context={})
         assert verdict.is_done is True
         assert verdict.xcom_value is True
 
     def test_no_files_pokes_again(self):
-        sensor = self._make_sensor(lambda ctx: False)
+        sensor = self._make_sensor(lambda ctx, payload: False)
         assert sensor.poke(context={}) is None
 
     def test_submission_error_pokes_again(self):
-        def boom(ctx):
+        def boom(ctx, payload):
             raise RuntimeError("transient submit error")
         sensor = self._make_sensor(boom)
         assert sensor.poke(context={}) is None
+
+    def test_payload_is_a_template_field_and_reaches_the_closure(self):
+        """The engine payload (ECS/Cloud Run overrides, the Dataproc job) is a
+        template field ON THE SENSOR — the live task instance — so Airflow
+        renders any Jinja in it (e.g. an ack-strategy ``{{ds}}`` path) before
+        each poke; the closure receives the rendered value. The ad-hoc per-poke
+        operator built inside the closure is never a live task instance and
+        cannot render Jinja itself."""
+        seen = []
+
+        def capture(ctx, payload):
+            seen.append(payload)
+            return True
+        payload = {"path": "{{ ds }}.ack"}
+        sensor = self._make_sensor(capture, payload=payload)
+        assert "sl_payload" in sensor.template_fields
+        sensor.poke(context={})
+        # poke hands self.sl_payload — the attribute Airflow re-renders per try
+        assert seen == [payload]
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +652,99 @@ class TestFargatePreloadWaiting:
         monkeypatch.setattr(EcsRunTaskOperator, "execute", boom)
         assert sensor.poke(context={}) is None
 
+    def test_sensor_payload_is_the_rendered_overrides(self, monkeypatch):
+        """The overrides payload is a template field on the sensor; the closure
+        must submit with the payload it is HANDED (the rendered value), not a
+        parse-time capture."""
+        from airflow.providers.amazon.aws.operators.ecs import EcsRunTaskOperator
+        job = self._make_job(dict(SENSOR_OPTIONS, pre_load_deferrable="false"))
+        with _dag():
+            sensor = job.sl_pre_load(domain="starbake", tables={"customers"})
+        assert "sl_payload" in sensor.template_fields
+        assert sensor.sl_payload  # the ECS overrides dict
+        seen = {}
+
+        def capture(self, context):
+            seen["overrides"] = self.overrides
+        monkeypatch.setattr(EcsRunTaskOperator, "execute", capture)
+        rendered = {"containerOverrides": [{"command": ["rendered-by-airflow"]}]}
+        sensor._submit_and_wait({}, rendered)
+        assert seen["overrides"] is rendered
+
+    def test_deferrable_submission_failure_last_soft_fail_skips(self, monkeypatch):
+        """soft_fail must be honored whichever PHASE the terminal attempt fails
+        in — a terminal cloud-API error during submission maps to a skip, not a
+        red run."""
+        from ai.starlake.airflow.compat import AirflowSkipException
+        from airflow.providers.amazon.aws.operators.ecs import EcsRunTaskOperator
+        from ai.starlake.airflow.aws.starlake_airflow_fargate_job import FargateTaskOperator
+        from ai.starlake.airflow import PreLoadWait
+
+        def boom(self, context):
+            raise RuntimeError("cloud API error before the defer")
+        monkeypatch.setattr(EcsRunTaskOperator, "execute", boom)
+        with _dag():
+            op = FargateTaskOperator(
+                task_id="fargate_preload", dataset=None, source=None,
+                task_definition="d", cluster="c", overrides={},
+                wait_for_completion=True, deferrable=True, preload=True,
+                pre_load_wait=PreLoadWait("deferrable", 30, 120, True, 4, timedelta(seconds=30)),
+            )
+        ti = MagicMock(try_number=5, max_tries=4)  # last attempt
+        with pytest.raises(AirflowSkipException):
+            op.execute(context={"ti": ti})
+
+    def test_deferrable_submission_failure_non_last_reraises(self, monkeypatch):
+        from airflow.exceptions import AirflowException
+        from airflow.providers.amazon.aws.operators.ecs import EcsRunTaskOperator
+        from ai.starlake.airflow.aws.starlake_airflow_fargate_job import FargateTaskOperator
+        from ai.starlake.airflow import PreLoadWait
+
+        def boom(self, context):
+            raise RuntimeError("cloud API error before the defer")
+        monkeypatch.setattr(EcsRunTaskOperator, "execute", boom)
+        with _dag():
+            op = FargateTaskOperator(
+                task_id="fargate_preload", dataset=None, source=None,
+                task_definition="d", cluster="c", overrides={},
+                wait_for_completion=True, deferrable=True, preload=True,
+                pre_load_wait=PreLoadWait("deferrable", 30, 120, True, 4, timedelta(seconds=30)),
+            )
+        ti = MagicMock(try_number=1, max_tries=4)  # within window → retry = next poke
+        with pytest.raises(AirflowException):
+            op.execute(context={"ti": ti})
+
+    def test_engine_kwargs_route_to_submission_not_sensor(self, monkeypatch):
+        """An explicit EcsRunTaskOperator kwarg through sl_pre_load must not
+        crash the BaseSensorOperator ctor; it reaches the per-poke submission."""
+        from airflow.providers.amazon.aws.operators.ecs import EcsRunTaskOperator
+        from ai.starlake.airflow import StarlakeCloudPreloadSensor
+        job = self._make_job(dict(SENSOR_OPTIONS, pre_load_deferrable="false"))
+        with _dag():
+            sensor = job.sl_pre_load(
+                domain="starbake", tables={"customers"}, launch_type="EC2"
+            )
+        assert isinstance(sensor, StarlakeCloudPreloadSensor)
+        seen = {}
+
+        def capture(self, context):
+            seen["launch_type"] = self.launch_type
+        monkeypatch.setattr(EcsRunTaskOperator, "execute", capture)
+        sensor._submit_and_wait({}, {})
+        assert seen["launch_type"] == "EC2"
+
+    def test_engine_kwargs_no_duplicate_keyword_on_deferrable(self):
+        """launch_type is set by the engine AND passable by the caller — the
+        split must pre-empt the duplicate-keyword TypeError at DAG parse."""
+        from ai.starlake.airflow.aws.starlake_airflow_fargate_job import FargateTaskOperator
+        job = self._make_job(dict(SENSOR_OPTIONS))
+        with _dag():
+            task = job.sl_pre_load(
+                domain="starbake", tables={"customers"}, launch_type="EC2"
+            )
+        assert isinstance(task, FargateTaskOperator)
+        assert task.launch_type == "EC2"
+
 
 # ---------------------------------------------------------------------------
 # 8. Cloud Run — construction (provider-guarded)
@@ -627,6 +841,77 @@ class TestCloudRunPreloadWaiting:
         monkeypatch.setattr(CloudRunExecuteJobOperator, "execute", boom)
         assert sensor.poke(context={}) is None
 
+    def test_sensor_off_stays_one_shot(self):
+        """Regression: no pre_load_sensor → the ordinary (non-sensor) task."""
+        from ai.starlake.airflow import StarlakeCloudPreloadSensor
+        from ai.starlake.airflow.gcp.starlake_airflow_cloud_run_job import CloudRunJobOperator
+        job = self._make_job({"cloud_run_async": "false", "use_gcloud": "false"})
+        with _dag():
+            task = job.sl_pre_load(domain="starbake", tables={"customers"})
+        assert isinstance(task, CloudRunJobOperator)
+        assert not isinstance(task, StarlakeCloudPreloadSensor)
+        assert getattr(task, "deferrable", False) is False
+        assert task.pre_load_wait is None
+
+    def test_sensor_payload_is_the_rendered_overrides(self, monkeypatch):
+        """The job overrides payload is a template field on the sensor; the
+        closure submits with the payload it is handed (the rendered value)."""
+        from airflow.providers.google.cloud.operators.cloud_run import CloudRunExecuteJobOperator
+        job = self._make_job(dict(SENSOR_OPTIONS, use_gcloud="false", pre_load_deferrable="false"))
+        with _dag():
+            sensor = job.sl_pre_load(domain="starbake", tables={"customers"})
+        assert "sl_payload" in sensor.template_fields
+        assert sensor.sl_payload["container_overrides"]
+        seen = {}
+
+        def capture(self, context):
+            seen["overrides"] = self.overrides
+        monkeypatch.setattr(CloudRunExecuteJobOperator, "execute", capture)
+        rendered = {"container_overrides": [{"args": ["rendered-by-airflow"]}]}
+        sensor._submit_and_wait({}, rendered)
+        assert seen["overrides"] is rendered
+
+    def test_deferrable_submission_failure_last_soft_fail_skips(self, monkeypatch):
+        """A terminal submission-phase failure honors soft_fail (skip, not red)."""
+        from ai.starlake.airflow.compat import AirflowSkipException
+        from airflow.providers.google.cloud.operators.cloud_run import CloudRunExecuteJobOperator
+        from ai.starlake.airflow.gcp.starlake_airflow_cloud_run_job import CloudRunJobOperator, CloudRunMode
+        from ai.starlake.airflow import PreLoadWait
+
+        def boom(self, context):
+            raise RuntimeError("cloud API error before the defer")
+        monkeypatch.setattr(CloudRunExecuteJobOperator, "execute", boom)
+        with _dag():
+            op = CloudRunJobOperator(
+                task_id="cloud_run_preload", dataset=None, source=None,
+                project_id="p", region="r", job_name="j", overrides={},
+                mode=CloudRunMode.SYNC, preload=True,
+                pre_load_wait=PreLoadWait("deferrable", 30, 120, True, 4, timedelta(seconds=30)),
+            )
+        ti = MagicMock(try_number=5, max_tries=4)  # last attempt
+        with pytest.raises(AirflowSkipException):
+            op.execute(context={"ti": ti})
+
+    def test_engine_kwargs_route_to_submission_not_sensor(self, monkeypatch):
+        """An explicit CloudRunExecuteJobOperator kwarg (gcp_conn_id) through
+        sl_pre_load must not crash the sensor ctor; it reaches the per-poke
+        submission."""
+        from airflow.providers.google.cloud.operators.cloud_run import CloudRunExecuteJobOperator
+        from ai.starlake.airflow import StarlakeCloudPreloadSensor
+        job = self._make_job(dict(SENSOR_OPTIONS, use_gcloud="false", pre_load_deferrable="false"))
+        with _dag():
+            sensor = job.sl_pre_load(
+                domain="starbake", tables={"customers"}, gcp_conn_id="my_gcp_conn"
+            )
+        assert isinstance(sensor, StarlakeCloudPreloadSensor)
+        seen = {}
+
+        def capture(self, context):
+            seen["gcp_conn_id"] = self.gcp_conn_id
+        monkeypatch.setattr(CloudRunExecuteJobOperator, "execute", capture)
+        sensor._submit_and_wait({}, {})
+        assert seen["gcp_conn_id"] == "my_gcp_conn"
+
 
 # ---------------------------------------------------------------------------
 # 9b. Dataproc — sl_job wiring via a minimal cluster (provider-guarded)
@@ -666,18 +951,40 @@ class TestDataprocPreloadWaitingSlJob:
                 task_type=TaskType.PRELOAD, pre_load_wait=wait,
             )
 
-    def test_deferrable_job_id_templated_per_attempt(self):
+    def test_sensor_off_stays_one_shot(self):
+        """Regression: pre_load_wait=None → the ordinary dataproc submit task."""
+        from ai.starlake.airflow import StarlakeCloudPreloadSensor
+        from ai.starlake.airflow.gcp.starlake_airflow_dataproc_job import DataprocJobOperator
+        task = self._submit(self._make_cluster(), None)
+        assert isinstance(task, DataprocJobOperator)
+        assert not isinstance(task, StarlakeCloudPreloadSensor)
+        assert getattr(task, "deferrable", False) is False
+        assert task.pre_load_wait is None
+
+    def test_deferrable_job_id_minted_fresh_per_attempt(self, monkeypatch):
+        """A fresh dataproc job_id is minted at EXECUTE time on every attempt
+        (execute re-runs per retry = per poke), so re-submission never collides
+        (AlreadyExists). No Jinja: a ts_nodash-keyed template breaks on
+        Airflow 3 runs without a logical_date and collides when a run is
+        deleted and re-triggered for the same logical date."""
+        from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
         from ai.starlake.airflow.gcp.starlake_airflow_dataproc_job import DataprocJobOperator
         task = self._submit(self._make_cluster(), self._wait("deferrable"))
         assert isinstance(task, DataprocJobOperator)
         assert task.deferrable is True
         assert task.preload is True
         assert task.retries == 4
-        # a fresh job_id per retry — Jinja keyed on the run + attempt (job is a
-        # template field, re-rendered each try) so re-submission never collides
-        job_id = task.job["reference"]["job_id"]
-        assert "{{ ts_nodash }}" in job_id
-        assert "{{ ti.try_number }}" in job_id
+        seen = []
+
+        def capture(self, context):
+            seen.append(self.job["reference"]["job_id"])
+            return "ok"
+        monkeypatch.setattr(DataprocSubmitJobOperator, "execute", capture)
+        task.execute(context={})
+        task.execute(context={})
+        assert len(seen) == 2
+        assert seen[0] != seen[1]  # unique per attempt — no AlreadyExists
+        assert "{{" not in seen[0]  # no template-context dependency
 
     def test_sensor_poke_mints_fresh_job_id_each_poke(self, monkeypatch):
         from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
@@ -694,6 +1001,51 @@ class TestDataprocPreloadWaitingSlJob:
         sensor.poke(context={})
         assert len(seen) == 2
         assert seen[0] != seen[1]  # unique dataproc job_id per poke (no AlreadyExists)
+
+    def test_sensor_payload_is_the_rendered_job(self, monkeypatch):
+        """The job payload is a template field on the sensor; the closure
+        submits with the payload it is handed (the rendered value), minting its
+        own uuid job_id on the copy."""
+        from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
+        from ai.starlake.airflow import StarlakeCloudPreloadSensor
+        sensor = self._submit(self._make_cluster(), self._wait("sensor", retries=0))
+        assert isinstance(sensor, StarlakeCloudPreloadSensor)
+        assert "sl_payload" in sensor.template_fields
+        assert sensor.sl_payload["spark_job"]["args"] == ["preload"]
+        seen = {}
+
+        def capture(self, context):
+            seen["job"] = self.job
+        monkeypatch.setattr(DataprocSubmitJobOperator, "execute", capture)
+        rendered = {
+            "reference": {"project_id": "p", "job_id": "parse-time-id"},
+            "placement": {"cluster_name": "c"},
+            "spark_job": {"args": ["rendered-by-airflow"]},
+        }
+        sensor._submit_and_wait({}, rendered)
+        assert seen["job"]["spark_job"]["args"] == ["rendered-by-airflow"]
+        assert seen["job"]["reference"]["job_id"] != "parse-time-id"  # fresh uuid
+
+    def test_engine_kwargs_route_to_submission_not_sensor(self, monkeypatch):
+        """An explicit DataprocSubmitJobOperator kwarg (gcp_conn_id) must not
+        crash the sensor ctor; it reaches the per-poke submission."""
+        from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
+        from ai.starlake.airflow import StarlakeCloudPreloadSensor
+        from ai.starlake.job import TaskType
+        with _dag():
+            sensor = self._make_cluster().submit_starlake_job(
+                task_id="check_x", arguments=["preload"], source=None,
+                task_type=TaskType.PRELOAD, pre_load_wait=self._wait("sensor", retries=0),
+                gcp_conn_id="my_gcp_conn",
+            )
+        assert isinstance(sensor, StarlakeCloudPreloadSensor)
+        seen = {}
+
+        def capture(self, context):
+            seen["gcp_conn_id"] = self.gcp_conn_id
+        monkeypatch.setattr(DataprocSubmitJobOperator, "execute", capture)
+        sensor._submit_and_wait({}, {"reference": {}})
+        assert seen["gcp_conn_id"] == "my_gcp_conn"
 
 
 # ---------------------------------------------------------------------------
@@ -741,3 +1093,18 @@ class TestDataprocPreloadWaitingOperator:
         monkeypatch.setattr(DataprocSubmitJobOperator, "execute_complete", lambda self, context, event=None: "job-id")
         op = self._make_operator(preload=False, pre_load_wait=None)
         assert op.execute_complete(context={}, event={}) == "job-id"
+
+    def test_deferrable_submission_failure_last_soft_fail_skips(self, monkeypatch):
+        """A terminal submission-phase failure (e.g. a dataproc API error
+        before the defer) honors soft_fail (skip, not red)."""
+        from ai.starlake.airflow.compat import AirflowSkipException
+        from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
+        from ai.starlake.airflow import PreLoadWait
+
+        def boom(self, context):
+            raise RuntimeError("dataproc API error before the defer")
+        monkeypatch.setattr(DataprocSubmitJobOperator, "execute", boom)
+        op = self._make_operator(preload=True, pre_load_wait=PreLoadWait("deferrable", 30, 120, True, 4, timedelta(seconds=30)))
+        ti = MagicMock(try_number=5, max_tries=4)  # last attempt
+        with pytest.raises(AirflowSkipException):
+            op.execute(context={"ti": ti})
