@@ -554,7 +554,31 @@ class StarlakeDagsterUtils:
         previous_logical_datetime = config.previous_logical_datetime or context.get_tag('previous_logical_datetime')
         logical_datetime: datetime = cls.get_logical_datetime(context, config, **kwargs)
         if previous_logical_datetime and logical_datetime:
-            return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value}='{cls.unquote_datetime(previous_logical_datetime)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value}='{logical_datetime.strftime(sl_timestamp_format)}'"
+            # issue #118 — emit BOTH bounds in sl_timestamp_format (space-free
+            # T-form, like the cron branch and the Airflow builder): on
+            # cloud_run the argument vector is joined into gcloud's
+            # space-separated --args fragment, which would split a
+            # space-form value. Raw ISO first (the module's ingestion
+            # convention — also keeps fractional seconds parseable, which the
+            # tag decode would corrupt); the tag-encoded form
+            # (quote_datetime: ' '->T, ':'->'.', '+'->'_') goes through
+            # unquote_datetime + a STRICT parse, and anything else fails
+            # loudly instead of shipping a corrupted SQL substitution value
+            from dateutil import parser
+            try:
+                previous_datetime = parser.isoparse(previous_logical_datetime)
+            except (ValueError, OverflowError):
+                try:
+                    previous_datetime = datetime.strptime(cls.unquote_datetime(previous_logical_datetime), '%Y-%m-%d %H:%M:%S%z')
+                except ValueError as e:
+                    raise ValueError(
+                        f"get_transform_options: invalid previous_logical_datetime {previous_logical_datetime!r} — "
+                        "expected an ISO datetime (e.g. 2026-07-17T00:00:00+0000) or its tag-encoded form"
+                    ) from e
+            # naive values follow the logical_datetime convention (local time
+            # normalized to UTC) — and %z is thereby never empty
+            previous_datetime = previous_datetime.astimezone(pytz.timezone('UTC'))
+            return f"{StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value}='{previous_datetime.strftime(sl_timestamp_format)}',{StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value}='{logical_datetime.strftime(sl_timestamp_format)}'"
         cron = params.get(StarlakeParameters.CRON_PARAMETER.value, params.get('cron', params.get('cron_expr', None)))
         if cron and (cron.lower().strip() == 'none' or not is_valid_cron(cron)):
             cron = None
