@@ -21,6 +21,7 @@
 # - pre_load_timeout(3600): wall-clock timeout in seconds for the pre-load wait; on timeout downstream loads are skipped [OPTIONAL]
 # - pre_load_sensor_soft_fail(false): when true, a wait timeout marks the task SKIPPED instead of FAILED [OPTIONAL]
 # - pre_load_deferrable(true): when true, use a deferrable operator (needs a running triggerer) if supported; set false to force the reschedule sensor fallback [OPTIONAL]
+# - pre_load_not_ready_sentinel_path: opt-in pre-load not-ready sentinel parent prefix (an S3 prefix using the s3 scheme, requires starlake CLI 1.5.15 or newer) - a zero-byte marker under <prefix>/<domain>/ signals 'files not ready' (consumed via S3Hook) and a failed CLI now fails the task instead of reading as 'nothing to load' [OPTIONAL]
 # - tags: a list of tags to be applied to the dag [OPTIONAL]
 # - start_date: the start date of the dag (eg. 2022-01-01) [OPTIONAL]
 # - end_date: the end date of the dag (eg. 2024-12-31) [OPTIONAL]

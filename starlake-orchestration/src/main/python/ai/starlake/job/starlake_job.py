@@ -612,6 +612,19 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
                     'pre_load_sensor_soft_fail': soft_fail,
                 })
 
+            # story 6.12 (issue #122) — opt-in CLI not-ready sentinel (core
+            # CLI >= 1.5.15): applies to ALL three strategies (outside the
+            # ACK branch, after the base args). The resolved path embeds the
+            # literal __SL_SENTINEL_SCOPE__ token, substituted at RUN time by
+            # each orchestrator; kwargs['sentinel_path'] is the engines'
+            # consumption seam. Absent/blank option → None → byte-identical
+            # arguments and kwargs (zero-change guarantee).
+            from ai.starlake.sentinel import resolve_sentinel_path
+            sentinel_path = resolve_sentinel_path(self.options, domain)
+            if sentinel_path is not None:
+                arguments.extend(["--notReadySentinel", sentinel_path])
+                kwargs['sentinel_path'] = sentinel_path
+
             return self.sl_job(task_id=task_id, arguments=arguments, task_type=TaskType.PRELOAD, **kwargs)
 
     def sl_load(self, task_id: str, domain: str, table: str, spark_config: Optional[StarlakeSparkConfig]=None, dataset: Optional[Union[StarlakeDataset, str]]= None, **kwargs) -> T:

@@ -147,6 +147,9 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
         # story 6.7 (issue #94) — sensor mode: popped BEFORE the op
         # construction and captured by the op closure below
         pre_load_poke = self.__class__._sl_resolve_pre_load_poke(kwargs)
+        # story 6.12 (issue #122) — not-ready sentinel: popped BEFORE the op
+        # construction, captured by the closure; dataproc consumes gs:// only
+        sentinel_path = self.__class__._sl_resolve_sentinel(kwargs, ('gs',), 'dataproc')
         # issue #109 — the sensor-off path polls the job to its terminal
         # state; the wait budget is configurable (dagster-gcp's 20-minute
         # default is too short for real Spark jobs)
@@ -208,6 +211,9 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
             task_type = TaskType.from_str(arguments[0])
         transform = task_type == TaskType.TRANSFORM
         params = kwargs.get('params', dict())
+
+        if task_type != TaskType.PRELOAD:
+            sentinel_path = None
 
         # static sl_options sections to publish on the materialization (see
         # DagsterLogicalDatetimeConfig.sl_options for the runtime counterpart)
@@ -288,6 +294,14 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 elif extra_opts:
                     command_with_arguments.extend(["--options", ",".join(extra_opts)])
 
+            if sentinel_path:
+                # story 6.12 — run-time scope substitution over the
+                # per-attempt vector (the --notReadySentinel value embeds the
+                # scope token; spark_job.args reach the driver argv directly)
+                command_with_arguments = self.__class__._sl_sentinel_substitute_args(
+                    command_with_arguments, context
+                )
+
             # ship the scheduledDate-carrying vector for ALL task types
             # (issue #113): args stayed at the build-time `arguments` outside
             # the transform branch, so the Spark CLI fell back to its own
@@ -338,16 +352,43 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                         context.log.warning(f"Preload job {poke_job_id} did not succeed: {e}\n{traceback.format_exc()}")
                         return poke_job_id, {"status": {"state": "ERROR", "details": str(e)}}
 
-                poked = self.__class__._sl_pre_load_poke_loop(
-                    context,
-                    _submit_once,
-                    lambda submission: submission[1].get("status", {}).get("state") == "DONE",
-                    pre_load_poke,
-                    ' '.join(command_with_arguments),
-                )
-                if poked is None:
-                    return
-                effective_job_id, result = poked
+                if sentinel_path:
+                    # story 6.12 — three-way verdict per poke: a non-DONE
+                    # terminal state is a REAL failure (fail fast — 'not
+                    # ready' exits 0/DONE in sentinel mode); DONE + sentinel
+                    # → consume → poke again; DONE → ready
+                    def _submit_once_sentinel():
+                        poke_job_id, poke_result = _submit_once()
+                        if poke_result.get("status", {}).get("state") != "DONE":
+                            raise Failure(description=(
+                                f"Spark job {poke_job_id} did not succeed — a "
+                                f"real failure ('not ready' ends DONE in "
+                                f"sentinel mode): {poke_result}"
+                            ))
+                        ready = self.__class__._sl_sentinel_ready(context, sentinel_path)
+                        return poke_job_id, poke_result, ready
+
+                    poked = self.__class__._sl_pre_load_poke_loop(
+                        context,
+                        _submit_once_sentinel,
+                        lambda submission: submission[2],
+                        pre_load_poke,
+                        ' '.join(command_with_arguments),
+                    )
+                    if poked is None:
+                        return
+                    effective_job_id, result, _ = poked
+                else:
+                    poked = self.__class__._sl_pre_load_poke_loop(
+                        context,
+                        _submit_once,
+                        lambda submission: submission[1].get("status", {}).get("state") == "DONE",
+                        pre_load_poke,
+                        ' '.join(command_with_arguments),
+                    )
+                    if poked is None:
+                        return
+                    effective_job_id, result = poked
             else:
                 job_details["job"]["reference"]["job_id"] = effective_job_id
                 context.log.info(f"Submitting Spark job {effective_job_id} to Dataproc cluster {self.__dataproc__.cluster_name} with job details: \n{json.dumps(job_details, indent=2)}")
@@ -374,6 +415,14 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
 
             if result.get("status", {}).get("state") != "DONE":
                 value=f"Spark job {effective_job_id} did not succeed with result: {result}"
+                if sentinel_path:
+                    # story 6.12 — sentinel mode: 'not ready' ends DONE, so a
+                    # non-DONE state is a REAL failure; the skip_or_start
+                    # swallow no longer applies
+                    raise Failure(description=(
+                        f"{value} — a real failure ('not ready' ends DONE in "
+                        f"sentinel mode)"
+                    ))
                 if retry_policy:
                     retry_count = context.retry_number
                     if retry_count < retry_policy.max_retries:
@@ -386,6 +435,16 @@ class StarlakeDagsterDataprocJob(StarlakeDagsterJob):
                 else:
                     raise Failure(description=value)
             else:
+                if sentinel_path and not config.dry_run and not pre_load_poke:
+                    # story 6.12 — one-shot consume-then-signal: sentinel
+                    # present → not ready → optional-output skip (poke mode
+                    # consumed it inside the loop; dry runs never consume)
+                    if not self.__class__._sl_sentinel_ready(context, sentinel_path):
+                        context.log.info(
+                            f"Spark job {effective_job_id}: files not ready "
+                            f"(sentinel consumed) — skipping downstream tasks."
+                        )
+                        return
                 for asset in attempt_assets:
                     yield AssetMaterialization(asset_key=asset.path, description=f"Spark job {effective_job_id} submitted to Dataproc cluster {self.__dataproc__.cluster_name}")
                 if dataset:

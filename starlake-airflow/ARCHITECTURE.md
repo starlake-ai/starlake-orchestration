@@ -449,6 +449,21 @@ The `ts_as_datetime` macro first checks XCom for a `data_interval_end` pushed by
 
 Generated DAG files (from Jinja2 templates) define module-level variables (`description`, `options`, `schedules`, `default_dag_args`, `user_defined_macros`, etc.). The `AirflowPipeline` constructor and `StarlakeAirflowJob` read these via `job.caller_globals` — this is how template-generated configuration flows into the pipeline without modifying framework code. Note that for `default_dag_args` specifically, the options-derived dict returned by `job.default_dag_args()` takes precedence over the caller-module snapshot (issue #87); snapshot-only keys survive.
 
+### 6. Pre-load Not-Ready Sentinel Verdict Seams (story 6.12, issue #122)
+
+The opt-in `pre_load_not_ready_sentinel_path` option (CLI ≥ 1.5.15, `--notReadySentinel`) plugs a **verdict channel** into the EXISTING waiting/skip mechanisms — no new waiting machinery. Core `sl_pre_load` appends the flag (path embeds the literal `__SL_SENTINEL_SCOPE__` token, `ai.starlake.sentinel.SENTINEL_SCOPE_TOKEN`) and threads `kwargs['sentinel_path']` to `sl_job`; every engine pops it unconditionally and gates the scheme at DAG-parse time (`require_scheme`: local for bash, `gs://` for cloud_run/dataproc, `s3://` for fargate).
+
+Provider-free seams on `StarlakeAirflowJob` (CI installs no providers):
+
+- `_sl_sentinel_scope_parts(context)` — `(dag_id, run_id)` from the task context (dag_id is REQUIRED: run_id is only unique within one DAG);
+- `_sl_sentinel_substitute_payload(payload, context)` — deep, NON-mutating token substitution over submitted payloads (token-leak pinned by tests: the token never reaches a submission);
+- `_sl_sentinel_ready(path, context, exists_fn, delete_fn)` — consume-then-signal (delete FIRST, then signal not-ready — the marker is re-derivable state, not a ledger);
+- `_sl_sentinel_deferrable_success(...)` — maps NOT READY onto the 6.5 retries-as-poke raise; `_sl_sentinel_engine_failure(...)` — `AirflowFailException` fail-fast (in sentinel mode 'not ready' exits 0, so any engine failure is REAL and must not burn the poke budget);
+- `_sl_sentinel_wrapped_command` / `_sl_sentinel_sensor_command` — the flat bash wrappers (6.4 rules): one-shot re-encodes the verdict into the `skip_or_start` echo (`0`/`1`, `exit $return_code` on crash — the 6.3 swallow is removed in sentinel mode), sensor mode into the CLOSED `{0,1,2}` exit contract consumed with `retry_exit_code=2` (CLI exit codes can never masquerade as poke-again);
+- `_sl_gcs_sentinel_hook_handlers` / `_sl_s3_sentinel_hook_handlers` — lazy Hook-based handler factories (honor `gcp_conn_id`/`aws_conn_id` + the 6.6 `impersonation_chain` contract), overriding the core `default_sentinel_handlers`.
+
+Scope substitution is ALWAYS runtime data substitution: bash paths carry `{{ ti.dag_id }}__{{ run_id }}` as an env VALUE (`env` is a template field on BashOperator AND BashSensor on both majors) re-sanitized by the wrapper's `tr` whitelist (same character set; tr is byte-wise, so each path uses ONE mechanism for both the CLI arg and the probe — writer and reader always agree); python cloud paths substitute at execute/poke time; the gcloud waiting sensor exports the python-sanitized scope around its poke (`StarlakePreloadBashSensor(sentinel_scope_in_environ=True)` — BashSensor has no `append_env` and gcloud needs the inherited environment).
+
 ## Module Constants
 
 ```python

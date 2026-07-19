@@ -135,6 +135,16 @@ At op runtime, each execution environment resolves the options applying to its n
 
 **Quoting**: in the shell job, the `--options` value is wrapped in double quotes just before the command string is joined (after the transform branch has split/merged the value on commas), so values containing spaces survive shell word splitting (#51).
 
+## Pre-load Not-Ready Sentinel Verdict Seams (story 6.12, issue #122)
+
+The opt-in `pre_load_not_ready_sentinel_path` option (CLI ≥ 1.5.15, `--notReadySentinel`) plugs a **verdict channel** into the existing op composition — the forced `skip_or_start` optional-output skip and the 6.2/6.7 in-op wall-clock poke loops. Three shared seams on `StarlakeDagsterJob`:
+
+- `_sl_resolve_sentinel(kwargs, allowed_schemes, engine)` — pops `sentinel_path` unconditionally BEFORE the `Out`/`RetryPolicy` computation (6.2 rule) and gates the scheme at definition time (local for shell, `gs://` for cloud_run/dataproc, `s3://` for fargate);
+- `_sl_sentinel_substitute_args(arguments, context)` — run-time `<job_name>__<run_id>` scope substitution over a **per-attempt copy** of the command vector (the closure `arguments` list is never mutated — the #111/#115 closure-hygiene rule; the token is the literal `__SL_SENTINEL_SCOPE__`, never a template);
+- `_sl_sentinel_ready(context, sentinel_path)` — consume-then-signal (delete FIRST) via the core `default_sentinel_handlers` (local stdlib for shell, `ai.starlake.gcp`/`ai.starlake.aws` lazy-SDK factories for `gs://`/`s3://` — no handler code duplicated in this module).
+
+Verdict wiring in each variant's op body, only when the option is set: a failed run raises `Failure` immediately (fail-fast — 'not ready' ends success in sentinel mode, so the `skip_or_start` swallow and the poke-until-timeout trade-off no longer apply); success + marker → consume → bare return (one-shot optional-output skip) or poke-again (loop, `is_success` = the consumed verdict); success + no marker → READY. Dataproc reads "success" as the DONE terminal state.
+
 ## Definitions Assembly
 
 ![Definitions assembly in DagsterOrchestration.__exit__()](images/definitions-assembly.svg)

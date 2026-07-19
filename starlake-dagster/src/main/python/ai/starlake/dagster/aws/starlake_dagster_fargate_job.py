@@ -71,6 +71,9 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
         # construction (and before the fargate helper receives **kwargs) and
         # captured by the op closure below
         pre_load_poke = self.__class__._sl_resolve_pre_load_poke(kwargs)
+        # story 6.12 (issue #122) — not-ready sentinel: popped BEFORE the
+        # fargate helper receives **kwargs; fargate consumes s3:// only
+        sentinel_path = self.__class__._sl_resolve_sentinel(kwargs, ('s3',), 'fargate')
         env = self.sl_env(args=arguments)
 
         fargate = StarlakeFargateHelper(job=self, arguments=arguments, **kwargs)
@@ -85,6 +88,9 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
             task_type = TaskType.from_str(arguments[0])
         transform = task_type == TaskType.TRANSFORM
         params = kwargs.get('params', dict())
+
+        if task_type != TaskType.PRELOAD:
+            sentinel_path = None
 
         # static sl_options sections to publish on the materialization (see
         # DagsterLogicalDatetimeConfig.sl_options for the runtime counterpart)
@@ -203,6 +209,14 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
             environment = {entry["name"]: entry["value"] for entry in build_environment}
             environment.update(derived_env)
             fargate.environment = [{"name": key, "value": value} for key, value in environment.items()]
+            if sentinel_path:
+                # story 6.12 — run-time scope substitution over the
+                # per-attempt vector (the --notReadySentinel value embeds the
+                # scope token; the vector ships as the ECS containerOverrides
+                # command)
+                command_with_arguments = self.__class__._sl_sentinel_substitute_args(
+                    command_with_arguments, context
+                )
             fargate.arguments = command_with_arguments
 
             command = fargate.command
@@ -239,7 +253,42 @@ class StarlakeDagsterFargateJob(StarlakeDagsterJob):
                         # externally removed — must not mask the poke result
                         pass
 
-            if pre_load_poke and not config.dry_run:
+            if sentinel_path and not config.dry_run:
+                # story 6.12 — three-way verdict: a failed task run is a REAL
+                # failure (fail fast — 'not ready' exits 0 in sentinel mode);
+                # exit 0 + sentinel → consume (default s3:// handlers from
+                # core) → not ready; exit 0 → ready
+                def _run_and_check():
+                    run_output, run_return_code = _run_command()
+                    if run_return_code:
+                        raise Failure(description=(
+                            f"Starlake command {command} failed with exit "
+                            f"code {run_return_code} — a real failure "
+                            f"('not ready' exits 0 in sentinel mode): {run_output}"
+                        ))
+                    ready = self.__class__._sl_sentinel_ready(context, sentinel_path)
+                    return run_output, run_return_code, ready
+
+                if pre_load_poke:
+                    poked = self.__class__._sl_pre_load_poke_loop(
+                        context,
+                        _run_and_check,
+                        lambda result: result[2],
+                        pre_load_poke,
+                        command,
+                    )
+                    if poked is None:
+                        return
+                    output, return_code, _ = poked
+                else:
+                    output, return_code, ready = _run_and_check()
+                    if not ready:
+                        context.log.info(
+                            f"Starlake command {command}: files not ready "
+                            f"(sentinel consumed) — skipping downstream tasks."
+                        )
+                        return
+            elif pre_load_poke and not config.dry_run:
                 # story 6.7 (issue #94) — cloud poke = a full Fargate task
                 # re-submission per attempt (shared wall-clock loop; the op
                 # holds its executor slot while poking, the heavy work runs

@@ -133,9 +133,12 @@ class TestImpersonationSourcePin:
         # the deferrable operator and the sensor-flavor closure) — all consume
         # the once-per-call resolution (issue #105: explicit kwarg wins over
         # the derived bare email); the fifth match is CloudRunJobOperator's
-        # ctor pass-through to the provider operator
+        # ctor pass-through to the provider operator; the sixth (story 6.12,
+        # issue #122) is the sentinel GCSHook handler factory on the
+        # sensor-flavor waiting path, which consumes the SAME once-per-call
+        # resolution
         source = self._source()
-        assert source.count("impersonation_chain=impersonation_chain,") == 5
+        assert source.count("impersonation_chain=impersonation_chain,") == 6
         assert "kwargs.pop('impersonation_chain', self.cloud_run_service_account or None)" in source
 
     def test_gcloud_fragment_construction_still_present(self):

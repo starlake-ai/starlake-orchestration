@@ -32,6 +32,13 @@ from ai.starlake.job.starlake_job import StarlakeOrchestrator
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
 
+# story 6.12 (issue #122) — pre-load not-ready sentinel pure helpers (core,
+# import-light: no SDK / provider imports)
+from ai.starlake.sentinel import (
+    SENTINEL_SCOPE_TOKEN,
+    consume_sentinel,
+    substitute_scope,
+)
 
 from ai.starlake.airflow.compat import (
     AirflowSkipException,
@@ -950,6 +957,239 @@ fi
             return PokeReturnValue(True, False)
         raise AirflowException(message)
 
+    # -- story 6.12 (issue #122): pre-load not-ready sentinel seams ----------
+    # (provider-free — the per-engine modules supply Hook-based handlers).
+    # The resolved sentinel path embeds the literal SENTINEL_SCOPE_TOKEN;
+    # substitution is ALWAYS runtime data substitution from the task context
+    # (never Jinja over shell code or nested payloads).
+
+    #: Jinja template for the SL_SENTINEL_SCOPE env VALUE on the bash paths —
+    #: the ids render into data (an env var), never into shell code; the
+    #: wrapper's tr whitelist then applies the same [A-Za-z0-9_.+:=-]
+    #: whitelist as ai.starlake.sentinel.sanitize_scope.
+    _SL_SENTINEL_SCOPE_JINJA = "{{ ti.dag_id }}__{{ run_id }}"
+
+    #: Flat-wrapper sanitizer line (story 6.4 rules: no nested bash -c, no
+    #: set -e). Same whitelist as sanitize_scope, but tr is BYTE-wise while
+    #: the python sanitizer is CHARACTER-wise: a multi-byte (non-ASCII)
+    #: dag_id/run_id character maps to several '_' here vs one in python.
+    #: Each consumption path uses ONE mechanism for BOTH the CLI arg and the
+    #: probe (this tr var, or python-side substitution), so writer and
+    #: reader always agree — never mix a tr-sanitized writer with a
+    #: python-sanitized reader.
+    _SL_SENTINEL_SANITIZE_LINE = (
+        "SL_SENTINEL_SCOPE_SAFE=$(printf '%s' \"$SL_SENTINEL_SCOPE\" "
+        "| tr -c 'A-Za-z0-9_.+:=-' '_')"
+    )
+
+    @classmethod
+    def _sl_sentinel_scope_parts(cls, context) -> tuple:
+        """Resolve the (dag_id, run_id) scope parts from the task context.
+
+        dag_id is REQUIRED in the scope: run_id is only unique WITHIN one
+        DAG — two generated DAGs covering the same domain on the same
+        schedule tick share identical ``scheduled__...`` run_ids.
+        """
+        ti = context.get("ti", None)
+        dag_id = getattr(ti, "dag_id", None)
+        if not dag_id:
+            dag_id = getattr(context.get("dag", None), "dag_id", None)
+        run_id = context.get("run_id", None)
+        if not run_id:
+            run_id = getattr(context.get("dag_run", None), "run_id", None)
+        if not dag_id or not run_id:
+            raise AirflowException(
+                "cannot resolve the pre-load sentinel scope — dag_id/run_id "
+                "missing from the task context"
+            )
+        return str(dag_id), str(run_id)
+
+    @classmethod
+    def _sl_sentinel_substitute_payload(cls, payload, context):
+        """Deep-substitute SENTINEL_SCOPE_TOKEN in a submission payload
+        (dict/list/tuple/str), NON-mutating — returns a new structure.
+
+        Applied at execute/poke time so the ``--notReadySentinel`` argument
+        embedded in cloud payloads carries the sanitized run scope; a
+        token-leak test pins that the token never reaches a submitted
+        payload."""
+        dag_id, run_id = cls._sl_sentinel_scope_parts(context)
+
+        def walk(value):
+            if isinstance(value, str):
+                return substitute_scope(value, dag_id, run_id)
+            if isinstance(value, dict):
+                return {key: walk(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return type(value)(walk(item) for item in value)
+            return value
+
+        return walk(payload)
+
+    @classmethod
+    def _sl_sentinel_ready(cls, sentinel_path: str, context, exists_fn, delete_fn) -> bool:
+        """Consume-then-signal verdict after a SUCCESSFUL preload run:
+        substitute the run scope into the polled path, then check-and-consume
+        the marker. ``True`` = READY (proceed), ``False`` = NOT READY (the
+        marker was deleted FIRST — no stale positives on the next check)."""
+        dag_id, run_id = cls._sl_sentinel_scope_parts(context)
+        path = substitute_scope(sentinel_path, dag_id, run_id)
+        return consume_sentinel(path, exists_fn, delete_fn)
+
+    @classmethod
+    def _sl_sentinel_engine_failure(cls, task_id: str, error: BaseException):
+        """Fail-fast verdict for an engine-level failure while the sentinel
+        is configured: in sentinel mode "not ready" exits 0, so any failure
+        is REAL — fail now instead of poking/retrying until timeout.
+        AirflowFailException fails without consuming the retries-as-poke
+        budget."""
+        from airflow.exceptions import AirflowFailException
+        raise AirflowFailException(
+            f"Preload for task {task_id} failed at the engine level while "
+            f"the not-ready sentinel is configured — 'not ready' exits 0 in "
+            f"sentinel mode, so this is a real failure: {error}"
+        )
+
+    @classmethod
+    def _sl_sentinel_deferrable_success(cls, context, pre_load_wait: 'PreLoadWait', task_id: str, sentinel_path: str, exists_fn, delete_fn) -> bool:
+        """Deferrable-path verdict after a SUCCESSFUL terminal state: consume
+        the sentinel; READY → True (truthy XCom → skip_or_start proceeds),
+        NOT READY → the existing keep-waiting primitive (the not-ready raise
+        consumed by the retries-as-poke budget — story 6.5 mechanics)."""
+        if cls._sl_sentinel_ready(sentinel_path, context, exists_fn, delete_fn):
+            return True
+        ti = context["ti"]
+        last = cls._sl_is_last_attempt(ti.try_number, ti.max_tries)
+        return cls._sl_deferrable_pre_load_verdict(
+            False,
+            last,
+            pre_load_wait.soft_fail,
+            f"Preload for task {task_id}: files not ready yet (sentinel "
+            f"present, consumed) on attempt {ti.try_number}",
+        )
+
+    @classmethod
+    def _sl_gcs_sentinel_hook_handlers(cls, gcp_conn_id: str = 'google_cloud_default', impersonation_chain=None):
+        """Zero-arg factory returning GCSHook-based ``(exists_fn, delete_fn)``
+        sentinel handlers. The provider import is LAZY (inside the factory,
+        never at DAG parse) so this base module stays provider-free; hooks
+        honor ``gcp_conn_id`` and the 6.6 once-per-call ``impersonation_chain``
+        contract — which is why the Airflow cloud paths override the core
+        ``default_sentinel_handlers``."""
+        def factory():
+            from airflow.providers.google.cloud.hooks.gcs import GCSHook
+            from ai.starlake.sentinel import parse_uri
+            hook = GCSHook(gcp_conn_id=gcp_conn_id, impersonation_chain=impersonation_chain)
+
+            def exists(uri: str) -> bool:
+                _, bucket, key = parse_uri(uri)
+                return bool(hook.exists(bucket, key))
+
+            def delete(uri: str) -> None:
+                _, bucket, key = parse_uri(uri)
+                try:
+                    hook.delete(bucket, key)
+                except Exception as error:
+                    # already-gone marker = consumed (race/manual cleanup) —
+                    # keeps GCS consistent with the idempotent S3/local
+                    # handlers; matched structurally to stay provider-free
+                    if type(error).__name__ == 'NotFound' or getattr(error, 'code', None) == 404:
+                        return
+                    raise
+
+            return exists, delete
+        return factory
+
+    @classmethod
+    def _sl_s3_sentinel_hook_handlers(cls, aws_conn_id: str = 'aws_default'):
+        """Zero-arg factory returning S3Hook-based ``(exists_fn, delete_fn)``
+        sentinel handlers (lazy provider import — see the GCS twin)."""
+        def factory():
+            from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+            from ai.starlake.sentinel import parse_uri
+            hook = S3Hook(aws_conn_id=aws_conn_id)
+
+            def exists(uri: str) -> bool:
+                _, bucket, key = parse_uri(uri)
+                return bool(hook.check_for_key(key, bucket))
+
+            def delete(uri: str) -> None:
+                _, bucket, key = parse_uri(uri)
+                hook.delete_objects(bucket, [key])
+
+            return exists, delete
+        return factory
+
+    @classmethod
+    def _sl_sentinel_wrapped_command(cls, command: str, test_cmd: str, rm_cmd: str, sanitize_env: bool = True, probe_setup: Optional[str] = None) -> str:
+        """One-shot preload wrapper, sentinel variant (flat script — story
+        6.4 rules). Replaces the exit-code swallow: a non-zero CLI exit is a
+        REAL failure and fails the task (``exit $return_code``); on exit 0
+        the sentinel is consumed and the verdict echoed as the LAST stdout
+        line for the ``skip_or_start`` XCom gate (``0`` proceed / ``1``
+        skip).
+
+        ``probe_setup`` (optional flat line) runs BEFORE the probe and must
+        ``exit 1`` on probe INFRASTRUCTURE failure: a remote probe (gcloud)
+        whose failure were indistinguishable from "marker absent" would
+        silently disable the verdict channel (permanent false READY).
+        ``rm_cmd`` must equally fail loudly (call sites append an explicit
+        guard) — never a silent verdict."""
+        sanitize_line = f"\n{cls._SL_SENTINEL_SANITIZE_LINE}" if sanitize_env else ""
+        probe_line = f"\n{probe_setup}" if probe_setup else ""
+        return f"""{sanitize_line}
+{command}
+return_code=$?
+
+# sentinel mode: 'not ready' exits 0 — a non-zero exit is a REAL failure.
+# 99 is remapped: BashOperator's default skip_on_exit_code=99 would turn a
+# crash into a green skip — the swallow this wrapper removes
+if [ $return_code -ne 0 ]; then
+    if [ $return_code -eq 99 ]; then
+        echo "starlake preload exited with code 99 (remapped to 1 — 99 is BashOperator's skip_on_exit_code)"
+        exit 1
+    fi
+    exit $return_code
+fi
+{probe_line}
+# consume-then-signal: delete the marker BEFORE signaling not-ready
+if {test_cmd}; then
+    {rm_cmd}
+    echo 1
+else
+    echo 0
+fi
+"""
+
+    @classmethod
+    def _sl_sentinel_sensor_command(cls, command: str, test_cmd: str, rm_cmd: str, sanitize_env: bool = True, probe_setup: Optional[str] = None) -> str:
+        """Sensor-mode preload wrapper, sentinel variant: re-encodes the
+        verdict into the CLOSED ``{0, 1, 2}`` contract (pass
+        ``retry_exit_code=2`` to the BashSensor). Collapsing every CLI
+        failure to 1 means a CLI that happens to exit 2 can NEVER be
+        mistaken for poke-again — only the wrapper's own codes reach the
+        sensor. ``probe_setup``/``rm_cmd`` fail-loud rules as in
+        ``_sl_sentinel_wrapped_command``."""
+        sanitize_line = f"\n{cls._SL_SENTINEL_SANITIZE_LINE}" if sanitize_env else ""
+        probe_line = f"\n{probe_setup}" if probe_setup else ""
+        return f"""{sanitize_line}
+{command}
+return_code=$?
+
+# sentinel mode: 'not ready' exits 0 — any non-zero exit is a REAL failure
+if [ $return_code -ne 0 ]; then
+    echo "starlake preload exited with code $return_code (real failure in sentinel mode)"
+    exit 1
+fi
+{probe_line}
+# consume-then-signal: delete the marker BEFORE signaling poke-again
+if {test_cmd}; then
+    {rm_cmd}
+    exit 2
+fi
+exit 0
+"""
+
     def skip_or_start_op(self, task_id: str, upstream_task: BaseOperator, **kwargs) -> Optional[BaseOperator]:
         """
         Args:
@@ -1282,6 +1522,8 @@ class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
         source: Optional[str],
         submit_and_wait,
         payload=None,
+        sentinel_path=None,
+        sentinel_handlers=None,
         **kwargs
     ) -> None:
         kwargs.setdefault('mode', 'reschedule')
@@ -1293,12 +1535,27 @@ class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
         )
         self._submit_and_wait = submit_and_wait
         self.sl_payload = payload
+        # story 6.12 (issue #122) — opt-in sentinel verdict: the token-bearing
+        # path plus a zero-arg factory returning (exists_fn, delete_fn)
+        # (Hook-based on the Airflow engines, lazy provider import inside).
+        self._sentinel_path = sentinel_path
+        self._sentinel_handlers = sentinel_handlers
         self.template_fields = tuple(getattr(self, "template_fields", ()) or ()) + ("sl_payload",)
 
     def poke(self, context) -> Optional[PokeReturnValue]:
+        payload = self.sl_payload
+        if self._sentinel_path:
+            # runtime scope substitution into the submitted payload (the
+            # --notReadySentinel arg travels inside it) — never Jinja
+            payload = StarlakeAirflowJob._sl_sentinel_substitute_payload(payload, context)
         try:
-            succeeded = bool(self._submit_and_wait(context, self.sl_payload))
+            succeeded = bool(self._submit_and_wait(context, payload))
         except Exception as e:
+            if self._sentinel_path:
+                # story 6.12 — sentinel mode: 'not ready' exits 0, so a failed
+                # submission/run is a REAL failure → fail fast instead of
+                # poking until timeout
+                StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, e)
             # A failed submission (no files yet, or a transient error) pokes
             # again — the wall-clock timeout/soft_fail window is the terminal
             # concern, exactly like the shell sensor's retry_exit_code=None.
@@ -1307,6 +1564,16 @@ class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
                 f"({e}); will poke again"
             )
             succeeded = False
+        if succeeded and self._sentinel_path:
+            exists_fn, delete_fn = self._sentinel_handlers()
+            succeeded = StarlakeAirflowJob._sl_sentinel_ready(
+                self._sentinel_path, context, exists_fn, delete_fn
+            )
+            if not succeeded:
+                logging.getLogger(__name__).info(
+                    f"Preload poke for {self.task_id}: not-ready sentinel "
+                    f"present (consumed); will poke again"
+                )
         return StarlakeAirflowJob._sl_pre_load_poke_verdict(succeeded)
 
 class StarlakeEmptyOperator(StarlakeDatasetMixin, EmptyOperator):

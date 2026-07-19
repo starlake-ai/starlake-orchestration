@@ -118,6 +118,48 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
             )
         return PreLoadPoke(poke_interval=poke_interval, timeout=timeout, soft_fail=soft_fail)
 
+    # -- story 6.12 (issue #122): pre-load not-ready sentinel seams ----------
+
+    @classmethod
+    def _sl_resolve_sentinel(cls, kwargs: dict, allowed_schemes: tuple, engine: str) -> Optional[str]:
+        """Pop the ``sentinel_path`` kwarg (unconditionally — a leaked kwarg
+        would corrupt the op construction) and validate its scheme against
+        the engine (definition time). Returns ``None`` when the sentinel
+        feature is off (byte-identical op construction)."""
+        sentinel_path = kwargs.pop('sentinel_path', None)
+        if not sentinel_path:
+            return None
+        from ai.starlake.sentinel import require_scheme
+        require_scheme(sentinel_path, allowed_schemes, engine)
+        return sentinel_path
+
+    @classmethod
+    def _sl_sentinel_substitute_args(cls, arguments: List[str], context) -> List[str]:
+        """Run-time scope substitution over a per-attempt COPY of the command
+        vector: the SENTINEL_SCOPE_TOKEN embedded in the --notReadySentinel
+        value becomes the sanitized ``<job_name>__<run_id>`` scope. Never
+        mutates the closure list (6.9/6.10 rule)."""
+        from ai.starlake.sentinel import substitute_scope
+        return [
+            substitute_scope(argument, context.job_name, context.run_id)
+            if isinstance(argument, str) else argument
+            for argument in arguments
+        ]
+
+    @classmethod
+    def _sl_sentinel_ready(cls, context, sentinel_path: str) -> bool:
+        """Consume-then-signal verdict after a SUCCESSFUL preload run, using
+        the core default handlers (``ai.starlake.gcp``/``ai.starlake.aws``
+        for gs:// and s3://, stdlib for local paths). ``True`` = READY."""
+        from ai.starlake.sentinel import (
+            consume_sentinel,
+            default_sentinel_handlers,
+            substitute_scope,
+        )
+        path = substitute_scope(sentinel_path, context.job_name, context.run_id)
+        exists_fn, delete_fn = default_sentinel_handlers(path)
+        return consume_sentinel(path, exists_fn, delete_fn)
+
     @classmethod
     def _sl_pre_load_poke_loop(
         cls,

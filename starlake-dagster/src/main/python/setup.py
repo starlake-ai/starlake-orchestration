@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.5.7")
+version = os.environ.get("PROJECT_VERSION", "0.5.8")
 
 setup(name='starlake-dagster',
       version=version,

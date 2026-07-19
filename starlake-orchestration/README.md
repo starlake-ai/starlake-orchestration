@@ -149,7 +149,7 @@ def sl_pre_load(
 | domain | `str` | The required domain to pre-load |
 | tables | `set` | The optional tables to pre-load |
 | pre_load_strategy | `Union[StarlakePreLoadStrategy, str, None]` | The optional pre-load strategy (`self.pre_load_strategy` by default) |
-| sensor | `Optional[bool]` | Optional sensor-mode override (the `pre_load_sensor` option by default): when enabled, the pre-load task pokes `starlake preload` every `pre_load_poke_interval` seconds within the `pre_load_timeout` wall-clock window instead of running once — shell execution environment only |
+| sensor | `Optional[bool]` | Optional sensor-mode override (the `pre_load_sensor` option by default): when enabled, the pre-load task pokes `starlake preload` every `pre_load_poke_interval` seconds within the `pre_load_timeout` wall-clock window instead of running once (supported on the shell environment everywhere, and on the cloud engines per each orchestrator's README) |
 
 ###### StarlakePreLoadStrategy
 
@@ -172,6 +172,20 @@ def sl_pre_load(
    ![ack strategy example](https://raw.githubusercontent.com/starlake-ai/starlake-orchestration/main/images/ack.png)
 
 **IMPORTED chain:** `sl_pre_load` >> `skip_or_start` >> `sl_import` >> `sl_load`
+
+###### Pre-load not-ready sentinel
+
+Starlake CLI **1.5.15+** supports `preload --notReadySentinel <uri>`: on a "not ready" decision (IMPORTED/PENDING empty, ACK file missing) the CLI touches a **zero-byte marker** at exactly the given URI and exits **0**; on "ready" no marker is written; on a genuine crash the process still exits non-zero and never writes the marker. This turns the lossy exit-code channel into a deterministic verdict.
+
+The framework consumes this contract through the **opt-in** `pre_load_not_ready_sentinel_path` option (a parent **prefix** — absent or blank keeps everything byte-identical to today). When set, `sl_pre_load` appends `--notReadySentinel <prefix>/<domain>/<scope>.notready` to the CLI arguments for **all three strategies**, where `<scope>` is the sanitized run scope (`<dag_id>__<run_id>` on Airflow, `<job_name>__<run_id>` on Dagster; whitelist `[A-Za-z0-9_.+:=-]`, anything else mapped to `_`) substituted at RUN time — never via templating. The uniform verdict wherever the preload outcome is interpreted:
+
+- exit 0 + marker absent → **READY** → proceed;
+- exit 0 + marker present → **consume** (delete first), then signal **NOT READY** through the mechanism's existing primitive (skip via `skip_or_start`, poke-again in sensor/poke-loop/cloud waiting);
+- non-zero / engine failure → **REAL FAILURE** → fail now (opt-in behavior improvement: a crashed CLI no longer reads as "nothing to load", and broken invocations no longer poke until timeout).
+
+Scheme support is **engine-gated at definition time**: local absolute paths (or `file://`) on shell, `gs://` on cloud_run/dataproc, `s3://` on fargate — any mismatch raises a `ValueError` naming the engine. Default consumption handlers ship in core: local handlers in `ai.starlake.sentinel`, GCS/S3 handler factories in `ai.starlake.gcp`/`ai.starlake.aws` with **lazy SDK imports** — install them with the extras `pip install starlake-orchestration[gcp]` (google-cloud-storage) or `starlake-orchestration[aws]` (boto3). The Airflow cloud paths override the defaults with `GCSHook`/`S3Hook` so `gcp_conn_id`/`aws_conn_id` and `impersonation_chain` are honored.
+
+**Best-effort-write caveat (CLI design):** a failed marker write is logged and swallowed CLI-side — "exit 0 + no marker" can, rarely, mean "not ready but the write failed". For **IMPORTED/PENDING** this yields a harmless no-op load (the pending area is empty by definition of not-ready). For **ACK** it is sharper: the ack file was missing but the pending area may hold real files, so a lost write can trigger a **premature load of un-acked data** — keep the sentinel prefix on reliable storage when using the ACK strategy.
 
 ##### Import
 
@@ -273,10 +287,11 @@ The following options are available for all concrete factory classes derived fro
 | **pre_load_strategy** | `str` | One of `none` (default), `imported`, `pending`, or `ack` |
 | **global_ack_file_path** | `str` | Path to the ack file (`{SL_DATASETS}/pending/{domain}/{{ds}}.ack` by default) |
 | **ack_wait_timeout** | `int` | Timeout in seconds to wait for the ack file (`1 hour` by default); ignored in sensor mode (`pre_load_timeout` is the wall-clock window there) |
-| **pre_load_sensor** | `bool` | `true`/`false` (default `false`) — turn the pre-load task into a sensor that pokes `starlake preload` until files arrive. SHELL execution environment only: cloud engines (cloud_run, dataproc, fargate) reject it with a `ValueError` at DAG-definition time — pre-load stays one-shot there (see each orchestrator's README for whether a retry-based workaround exists and its engine-specific requirements) |
+| **pre_load_sensor** | `bool` | `true`/`false` (default `false`) — turn the pre-load task into a sensor that pokes `starlake preload` until files arrive. Supported on the SHELL environment everywhere; the CLOUD engines wait through per-orchestrator mechanisms (Airflow deferrable/sensor since 0.6.7, Dagster in-op poke loops since 0.5.3 — see each orchestrator's README) |
 | **pre_load_poke_interval** | `int` | Seconds between two pokes in sensor mode (`300` by default) |
 | **pre_load_timeout** | `int` | Wall-clock timeout in seconds for the pre-load sensor (`3600` by default); must be >= `pre_load_poke_interval` |
 | **pre_load_sensor_soft_fail** | `bool` | `true`/`false` (default `false`) — on sensor timeout, skip the downstream loads instead of failing the run |
+| **pre_load_not_ready_sentinel_path** | `str` | Opt-in (absent/blank = off, zero change; options-dict only) — parent prefix for the CLI's `--notReadySentinel` marker (requires starlake CLI **1.5.15+**); resolved to `<prefix>/<domain>/<scope>.notready` with a run-scoped, sanitized `<scope>` (a bucket root like `gs://my-bucket` is a valid prefix). Scheme is engine-gated: absolute local/`file://` on shell, `gs://` on cloud_run/dataproc, `s3://` on fargate. When set, sentinel semantics WIN over `retry_on_failure` for preload: a failed CLI/engine run fails the task instead of being read as "nothing to load". See "Pre-load not-ready sentinel" above |
 | **dataset_triggering_strategy** | `str` | One of `any` (default) or `all` |
 | **timezone** | `str` | Timezone for scheduling (`UTC` by default) |
 

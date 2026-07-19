@@ -14,6 +14,11 @@
 # limitations under the License.
 #
 
-__all__ = ['starlake_dataproc_cluster_config']
+__all__ = ['starlake_dataproc_cluster_config', 'starlake_gcs_sentinel', 'gcs_sentinel_handlers']
 
 from .starlake_dataproc_cluster_config import StarlakeDataprocClusterConfig, StarlakeDataprocMasterConfig, StarlakeDataprocWorkerConfig
+
+# issue #122 — default GCS sentinel handlers; the module keeps its
+# google-cloud-storage import LAZY, so this export adds no import-time SDK
+# requirement (this __init__ loads at DAG-parse time)
+from .starlake_gcs_sentinel import gcs_sentinel_handlers

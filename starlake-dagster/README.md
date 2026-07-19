@@ -218,7 +218,22 @@ The following options can be specified in all concrete factory classes:
 | **pre_load_poke_interval**        | int  | seconds between two pokes in sensor mode (`300` by default)                               |
 | **pre_load_timeout**              | int  | wall-clock timeout in seconds for the pre-load poke loop (`3600` by default)              |
 | **pre_load_sensor_soft_fail**     | bool | `true`/`false` (default `false`) — on timeout skip the downstream loads (optional-output gating) instead of raising `Failure` |
+| **pre_load_not_ready_sentinel_path** | str | opt-in (absent/blank = off, zero change) — parent prefix for the CLI's `--notReadySentinel` marker (requires starlake CLI **1.5.15+**), resolved to `<prefix>/<domain>/<job_name>__<run_id>.notready` (sanitized). Scheme is engine-gated at definition time: absolute local/`file://` on shell, `gs://` on cloud_run/dataproc, `s3://` on fargate. See "Pre-load not-ready sentinel" below |
 | **dataset_triggering_strategy**   | str  | one of `ANY` or `ALL` for the multi-asset sensor **trigger gate** (see [Multi-Asset Sensor](#multi-asset-sensor) — a post-gate consistency check still requires all non-optional datasets before a run) |
+
+#### Pre-load not-ready sentinel
+
+Starlake CLI **1.5.15+** writes a zero-byte marker at `--notReadySentinel <uri>` on a "not ready" decision and exits **0** — a genuine crash still exits non-zero (or a non-DONE Dataproc state) and never writes the marker. With `pre_load_not_ready_sentinel_path` set (strictly opt-in), the pre-load verdict becomes deterministic on every variant:
+
+- **success + marker absent** → READY → proceed (the `result` Output is yielded);
+- **success + marker present** → the marker is **consumed (deleted first)**, then NOT READY is signaled through the existing primitive: bare return → optional-output skip (one-shot), poke-again in the in-op wall-clock loop (sensor mode);
+- **failed run** → REAL FAILURE → `Failure` is raised NOW, bypassing the forced `skip_or_start` swallow AND the poke loop (opt-in only: without the option a broken invocation still reads as "no files yet" — the documented poke-until-timeout trade-off).
+
+The `<job_name>__<run_id>` scope is substituted at op RUN time into a **per-attempt copy** of the command vector (the closure `arguments` list is never mutated — 6.9/6.10 rule) and into the polled path; the scope is whitelist-sanitized (`[A-Za-z0-9_.+:=-]`). Consumption uses the core default handlers: local files for shell, `ai.starlake.gcp` (google-cloud-storage) for `gs://`, `ai.starlake.aws` (boto3) for `s3://` — install the SDKs with `pip install starlake-orchestration[gcp]` / `[aws]`; a missing SDK raises an actionable error naming the extra.
+
+**Best-effort-write caveat** (CLI design): a failed marker write still ends "success" with no marker. For IMPORTED/PENDING this yields a no-op load; for **ACK** it can trigger a **premature load of un-acked data** — keep the sentinel prefix on reliable storage with the ACK strategy.
+
+**Consumption identity (gs://)**: the default handlers authenticate with the WORKER's application-default credentials — `cloud_run_service_account` impersonation applies only to the `gcloud run jobs execute` submission, not to the marker probe. Grant the worker identity read/delete on the sentinel prefix (a missing grant raises loudly on every consume; it is never a silent false verdict).
 
 ## DagsterLogicalDatetimeConfig
 

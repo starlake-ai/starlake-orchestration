@@ -9,6 +9,7 @@
 # - pre_load_poke_interval(300): seconds between two pokes in sensor mode [OPTIONAL]
 # - pre_load_timeout(3600): wall-clock timeout in seconds for the pre-load sensor; on timeout downstream loads are skipped [OPTIONAL]
 # - pre_load_sensor_soft_fail(false): when true, a sensor timeout marks the sensor SKIPPED instead of FAILED [OPTIONAL]
+# - pre_load_not_ready_sentinel_path: opt-in pre-load not-ready sentinel parent prefix (an ABSOLUTE local path, requires starlake CLI 1.5.15 or newer) - a zero-byte marker under <prefix>/<domain>/ signals 'files not ready' (consumed by the task's own bash wrapper) and a failed CLI now fails the task instead of reading as 'nothing to load' [OPTIONAL]
 # - tags: a list of tags to be applied to the dag [OPTIONAL]
 # - start_date: the start date of the dag (eg. 2022-01-01) [OPTIONAL]
 # - end_date: the end date of the dag (eg. 2024-12-31) [OPTIONAL]
