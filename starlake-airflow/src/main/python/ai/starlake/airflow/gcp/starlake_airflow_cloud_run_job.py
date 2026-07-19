@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 
+import copy
+
 import os
 
 from datetime import timedelta
@@ -51,6 +53,17 @@ from google.longrunning import operations_pb2
 
 from enum import Enum
 CloudRunMode = Enum("CloudRunMode", ["SYNC", "DEFER", "ASYNC"])
+
+def _sl_sentinel_scope_env_extra(kwargs: dict) -> dict:
+    """Build the env/append_env ctor kwargs carrying the SL_SENTINEL_SCOPE
+    Jinja VALUE for the gcloud bash tasks (story 6.12). Merges a caller
+    -provided env instead of colliding with it (a duplicate 'env' keyword
+    would TypeError only when the sentinel is enabled) and forces
+    append_env=True — gcloud needs the inherited environment."""
+    env = dict(kwargs.pop('env', None) or {})
+    env['SL_SENTINEL_SCOPE'] = StarlakeAirflowJob._SL_SENTINEL_SCOPE_JINJA
+    kwargs.pop('append_env', None)
+    return {'env': env, 'append_env': True}
 
 class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
     """Airflow Starlake Cloud Run Job."""
@@ -142,6 +155,35 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             self.options,
             None if self.use_gcloud else CloudRunExecuteJobOperator,
         )
+        # story 6.12 (issue #122) — not-ready sentinel: popped unconditionally
+        # (BaseOperator would reject the kwarg); only PRELOAD consumes it
+        sentinel_path = kwargs.pop('sentinel_path', None)
+        if not preload:
+            sentinel_path = None
+        if sentinel_path:
+            from ai.starlake.sentinel import require_scheme
+            # engine-aware scheme gate: cloud_run consumes gs:// only
+            require_scheme(sentinel_path, ('gs',), 'cloud_run')
+            if pre_load_wait is None and kwargs.get('deferrable'):
+                # a user-forced deferral on a ONE-SHOT preload would resume
+                # through execute_complete without any sentinel consult —
+                # the verdict would be silently lost (false READY)
+                raise ValueError(
+                    "[cloud_run] pre_load_not_ready_sentinel_path is not "
+                    "compatible with an explicit deferrable=True on a "
+                    "one-shot preload — use pre_load_sensor=true for waiting"
+                )
+            if self.use_gcloud and pre_load_wait is None and self.cloud_run_async and self.retry_on_failure:
+                # the retry_on_failure=true async topology has no verdict
+                # task: its completion sensor would consume the marker on one
+                # poke and re-read the SAME finished execution as READY on
+                # the next — an incoherent combination, rejected loudly
+                raise ValueError(
+                    "[cloud_run] pre_load_not_ready_sentinel_path is not "
+                    "supported with use_gcloud=true, cloud_run_async=true and "
+                    "retry_on_failure=true — use retry_on_failure=false, "
+                    "cloud_run_async=false, or pre_load_sensor=true"
+                )
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         kwargs.update({'retry_delay': timedelta(seconds=self.retry_delay_in_seconds)})
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
@@ -181,6 +223,39 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             arguments = [command] + tmp_arguments + arguments
         command = f'^{self.separator}^' + self.separator.join(arguments)
 
+        # story 6.12 — gcloud consumption pieces (definition time): token →
+        # ${SL_SENTINEL_SCOPE_SAFE} surgery on the gcloud COMMAND STRING only
+        # (the python paths keep the token in `arguments` and substitute it
+        # python-side at execute/poke time), plus the gcloud storage probe
+        # commands (same gcloud dependency and impersonation CLI fragment as
+        # the existing probes)
+        sentinel_test = sentinel_rm = sentinel_probe = None
+        if sentinel_path and self.use_gcloud:
+            from ai.starlake.sentinel import SENTINEL_SCOPE_TOKEN
+            command = command.replace(SENTINEL_SCOPE_TOKEN, '${SL_SENTINEL_SCOPE_SAFE}')
+            gs_ref = '"' + sentinel_path.replace(SENTINEL_SCOPE_TOKEN, '${SL_SENTINEL_SCOPE_SAFE}') + '"'
+            # THREE-STATE probe (review finding): `gcloud storage ls` exits
+            # non-zero for BOTH "no such object" and infrastructure failures
+            # (expired auth, missing storage grant, network) — conflating
+            # them would silently disable the verdict channel (permanent
+            # false READY). The probe_setup line classifies: exit 0 =
+            # present; non-zero + a matched-no-objects message = absent;
+            # anything else = REAL failure (exit 1, loud). A failed rm is
+            # equally loud — never a silent verdict.
+            sentinel_probe = (
+                'sl_sentinel_probe_output=$(gcloud storage ls ' + gs_ref + ' '
+                + self.impersonate_service_account + ' 2>&1); '
+                'sl_sentinel_probe_status=$?; '
+                'if [ $sl_sentinel_probe_status -ne 0 ] && '
+                '! printf \'%s\' "$sl_sentinel_probe_output" | grep -qi "matched no objects"; then '
+                'echo "sentinel probe failed: $sl_sentinel_probe_output"; exit 1; fi'
+            )
+            sentinel_test = "[ $sl_sentinel_probe_status -eq 0 ]"
+            sentinel_rm = (
+                'gcloud storage rm ' + gs_ref + ' ' + self.impersonate_service_account
+                + ' > /dev/null 2>&1 || { echo "sentinel rm failed"; exit 1; }'
+            )
+
         if pre_load_wait is not None:
             # story 6.5 (issue #93) — PRELOAD waiting on cloud_run.
             if self.use_gcloud:
@@ -198,6 +273,36 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                 )
                 kwargs.pop('retry_delay', None)
                 kwargs.setdefault('retries', 0)
+                sensor_extra = {}
+                if sentinel_path:
+                    # story 6.12 — closed {0,1,2} wrapper: the sentinel is
+                    # consumed via gcloud storage ls/rm; a failed execution is
+                    # a REAL failure (exit 1, AirflowFailException via
+                    # retry_exit_code=2). BashSensor has no append_env and the
+                    # gcloud command needs the inherited environment, so the
+                    # sanitized scope is exported python-side by the sensor
+                    # (sentinel_scope_in_environ) — hence sanitize_env=False.
+                    bash_command = StarlakeAirflowJob._sl_sentinel_sensor_command(
+                        bash_command, sentinel_test, sentinel_rm,
+                        sanitize_env=False, probe_setup=sentinel_probe,
+                    )
+                    # the closed {0,1,2} contract OWNS this code — a caller
+                    # override would invert real-failure vs poke-again
+                    kwargs['retry_exit_code'] = 2
+                    if 'env' in kwargs:
+                        # BashSensor's env REPLACES the inherited environment,
+                        # which would strip both PATH (gcloud) and the
+                        # python-exported SL_SENTINEL_SCOPE_SAFE — the scope
+                        # would collapse to a run-shared path (cross-run
+                        # consume). Reject loudly instead of corrupting.
+                        raise ValueError(
+                            "[cloud_run] pre_load_not_ready_sentinel_path is "
+                            "not compatible with a custom 'env' on the gcloud "
+                            "waiting sensor — BashSensor replaces the "
+                            "inherited environment the sentinel scope and "
+                            "gcloud rely on"
+                        )
+                    sensor_extra = {'sentinel_scope_in_environ': True}
                 return StarlakePreloadBashSensor(
                     task_id=task_id,
                     dataset=dataset,
@@ -207,6 +312,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     timeout=pre_load_wait.timeout,
                     soft_fail=pre_load_wait.soft_fail,
                     mode='reschedule',
+                    **sensor_extra,
                     **kwargs
                 )
             # python path. Engine kwargs (explicit CloudRunExecuteJobOperator
@@ -247,6 +353,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     deferrable=True,
                     preload=True,
                     pre_load_wait=pre_load_wait,
+                    sentinel_path=sentinel_path,
                     **common,
                     **kwargs
                 )
@@ -276,6 +383,13 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                 poke_interval=pre_load_wait.poke_interval,
                 timeout=pre_load_wait.timeout,
                 soft_fail=pre_load_wait.soft_fail,
+                # story 6.12 — sentinel verdict per poke: Hook-based handlers
+                # (gcp_conn_id + the 6.6 impersonation contract), lazy import
+                sentinel_path=sentinel_path,
+                sentinel_handlers=StarlakeAirflowJob._sl_gcs_sentinel_hook_handlers(
+                    gcp_conn_id=common.get('gcp_conn_id', 'google_cloud_default'),
+                    impersonation_chain=impersonation_chain,
+                ) if sentinel_path else None,
                 **kwargs
             )
 
@@ -283,14 +397,29 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
             with TaskGroup(group_id=f'{task_id}_wait') as task_completion_sensors:
                 if self.use_gcloud: # use gcloud
                     kwargs.update({'do_xcom_push': True})
+                    submission_command = (
+                        f"gcloud beta run jobs execute {self.cloud_run_job_name} "
+                        f"--args \"{command}\" "
+                        f"{self.update_env_vars} "
+                        f"--async --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}" #--task-timeout 300
+                    )
+                    submission_extra = {}
+                    if sentinel_path:
+                        # story 6.12 — the submission command embeds the
+                        # ${SL_SENTINEL_SCOPE_SAFE}-rewritten --notReadySentinel
+                        # arg: prepend the tr sanitizer line (flat) and hand
+                        # the scope in as an env VALUE (append_env keeps the
+                        # inherited environment gcloud needs); computed ONCE
+                        # (kwargs' own env is merged, not collided with) and
+                        # shared with the status task below
+                        submission_command = (
+                            f"{StarlakeAirflowJob._SL_SENTINEL_SANITIZE_LINE}\n{submission_command}"
+                        )
+                        submission_extra = _sl_sentinel_scope_env_extra(kwargs)
                     job_task = BashOperator(
                         task_id=task_id,
-                        bash_command=(
-                            f"gcloud beta run jobs execute {self.cloud_run_job_name} "
-                            f"--args \"{command}\" "
-                            f"{self.update_env_vars} "
-                            f"--async --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}" #--task-timeout 300
-                        ),
+                        bash_command=submission_command,
+                        **submission_extra,
                         **kwargs
                     )
                     # check job completion
@@ -322,12 +451,26 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         # execution fails the chain. The command is passed
                         # untouched — the wrapper owns the quoting contract
                         # (story 6.4, issue #95)
-                        bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command, preload)
+                        status_extra = {}
+                        if sentinel_path:
+                            # story 6.12 — sentinel branch on the status task:
+                            # a failed execution exits non-zero (real failure,
+                            # swallow removed); on success the marker is
+                            # consumed via gcloud storage ls/rm and the
+                            # skip_or_start verdict echoed (0/1)
+                            bash_command = StarlakeAirflowJob._sl_sentinel_wrapped_command(
+                                bash_command, sentinel_test, sentinel_rm,
+                                probe_setup=sentinel_probe,
+                            )
+                            status_extra = dict(submission_extra)
+                        else:
+                            bash_command = StarlakeAirflowJob._sl_xcom_wrapped_command(bash_command, preload)
                         job_status = StarlakeBashOperator(
                             task_id=get_completion_status_id,
                             dataset=dataset,
                             source=self.source,
                             bash_command=bash_command,
+                            **status_extra,
                             **kwargs
                         )
                         job_task >> completion_sensor >> job_status
@@ -352,6 +495,9 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         impersonation_chain=impersonation_chain,
                         preload=preload,
                         retry_on_failure=self.retry_on_failure,
+                        # story 6.12 — the submission substitutes the scope
+                        # token in the payload; the completion sensor consumes
+                        sentinel_path=sentinel_path,
                         **kwargs
                     )
                     check_completion_id = task_id + '_check_completion'
@@ -362,6 +508,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         source_task_id=job_task.task_id,
                         impersonation_chain=impersonation_chain,
                         preload=preload,
+                        sentinel_path=sentinel_path,
                         **kwargs
                     )
 
@@ -377,7 +524,18 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     f"{self.update_env_vars} "
                     f"--wait --region {self.cloud_run_job_region} --project {self.project_id} --format='get(metadata.name)' {self.impersonate_service_account}" #--task-timeout 300 
                 )
-                if kwargs.get('do_xcom_push', False):
+                sync_extra = {}
+                if sentinel_path:
+                    # story 6.12 — sentinel one-shot on gcloud sync: the
+                    # exit-code swallow is REMOVED (a failed execution fails
+                    # the task); on exit 0 the marker is consumed via gcloud
+                    # storage ls/rm and the skip_or_start verdict echoed (0/1)
+                    bash_command = StarlakeAirflowJob._sl_sentinel_wrapped_command(
+                        bash_command, sentinel_test, sentinel_rm,
+                        probe_setup=sentinel_probe,
+                    )
+                    sync_extra = _sl_sentinel_scope_env_extra(kwargs)
+                elif kwargs.get('do_xcom_push', False):
                     # story 6.3 (issue #92) — wrapper variant keyed on the
                     # task type, not on do_xcom_push: preload swallows the
                     # exit code (XCom-gated), every other task type keeps the
@@ -395,6 +553,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     source=self.source,
                     bash_command=bash_command,
                     do_xcom_push=True,
+                    **sync_extra,
                     **kwargs
                 )
             else:
@@ -417,6 +576,7 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                     impersonation_chain=impersonation_chain,
                     preload=preload,
                     retry_on_failure=self.retry_on_failure,
+                    sentinel_path=sentinel_path,
                     **kwargs
                 )
 
@@ -495,6 +655,7 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         preload: bool = False,
         retry_on_failure: bool = False,
         pre_load_wait: Optional[PreLoadWait] = None,
+        sentinel_path: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(  # type: ignore
@@ -511,9 +672,32 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         # story 6.5 (issue #93) — set on the deferrable pre-load waiting task
         # only; None otherwise.
         self.pre_load_wait = pre_load_wait
+        # story 6.12 (issue #122) — not-ready sentinel (preload only). The
+        # pristine payload TEMPLATE is captured at ctor time: substitution
+        # always starts from it, so a second run of the same operator object
+        # (dag.test() twice in-process) can never submit the previous run's
+        # scope while polling its own path.
+        self.sentinel_path = sentinel_path
+        self._sl_sentinel_overrides_template = copy.deepcopy(self.overrides) if sentinel_path else None
+
+    def _sl_sentinel_hook_handlers(self):
+        """GCSHook-based sentinel handlers honoring this operator's
+        gcp_conn_id + impersonation_chain (lazy import, story 6.12)."""
+        return StarlakeAirflowJob._sl_gcs_sentinel_hook_handlers(
+            gcp_conn_id=self.gcp_conn_id,
+            impersonation_chain=self.impersonation_chain,
+        )()
 
     def execute(self, context: Context):
         logger = logging.getLogger(__name__)
+        # story 6.12 — runtime scope substitution into the submitted payload
+        # (the --notReadySentinel arg travels in overrides); per-attempt and
+        # idempotent (the token is gone after the first application); a
+        # token-leak test pins that the token never reaches a submission
+        if self.preload and self.sentinel_path:
+            self.overrides = StarlakeAirflowJob._sl_sentinel_substitute_payload(
+                self._sl_sentinel_overrides_template, context
+            )
         # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer via
         # the native CloudRunExecuteJobOperator (self.deferrable=True), the
         # verdict is applied on resume in execute_complete. Bypass both the ASYNC
@@ -526,6 +710,11 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
             try:
                 return super(CloudRunJobOperator, self).execute(context)
             except Exception as e:
+                if self.sentinel_path:
+                    # story 6.12 — 'not ready' exits 0 in sentinel mode: an
+                    # engine failure is REAL → fail fast, do not burn the
+                    # retries-as-poke budget
+                    StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, e)
                 return StarlakeAirflowJob._sl_deferrable_wait_failure(
                     context, self.pre_load_wait, self.task_id, e
                 )
@@ -555,9 +744,21 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
                 # the "job" XCom is a best-effort extra, never gated on
                 if self.do_xcom_push and hasattr(self, "xcom_push"):
                     self.xcom_push(context, key="job", value=job)
+                if self.preload and self.sentinel_path:
+                    # story 6.12 — consume-then-signal: sentinel present →
+                    # falsy return_value XCom → skip_or_start skips
+                    exists_fn, delete_fn = self._sl_sentinel_hook_handlers()
+                    return StarlakeAirflowJob._sl_sentinel_ready(
+                        self.sentinel_path, context, exists_fn, delete_fn
+                    )
                 return True
             except Exception as e:
                 logger.exception(msg=f"Task {self.task_id} has failed")
+                if self.preload and self.sentinel_path:
+                    # story 6.12 — sentinel precedence over retry_on_failure:
+                    # 'not ready' exits 0, so a failed execution is a REAL
+                    # failure — the swallow is removed
+                    raise e
                 # story 6.3 (issue #92) — single verdict source: only preload
                 # with retry_on_failure=false swallows (the False return value
                 # feeds the skip_or_start XCom gating); a failed
@@ -580,8 +781,20 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         try:
             super().execute_complete(context, event)
         except Exception as e:
+            if self.sentinel_path:
+                # story 6.12 — engine failure in sentinel mode is REAL →
+                # fail fast (no retries-as-poke consumption)
+                StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, e)
             return StarlakeAirflowJob._sl_deferrable_wait_failure(
                 context, self.pre_load_wait, self.task_id, e
+            )
+        if self.sentinel_path:
+            # story 6.12 — successful terminal state: consume the sentinel;
+            # NOT READY maps to the existing retries-as-poke raise
+            exists_fn, delete_fn = self._sl_sentinel_hook_handlers()
+            return StarlakeAirflowJob._sl_sentinel_deferrable_success(
+                context, self.pre_load_wait, self.task_id,
+                self.sentinel_path, exists_fn, delete_fn,
             )
         return True
 
@@ -599,6 +812,7 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Union[str, Sequence[str], None] = None,
         preload: bool = False,
+        sentinel_path: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(
@@ -612,6 +826,8 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
         self.preload = preload
+        # story 6.12 (issue #122) — not-ready sentinel (preload only)
+        self.sentinel_path = sentinel_path
 
     def poke(self, context: Context):
         hook = CloudRunHook(
@@ -630,6 +846,13 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
                 self.log.error(
                     f"{operation.error.message} [{operation.error.code}]"
                 )
+                if self.preload and self.sentinel_path:
+                    # story 6.12 — 'not ready' exits 0 in sentinel mode: a
+                    # failed execution is a REAL failure → fail fast
+                    StarlakeAirflowJob._sl_sentinel_engine_failure(
+                        self.task_id,
+                        f"{operation.error.message} [{operation.error.code}]",
+                    )
                 # story 6.3 (issue #92) — verdict keyed on the task type, NOT
                 # on do_xcom_push (which defaults to True on BaseOperator and
                 # silently selected the swallow branch for every task type):
@@ -639,5 +862,16 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
                     self.preload,
                     f"{operation.error.message} [{operation.error.code}]",
                 )
+            if self.preload and self.sentinel_path:
+                # story 6.12 — consume-then-signal: sentinel present → falsy
+                # return_value XCom → skip_or_start skips downstream
+                exists_fn, delete_fn = StarlakeAirflowJob._sl_gcs_sentinel_hook_handlers(
+                    gcp_conn_id=self.gcp_conn_id,
+                    impersonation_chain=self.impersonation_chain,
+                )()
+                ready = StarlakeAirflowJob._sl_sentinel_ready(
+                    self.sentinel_path, context, exists_fn, delete_fn
+                )
+                return PokeReturnValue(True, ready)
             return PokeReturnValue(True, True)
         return PokeReturnValue(False, False)

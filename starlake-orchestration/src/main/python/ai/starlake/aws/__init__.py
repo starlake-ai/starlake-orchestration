@@ -14,6 +14,11 @@
 # limitations under the License.
 #
 
-__all__ = ['starlake_fargate_helper']
+__all__ = ['starlake_fargate_helper', 'starlake_s3_sentinel', 's3_sentinel_handlers']
 
 from .starlake_fargate_helper import StarlakeFargateHelper
+
+# issue #122 — default S3 sentinel handlers; the module keeps its boto3
+# import LAZY, so this export adds no import-time SDK requirement (this
+# __init__ loads at DAG-parse time)
+from .starlake_s3_sentinel import s3_sentinel_handlers

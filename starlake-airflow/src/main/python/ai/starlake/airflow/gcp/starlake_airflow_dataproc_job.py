@@ -219,6 +219,24 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             cluster_name = cluster_name[0:-1] + 'Z'
         task_id = f"{cluster_id}_submit" if not task_id else task_id
         arguments = [] if not arguments else arguments
+        # story 6.12 (issue #122) — not-ready sentinel: popped unconditionally
+        # (BaseOperator would reject the kwarg); only PRELOAD consumes it
+        sentinel_path = kwargs.pop('sentinel_path', None)
+        if task_type != TaskType.PRELOAD:
+            sentinel_path = None
+        if sentinel_path:
+            from ai.starlake.sentinel import require_scheme
+            # engine-aware scheme gate: dataproc consumes gs:// only
+            require_scheme(sentinel_path, ('gs',), 'dataproc')
+            if pre_load_wait is None and kwargs.get('deferrable'):
+                # a user-forced deferral on a ONE-SHOT preload would resume
+                # through execute_complete without any sentinel consult —
+                # the verdict would be silently lost (false READY)
+                raise ValueError(
+                    "[dataproc] pre_load_not_ready_sentinel_path is not "
+                    "compatible with an explicit deferrable=True on a "
+                    "one-shot preload — use pre_load_sensor=true for waiting"
+                )
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
         # would reject the kwarg
         scheduled_date = kwargs.pop('scheduled_date', None)
@@ -322,6 +340,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
                     deferrable=True,
                     preload=True,
                     pre_load_wait=pre_load_wait,
+                    sentinel_path=sentinel_path,
                     **common,
                     **kwargs
                 )
@@ -355,6 +374,13 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
                 poke_interval=pre_load_wait.poke_interval,
                 timeout=pre_load_wait.timeout,
                 soft_fail=pre_load_wait.soft_fail,
+                # story 6.12 — sentinel verdict per poke via GCSHook handlers
+                # (lazy import), honoring the submission's credential wiring
+                sentinel_path=sentinel_path,
+                sentinel_handlers=StarlakeAirflowJob._sl_gcs_sentinel_hook_handlers(
+                    gcp_conn_id=common.get('gcp_conn_id', 'google_cloud_default'),
+                    impersonation_chain=common.get('impersonation_chain', None),
+                ) if sentinel_path else None,
                 **kwargs
             )
 
@@ -365,6 +391,8 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             project_id=self.cluster_config.project_id,
             region=self.cluster_config.region,
             job=job,
+            preload=task_type == TaskType.PRELOAD,
+            sentinel_path=sentinel_path,
             **kwargs
         )
 
@@ -443,6 +471,7 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
             job: dict,
             preload: bool = False,
             pre_load_wait: Optional[PreLoadWait] = None,
+            sentinel_path: Optional[str] = None,
             **kwargs
         ):
         kwargs.pop("asynchronous", None) # TODO handle asynchronous dataproc jobs
@@ -460,8 +489,28 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
         # story 6.5 (issue #93) — set on the deferrable pre-load waiting task
         # only; None otherwise.
         self.pre_load_wait = pre_load_wait
+        # story 6.12 (issue #122) — not-ready sentinel (preload only); the
+        # pristine job template keeps re-executions of the same operator
+        # object from submitting a previous run's scope
+        self.sentinel_path = sentinel_path
+        self._sl_sentinel_job_template = copy.deepcopy(job) if sentinel_path else None
+
+    def _sl_sentinel_hook_handlers(self):
+        """GCSHook-based sentinel handlers honoring this operator's
+        gcp_conn_id + impersonation_chain (lazy import, story 6.12)."""
+        return StarlakeAirflowJob._sl_gcs_sentinel_hook_handlers(
+            gcp_conn_id=getattr(self, 'gcp_conn_id', 'google_cloud_default'),
+            impersonation_chain=getattr(self, 'impersonation_chain', None),
+        )()
 
     def execute(self, context):
+        # story 6.12 — runtime scope substitution into the submitted job (the
+        # --notReadySentinel arg travels in spark_job.args); per-attempt and
+        # idempotent (the token is gone after the first application)
+        if self.preload and self.sentinel_path:
+            self.job = StarlakeAirflowJob._sl_sentinel_substitute_payload(
+                self._sl_sentinel_job_template, context
+            )
         # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer,
         # verdict applied on resume in execute_complete. Bypass the xcom
         # bookkeeping below (TaskDeferred is a BaseException, so the except
@@ -487,11 +536,27 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
             try:
                 return super().execute(context)
             except Exception as e:
+                if self.sentinel_path:
+                    # story 6.12 — 'not ready' exits 0 in sentinel mode: an
+                    # engine failure is REAL → fail fast, do not burn the
+                    # retries-as-poke budget
+                    StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, e)
                 return StarlakeAirflowJob._sl_deferrable_wait_failure(
                     context, self.pre_load_wait, self.task_id, e
                 )
         try:
             job_id = super().execute(context)
+            if self.preload and self.sentinel_path:
+                # story 6.12 — keep the job_id XCom (best-effort extra, never
+                # gated on — Airflow 3 operators have no xcom_push), then
+                # consume-then-signal: sentinel present → falsy return_value
+                # XCom → skip_or_start skips downstream
+                if self.do_xcom_push and hasattr(self, "xcom_push"):
+                    self.xcom_push(context, key="job_id", value=job_id)
+                exists_fn, delete_fn = self._sl_sentinel_hook_handlers()
+                return StarlakeAirflowJob._sl_sentinel_ready(
+                    self.sentinel_path, context, exists_fn, delete_fn
+                )
             if self.do_xcom_push:
                 self.xcom_push(context, key="job_id", value=job_id)
                 return True
@@ -513,7 +578,19 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
         try:
             super().execute_complete(context, event)
         except Exception as e:
+            if self.sentinel_path:
+                # story 6.12 — engine failure in sentinel mode is REAL →
+                # fail fast (no retries-as-poke consumption)
+                StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, e)
             return StarlakeAirflowJob._sl_deferrable_wait_failure(
                 context, self.pre_load_wait, self.task_id, e
+            )
+        if self.sentinel_path:
+            # story 6.12 — successful terminal state: consume the sentinel;
+            # NOT READY maps to the existing retries-as-poke raise
+            exists_fn, delete_fn = self._sl_sentinel_hook_handlers()
+            return StarlakeAirflowJob._sl_sentinel_deferrable_success(
+                context, self.pre_load_wait, self.task_id,
+                self.sentinel_path, exists_fn, delete_fn,
             )
         return True

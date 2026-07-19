@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 
+import copy
+
 from typing import Any, Dict, Optional, Union
 
 from ai.starlake.dataset import StarlakeDataset
@@ -66,6 +68,24 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
         pre_load_wait = self.__class__._sl_resolve_cloud_pre_load_wait(
             kwargs, self.options, EcsRunTaskOperator
         )
+        # story 6.12 (issue #122) — not-ready sentinel: popped unconditionally
+        # (BaseOperator would reject the kwarg); only PRELOAD consumes it
+        sentinel_path = kwargs.pop('sentinel_path', None)
+        if not preload:
+            sentinel_path = None
+        if sentinel_path:
+            from ai.starlake.sentinel import require_scheme
+            # engine-aware scheme gate: fargate consumes s3:// only
+            require_scheme(sentinel_path, ('s3',), 'fargate')
+            if pre_load_wait is None and kwargs.get('deferrable'):
+                # a user-forced deferral on a ONE-SHOT preload would resume
+                # through execute_complete without any sentinel consult —
+                # the verdict would be silently lost (false READY)
+                raise ValueError(
+                    "[fargate] pre_load_not_ready_sentinel_path is not "
+                    "compatible with an explicit deferrable=True on a "
+                    "one-shot preload — use pre_load_sensor=true for waiting"
+                )
         # explicit --scheduledDate override — popped unconditionally: BaseOperator
         # would reject the kwarg
         scheduled_date = kwargs.pop('scheduled_date', None)
@@ -150,6 +170,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                     deferrable=True,
                     preload=True,
                     pre_load_wait=pre_load_wait,
+                    sentinel_path=sentinel_path,
                     **common,
                     **kwargs
                 )
@@ -181,6 +202,12 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                 poke_interval=pre_load_wait.poke_interval,
                 timeout=pre_load_wait.timeout,
                 soft_fail=pre_load_wait.soft_fail,
+                # story 6.12 — sentinel verdict per poke via S3Hook handlers
+                # (lazy import), honoring the task's aws_conn_id
+                sentinel_path=sentinel_path,
+                sentinel_handlers=StarlakeAirflowJob._sl_s3_sentinel_hook_handlers(
+                    aws_conn_id=aws_conn_id,
+                ) if sentinel_path else None,
                 **kwargs
             )
 
@@ -199,6 +226,7 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                 wait_for_completion=True,
                 retry_on_failure=self.retry_on_failure,
                 preload=preload,
+                sentinel_path=sentinel_path,
                 **kwargs
             )
         else:
@@ -216,6 +244,9 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                     network_configuration=network_configuration,
                     wait_for_completion=False,
                     preload=preload,
+                    # story 6.12 — the submission substitutes the scope token
+                    # in the payload; the completion sensor consumes
+                    sentinel_path=sentinel_path,
                     **kwargs
                 )
                 check_completion_id = task_id + '_check_completion'
@@ -228,6 +259,8 @@ class StarlakeAirflowFargateJob(StarlakeAirflowJob):
                     poke_interval=self.fargate_async_poke_interval,
                     pool=kwargs.get('pool', self.pool),
                     preload=preload,
+                    sentinel_path=sentinel_path,
+                    sentinel_aws_conn_id=aws_conn_id,
                 )
                 run_task >> completion_sensor
             return task_completion_sensors
@@ -258,6 +291,7 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
         retry_on_failure: bool = False,
         preload: bool = False,
         pre_load_wait: Optional[PreLoadWait] = None,
+        sentinel_path: Optional[str] = None,
         **kwargs
     ) -> None:
         super().__init__(
@@ -279,10 +313,29 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
         # story 6.5 (issue #93) — set on the deferrable pre-load waiting task
         # only; None for one-shot preload and every non-preload task.
         self.pre_load_wait = pre_load_wait
+        # story 6.12 (issue #122) — not-ready sentinel (preload only); the
+        # pristine payload template keeps re-executions of the same operator
+        # object from submitting a previous run's scope
+        self.sentinel_path = sentinel_path
+        self._sl_sentinel_overrides_template = copy.deepcopy(self.overrides) if sentinel_path else None
+
+    def _sl_sentinel_hook_handlers(self):
+        """S3Hook-based sentinel handlers honoring this operator's
+        aws_conn_id (lazy import, story 6.12)."""
+        return StarlakeAirflowJob._sl_s3_sentinel_hook_handlers(
+            aws_conn_id=self.aws_conn_id,
+        )()
 
     def execute(self, context):
         logger = logging.getLogger(__name__)
         logger.info(f"Running fargate task {self.task_id}")
+        # story 6.12 — runtime scope substitution into the submitted payload
+        # (the --notReadySentinel arg travels in overrides); per-attempt and
+        # idempotent (the token is gone after the first application)
+        if self.preload and self.sentinel_path:
+            self.overrides = StarlakeAirflowJob._sl_sentinel_substitute_payload(
+                self._sl_sentinel_overrides_template, context
+            )
         # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer,
         # the verdict is applied on resume in execute_complete. Bypass the 6.3
         # swallow entirely: EcsRunTaskOperator.execute raises TaskDeferred as
@@ -294,17 +347,33 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
             try:
                 return super().execute(context)
             except Exception as e:
+                if self.sentinel_path:
+                    # story 6.12 — 'not ready' exits 0 in sentinel mode: an
+                    # engine failure is REAL → fail fast
+                    StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, e)
                 return StarlakeAirflowJob._sl_deferrable_wait_failure(
                     context, self.pre_load_wait, self.task_id, e
                 )
         try:
             super().execute(context)
             if self.wait_for_completion:
+                if self.preload and self.sentinel_path:
+                    # story 6.12 — consume-then-signal: sentinel present →
+                    # falsy return_value XCom → skip_or_start skips
+                    exists_fn, delete_fn = self._sl_sentinel_hook_handlers()
+                    return StarlakeAirflowJob._sl_sentinel_ready(
+                        self.sentinel_path, context, exists_fn, delete_fn
+                    )
                 return True
             else:
                 return None
         except Exception as e:
             logger.exception(msg = f"Task {self.task_id} has failed")
+            if self.preload and self.sentinel_path:
+                # story 6.12 — sentinel precedence over retry_on_failure:
+                # 'not ready' exits 0, so a failed run is a REAL failure —
+                # the swallow is removed
+                raise e
             # story 6.3 (issue #92) — single verdict source: only preload with
             # retry_on_failure=false swallows (a failed load/transform/stage
             # always fails the task; retry_on_failure=true re-raises even for
@@ -332,8 +401,20 @@ class FargateTaskOperator(StarlakeDatasetMixin, EcsRunTaskOperator):
         try:
             super().execute_complete(context, event)
         except Exception as e:
+            if self.sentinel_path:
+                # story 6.12 — engine failure in sentinel mode is REAL →
+                # fail fast (no retries-as-poke consumption)
+                StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, e)
             return StarlakeAirflowJob._sl_deferrable_wait_failure(
                 context, self.pre_load_wait, self.task_id, e
+            )
+        if self.sentinel_path:
+            # story 6.12 — successful terminal state: consume the sentinel;
+            # NOT READY maps to the existing retries-as-poke raise
+            exists_fn, delete_fn = self._sl_sentinel_hook_handlers()
+            return StarlakeAirflowJob._sl_sentinel_deferrable_success(
+                context, self.pre_load_wait, self.task_id,
+                self.sentinel_path, exists_fn, delete_fn,
             )
         return True
 
@@ -349,6 +430,8 @@ class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
         cluster: str,
         task: str,
         preload: bool = False,
+        sentinel_path: Optional[str] = None,
+        sentinel_aws_conn_id: str = 'aws_default',
         **kwargs
     ) -> None:
         super().__init__(
@@ -362,6 +445,9 @@ class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
             **kwargs
         )
         self.preload = preload
+        # story 6.12 (issue #122) — not-ready sentinel (preload only)
+        self.sentinel_path = sentinel_path
+        self.sentinel_aws_conn_id = sentinel_aws_conn_id
 
     def poke(self, context):
         # story 6.3 (issue #92) — completing the sensor with a falsy XCom
@@ -373,6 +459,11 @@ class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
         logger = logging.getLogger(__name__)
         logger.info(f"Checking task {self.task} state")
         failure_message = None
+        # story 6.12 — distinguishes a DEFINITIVE run failure (failure state,
+        # missing status, non-zero container exit) from a transient
+        # describe_tasks error (throttle, network): only the former is a real
+        # engine failure in sentinel mode
+        definitive_failure = True
         try:
             tasks = self.hook.conn.describe_tasks(cluster=self.cluster, tasks=[self.task]).get("tasks", [])
             if not tasks:
@@ -389,11 +480,34 @@ class FargateTaskStateSensor(StarlakeDatasetMixin, EcsTaskStateSensor):
                     containers = task.get("containers", [])
                     if containers and containers[0].get("exitCode", 1) == 0:
                         logger.info(f"Task {self.task} has succeeded")
+                        if self.preload and self.sentinel_path:
+                            # story 6.12 — consume-then-signal: sentinel
+                            # present → falsy XCom → skip_or_start skips
+                            exists_fn, delete_fn = StarlakeAirflowJob._sl_s3_sentinel_hook_handlers(
+                                aws_conn_id=self.sentinel_aws_conn_id,
+                            )()
+                            ready = StarlakeAirflowJob._sl_sentinel_ready(
+                                self.sentinel_path, context, exists_fn, delete_fn
+                            )
+                            return PokeReturnValue(True, ready)
                         return PokeReturnValue(True, True)
                     failure_message = f"Task {self.task} has failed"
                 else:
                     return None
         except Exception as e:
             failure_message = f"Task {self.task} has failed: {e}"
+            definitive_failure = False
         logger.error(msg = failure_message)
+        if self.preload and self.sentinel_path:
+            if definitive_failure:
+                # story 6.12 — 'not ready' exits 0 in sentinel mode: a failed
+                # container run is a REAL failure → fail fast
+                StarlakeAirflowJob._sl_sentinel_engine_failure(self.task_id, failure_message)
+            # a transient describe_tasks error says nothing about the run —
+            # poke again instead of failing (or silently skipping)
+            logger.warning(
+                f"Transient describe error while the sentinel is configured — "
+                f"poking again: {failure_message}"
+            )
+            return None
         return StarlakeAirflowJob._sl_cloud_poke_failure(self.preload, failure_message)

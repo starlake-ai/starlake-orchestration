@@ -104,6 +104,13 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
         # seams _sl_resolve_pre_load_poke/_sl_pre_load_poke_loop)
         pre_load_poke = self.__class__._sl_resolve_pre_load_poke(kwargs)
 
+        # story 6.12 (issue #122) — not-ready sentinel: popped BEFORE the
+        # outs/RetryPolicy computation, captured by the op closure below;
+        # shell consumes local paths only (engine-aware scheme gate)
+        sentinel_path = self.__class__._sl_resolve_sentinel(kwargs, ('', 'file'), 'shell')
+        if task_type != TaskType.PRELOAD:
+            sentinel_path = None
+
         assets: List[AssetKey] = kwargs.get("assets", [])
 
         ins=kwargs.get("ins", {})
@@ -169,6 +176,21 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
                     command_with_arguments[i + 1] = f'"{command_with_arguments[i + 1]}"'
                     break
 
+            if sentinel_path:
+                # story 6.12 — run-time scope substitution over the per-attempt
+                # vector (the --notReadySentinel value embeds the scope token)
+                command_with_arguments = self.__class__._sl_sentinel_substitute_args(
+                    command_with_arguments, context
+                )
+                # double-quote the sentinel value: this vector is joined into
+                # ONE shell command (unlike the cloud list transports) and a
+                # space-bearing prefix would word-split the argument (#51 —
+                # same rule as the Airflow bash twin)
+                for i, arg in enumerate(command_with_arguments[:-1]):
+                    if arg == "--notReadySentinel":
+                        command_with_arguments[i + 1] = f'"{command_with_arguments[i + 1]}"'
+                        break
+
             command = sl_command + f" {' '.join(command_with_arguments or [])}"
 
             if config.dry_run:
@@ -188,7 +210,45 @@ class StarlakeDagsterShellJob(StarlakeDagsterJob):
                         log_shell_command=True,
                     )
 
-                if pre_load_poke:
+                if sentinel_path:
+                    # story 6.12 — three-way verdict: non-zero exit is a REAL
+                    # failure (fail fast — 'not ready' exits 0 in sentinel
+                    # mode, so the skip_or_start swallow no longer applies);
+                    # exit 0 + sentinel → consume → not ready; exit 0 → ready
+                    def _run_and_check():
+                        run_output, run_return_code = _run_command()
+                        if run_return_code:
+                            raise Failure(description=(
+                                f"Starlake command {command} failed with exit "
+                                f"code {run_return_code} — a real failure "
+                                f"('not ready' exits 0 in sentinel mode): {run_output}"
+                            ))
+                        ready = self.__class__._sl_sentinel_ready(context, sentinel_path)
+                        return run_output, run_return_code, ready
+
+                    if pre_load_poke:
+                        # poke again while the sentinel keeps signaling
+                        # not-ready; the loop's deadline/soft_fail semantics
+                        # are unchanged
+                        poked = self.__class__._sl_pre_load_poke_loop(
+                            context,
+                            _run_and_check,
+                            lambda result: result[2],
+                            pre_load_poke,
+                            command,
+                        )
+                        if poked is None:
+                            return
+                        output, return_code, _ = poked
+                    else:
+                        output, return_code, ready = _run_and_check()
+                        if not ready:
+                            context.log.info(
+                                f"Starlake command {command}: files not ready "
+                                f"(sentinel consumed) — skipping downstream tasks."
+                            )
+                            return
+                elif pre_load_poke:
                     # story 6.2 — in-op wall-clock poke loop (shared seam since
                     # story 6.7); on soft-fail deadline the loop returns None →
                     # bare return (optional-output skip); the hard timeout

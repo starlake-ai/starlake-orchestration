@@ -213,8 +213,30 @@ The following options can be specified in all concrete factory classes. Options 
 | **pre_load_poke_interval**         | int  | seconds between two pokes while waiting (`300` by default)                                  |
 | **pre_load_timeout**               | int  | wall-clock timeout in seconds for the pre-load wait (`3600` by default); on timeout the task fails (or is skipped with `pre_load_sensor_soft_fail`) and the downstream loads are skipped |
 | **pre_load_sensor_soft_fail**      | bool | `true`/`false` (default `false`) — on wait timeout mark the task SKIPPED instead of FAILED (run stays green) |
+| **pre_load_not_ready_sentinel_path** | str | opt-in (absent/blank = off, zero change) — parent prefix for the CLI's `--notReadySentinel` marker (requires starlake CLI **1.5.15+**), resolved to `<prefix>/<domain>/<dag_id>__<run_id>.notready` (sanitized). Scheme is engine-gated at DAG-parse time: absolute local/`file://` on the shell (bash) engine, `gs://` on cloud_run/dataproc, `s3://` on fargate. See "Pre-load not-ready sentinel" below |
 | **dataset_triggering_strategy**    | str  | the dataset triggering strategy to use                                                      |
 | **max_active_runs**                | int  | maximum number of active DAG runs (`3` by default)                                          |
+
+### Pre-load not-ready sentinel
+
+Starlake CLI **1.5.15+** writes a zero-byte marker at `--notReadySentinel <uri>` on a "not ready" decision and exits **0** — a genuine crash still exits non-zero and never writes the marker. With `pre_load_not_ready_sentinel_path` set (strictly opt-in), the pre-load verdict becomes deterministic on every engine:
+
+- **exit 0 + marker absent** → READY → proceed (`skip_or_start` proceeds — the bash wrappers echo the int-coded verdict `0`, the python cloud paths return a truthy `return_value`);
+- **exit 0 + marker present** → the marker is **consumed (deleted first)**, then NOT READY is signaled through the existing primitive: falsy XCom → `skip_or_start` skips (one-shot), `exit 2`/poke-again (sensor mode, `retry_exit_code=2`), the retries-as-poke raise (deferrable waiting), poke-again (cloud sensor waiting);
+- **non-zero exit / engine failure** → REAL FAILURE → the task fails NOW. This removes two documented deficiencies (opt-in only): the one-shot wrapper no longer swallows a crashed CLI as "nothing to load", and the waiting paths no longer poke a broken invocation until timeout. **Sentinel semantics win over `retry_on_failure`** for preload.
+
+The run scope (`<dag_id>__<run_id>`, whitelist-sanitized — a manual-trigger run_id is user-controlled free text) is substituted at RUN time as data: on the bash paths it travels as the `SL_SENTINEL_SCOPE` env VALUE (Jinja renders the ids into the templated `env` field, never into shell code) and is re-sanitized in the flat wrapper via `tr`; on the python cloud paths it is substituted python-side at execute/poke time into both the submitted payload and the polled path; on the gcloud waiting sensor the sanitized scope is exported python-side around the poke (BashSensor has no `append_env`).
+
+Per-engine consumption (always inside the task that ran the CLI): bash = `[ -f ]`/`rm -f`; cloud_run/dataproc python paths = `GCSHook` (honoring `gcp_conn_id` and `impersonation_chain`); cloud_run gcloud paths = `gcloud storage ls`/`rm` with the same impersonation CLI fragment as the other probes; fargate = `S3Hook` (honoring `aws_conn_id`). One combination is rejected loudly at DAG-parse time: `use_gcloud=true` + `cloud_run_async=true` + `retry_on_failure=true` + sentinel (that topology's completion sensor cannot carry a consume-then-signal verdict).
+
+**Best-effort-write caveat** (CLI design): a failed marker write still exits 0 with no marker. For IMPORTED/PENDING this yields a no-op load; for **ACK** it can trigger a **premature load of un-acked data** — keep the sentinel prefix on reliable storage with the ACK strategy.
+
+Known residuals (documented, by design):
+
+- with `pre_load_sensor_soft_fail=true`, a REAL failure on a waiting sensor surfaces as SKIPPED instead of FAILED (Airflow's sensors convert the fail-fast exception under `soft_fail`) — the downstream loads still never run and the failure still never pokes until timeout; soft fail explicitly trades alerting for green runs;
+- on the python ASYNC one-shot topologies (cloud_run `use_gcloud=false`, `fargate_async=true`), the completion sensor consumes the marker while describing an already-finished execution: manually CLEARING that sensor (or a worker death in the tiny window between the delete and the poke verdict) re-reads the same execution with the marker gone → READY. Prefer `pre_load_sensor=true` waiting (which re-runs the CLI per attempt) when using the sentinel on those engines;
+- the gcloud async status task's execution-describe probe keeps its pre-existing shape (an empty describe output reads as success); the sentinel STORAGE probe itself is three-state (present / absent / loud probe failure);
+- `pre_load_not_ready_sentinel_path` is resolved from the options dict only (like the other `pre_load_*` options) — it is not read from Airflow Variables or environment variables.
 
 ### Default DAG Args
 

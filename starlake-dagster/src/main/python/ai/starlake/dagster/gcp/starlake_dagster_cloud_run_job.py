@@ -98,6 +98,12 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
         transform = task_type == TaskType.TRANSFORM
         params = kwargs.get('params', dict())
 
+        # story 6.12 (issue #122) — not-ready sentinel: popped BEFORE the op
+        # construction, captured by the closure; cloud_run consumes gs:// only
+        sentinel_path = self.__class__._sl_resolve_sentinel(kwargs, ('gs',), 'cloud_run')
+        if task_type != TaskType.PRELOAD:
+            sentinel_path = None
+
         # static sl_options sections to publish on the materialization (see
         # DagsterLogicalDatetimeConfig.sl_options for the runtime counterpart)
         extra = kwargs.pop("extra", None)
@@ -190,6 +196,14 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                 elif extra_opts:
                     command_with_arguments.extend(["--options", ",".join(extra_opts)])
 
+            if sentinel_path:
+                # story 6.12 — run-time scope substitution over the
+                # per-attempt vector (the --notReadySentinel value embeds the
+                # scope token; it travels inside the gcloud --args string)
+                command_with_arguments = self.__class__._sl_sentinel_substitute_args(
+                    command_with_arguments, context
+                )
+
             args = f'^{separator}^' + separator.join(command_with_arguments)
 
             command = (
@@ -215,7 +229,42 @@ class StarlakeDagsterCloudRunJob(StarlakeDagsterJob):
                         log_shell_command=True,
                     )
 
-                if pre_load_poke:
+                if sentinel_path:
+                    # story 6.12 — three-way verdict: a failed execution is a
+                    # REAL failure (fail fast — 'not ready' exits 0 in
+                    # sentinel mode); exit 0 + sentinel → consume (default
+                    # gs:// handlers from core) → not ready; exit 0 → ready
+                    def _run_and_check():
+                        run_output, run_return_code = _run_command()
+                        if run_return_code:
+                            raise Failure(description=(
+                                f"Starlake command {command} failed with exit "
+                                f"code {run_return_code} — a real failure "
+                                f"('not ready' exits 0 in sentinel mode): {run_output}"
+                            ))
+                        ready = self.__class__._sl_sentinel_ready(context, sentinel_path)
+                        return run_output, run_return_code, ready
+
+                    if pre_load_poke:
+                        poked = self.__class__._sl_pre_load_poke_loop(
+                            context,
+                            _run_and_check,
+                            lambda result: result[2],
+                            pre_load_poke,
+                            command,
+                        )
+                        if poked is None:
+                            return
+                        output, return_code, _ = poked
+                    else:
+                        output, return_code, ready = _run_and_check()
+                        if not ready:
+                            context.log.info(
+                                f"Starlake command {command}: files not ready "
+                                f"(sentinel consumed) — skipping downstream tasks."
+                            )
+                            return
+                elif pre_load_poke:
                     # story 6.7 (issue #94) — cloud poke = a full Cloud Run
                     # execution re-submission per attempt (shared wall-clock
                     # loop; the op holds its executor slot while poking, the
