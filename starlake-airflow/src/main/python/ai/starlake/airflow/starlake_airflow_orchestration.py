@@ -16,6 +16,10 @@
 
 from __future__ import annotations
 
+import logging
+
+from jinja2 import pass_context
+
 from ai.starlake.airflow.starlake_airflow_job import StarlakeAirflowJob, AirflowDataset
 
 from ai.starlake.common import sl_cron_start_end_dates, sl_scheduled_date, sl_scheduled_dataset, sl_timestamp_format, StarlakeParameters
@@ -28,7 +32,7 @@ from ai.starlake.orchestration import AbstractOrchestration, StarlakeSchedule, S
 
 from airflow import DAG
 
-from ai.starlake.airflow.compat import BaseOperator, Dataset, TaskGroup, get_current_context
+from ai.starlake.airflow.compat import BaseOperator, Dataset, TaskGroup, get_current_context, supports_dataset_conditions, airflow_version
 
 from ai.starlake.airflow.starlake_airflow_api import StarlakeAirflowApiClient
 
@@ -81,19 +85,49 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             max_active_runs = 1
             default_args.update({'max_active_runs': 1})
             from functools import reduce
-            if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
-                airflow_schedule = reduce(lambda a, b: a | b, events)
+            if supports_dataset_conditions():
+                # Airflow >= 2.9: conditional dataset expressions.
+                # ANY → DatasetAny (|), ALL → DatasetAll (&).
+                if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
+                    airflow_schedule = reduce(lambda a, b: a | b, events)
+                else:
+                    airflow_schedule = reduce(lambda a, b: a & b, events)
             else:
-                airflow_schedule = reduce(lambda a, b: a & b, events)
+                # Airflow < 2.9: DatasetAny/DatasetAll (| and &) do not exist.
+                # A flat list schedule triggers when ALL datasets are updated
+                # (native 2.4+ semantics). ANY (OR) cannot be expressed, so it
+                # degrades to ALL (flat list) with a warning rather than failing
+                # DAG construction (issue #125).
+                if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
+                    logging.getLogger(__name__).warning(
+                        "ANY dataset-triggering strategy requires Airflow >= 2.9 "
+                        "(conditional dataset scheduling); falling back to ALL "
+                        "(flat-list) semantics on Airflow %s.",
+                        airflow_version(),
+                    )
+                airflow_schedule = list(events)
             if self.job.data_cycle_enabled and not self.job.data_cycle:
                 self.job.data_cycle = self.computed_cron_expr
                     
 
-        def ts_as_datetime(ts, context: Context = None):
+        # These macros run inside Jinja at template-render time. ``@pass_context``
+        # makes Jinja hand its render context (which carries ``task_instance``)
+        # to the macro, so we do NOT depend on ``get_current_context()`` — that
+        # contextvar is only established during rendering from Airflow 2.10 on,
+        # so relying on it broke dataset-triggered DAG execution on 2.5-2.9
+        # (issue #125). Template call sites are UNCHANGED: Jinja injects the
+        # context automatically, so ``ts_as_datetime(data_interval_end | ts)``
+        # still passes a single visible argument. The get_current_context()
+        # branch is a defensive fallback for a Jinja render whose context has no
+        # ``task_instance`` (Airflow always supplies it during task rendering);
+        # these macros are only ever invoked from templates, never called
+        # directly from Python.
+        @pass_context
+        def ts_as_datetime(context, ts):
             from datetime import datetime
-            if not context:
-                context = get_current_context()
-            ti = context["task_instance"]
+            ti = (context.get("task_instance") if hasattr(context, "get") else None)
+            if ti is None:
+                ti = get_current_context()["task_instance"]
             sl_logical_date = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
             if sl_logical_date:
                 ts = sl_logical_date
@@ -105,10 +139,11 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
                 return ts
 
         from datetime import datetime
-        def sl_dates(cron_expr: str, start_time: datetime, context: Context = None) -> str:
-            if not context:
-                context = get_current_context()
-            ti = context["task_instance"]
+        @pass_context
+        def sl_dates(context, cron_expr: str, start_time: datetime) -> str:
+            ti = (context.get("task_instance") if hasattr(context, "get") else None)
+            if ti is None:
+                ti = get_current_context()["task_instance"]
             sl_data_interval_start = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value)
             sl_data_interval_end = ti.xcom_pull(task_ids="start", key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value)
             if sl_data_interval_start and sl_data_interval_end:

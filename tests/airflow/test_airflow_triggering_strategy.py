@@ -31,6 +31,7 @@ from tests.airflow.dataset_compat import (
     AIRFLOW_AVAILABLE,
     CONDITION_ATTR,
     SUPPORTS_ASSETS,
+    SUPPORTS_CONDITION_INTROSPECTION,
     Dataset,
     DatasetAll,
     DatasetAny,
@@ -44,8 +45,14 @@ from tests.shared.triggering_scenarios import (
     make_dependencies,
 )
 
+# This module *introspects* the native condition object off the timetable
+# (``.dataset_condition``/``.asset_condition``). The DatasetAny/DatasetAll
+# operators exist from 2.9, but the timetable only exposes the condition from
+# Airflow 2.10 on. Below 2.10 the ANY/ALL build/fallback behaviour is covered
+# by the runtime/options tests instead (issue #125).
 pytestmark = pytest.mark.skipif(
-    not AIRFLOW_AVAILABLE, reason="Requires Apache Airflow"
+    not SUPPORTS_CONDITION_INTROSPECTION,
+    reason="timetable condition introspection (dataset_condition) needs Airflow >= 2.10",
 )
 
 

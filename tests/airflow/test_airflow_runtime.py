@@ -56,6 +56,7 @@ from tests.airflow.dataset_compat import (
     AIRFLOW_AVAILABLE,
     AIRFLOW_VERSION,
     SUPPORTS_ASSETS,
+    SUPPORTS_CONDITION_INTROSPECTION,
     Dataset,
     DatasetAll,
     DatasetAny,
@@ -151,17 +152,42 @@ def _register_dags(pipelines):
 
 
 def _dag_test(dag):
-    """Run ``dag.test()`` with version-appropriate kwargs.
+    """Run ``dag.test()`` with version-appropriate kwargs and return the DagRun.
 
     Airflow 3 renamed ``execution_date`` to ``logical_date`` and serializes
     ``run_conf`` as strict JSON — pass the start date as an ISO string there
     (the same shape a REST-triggered run's conf has in production).
+
+    Airflow < 2.10's ``dag.test()`` executes the DAG but returns ``None`` (the
+    DagRun return value was added later). Fetch the persisted DagRun from the
+    metadata DB in that case so callers can still assert on its final state.
     """
     if SUPPORTS_ASSETS:
         run_conf = {"start_date": EXECUTION_DATE.isoformat(), "backfill": False}
-        return dag.test(logical_date=EXECUTION_DATE, run_conf=run_conf)
-    run_conf = {"start_date": EXECUTION_DATE, "backfill": False}
-    return dag.test(execution_date=EXECUTION_DATE, run_conf=run_conf)
+        dr = dag.test(logical_date=EXECUTION_DATE, run_conf=run_conf)
+    else:
+        run_conf = {"start_date": EXECUTION_DATE, "backfill": False}
+        dr = dag.test(execution_date=EXECUTION_DATE, run_conf=run_conf)
+    if dr is None:
+        from airflow.models import DagRun
+        from airflow.utils.session import create_session
+
+        # Fetch the exact run dag.test() just executed (filter by the same
+        # execution_date), not merely the latest run for this dag_id — a
+        # dataset-triggered DAG can persist downstream runs at later dates.
+        with create_session() as session:
+            dr = (
+                session.query(DagRun)
+                .filter(
+                    DagRun.dag_id == dag.dag_id,
+                    DagRun.execution_date == EXECUTION_DATE,
+                )
+                .one_or_none()
+            )
+        assert dr is not None, (
+            f"dag.test() persisted no DagRun for {dag.dag_id} @ {EXECUTION_DATE}"
+        )
+    return dr
 
 
 # ===================================================================
@@ -316,6 +342,53 @@ class TestAirflowRuntimeLoad:
                 f"in {all_outlet_uris}"
             )
 
+    def test_load_events_carry_runtime_extra(self, executed_load_dags):
+        """The persisted Dataset/Asset events carry Starlake's runtime extra —
+        the real end-to-end producer round-trip against Airflow's own emission
+        path (issue #125).
+
+        On Airflow < 2.10 this exercises the ``register_dataset_change`` wrapper
+        (the extra would otherwise be dropped); on 2.10+ the ``outlet_events``
+        accessor; on 3.x the asset event path. This is the assertion the mocked
+        unit test cannot make — it validates the *real* method signature and
+        that the extra actually reaches the emitted event.
+        """
+        _, _, _ = executed_load_dags
+        from airflow.utils.session import create_session
+        from ai.starlake.common import StarlakeParameters
+
+        URI = StarlakeParameters.URI_PARAMETER.value
+        SINK = StarlakeParameters.SINK_PARAMETER.value
+        if SUPPORTS_ASSETS:
+            from airflow.models.asset import AssetEvent as EventModel, AssetModel as UriModel
+            id_col = "asset_id"
+        else:
+            from airflow.models.dataset import DatasetEvent as EventModel, DatasetModel as UriModel
+            id_col = "dataset_id"
+
+        with create_session() as session:
+            uri_by_id = {row.id: row.uri for row in session.query(UriModel).all()}
+            table_extras = {}
+            for event in session.query(EventModel).all():
+                uri = uri_by_id.get(getattr(event, id_col))
+                # The per-table load outlets have uri "starbake_<table>"; the
+                # DAG-level completion dataset ("airflow_starbake_tables_*") is a
+                # different concern and is excluded by the startswith filter.
+                if uri and uri.startswith("starbake_"):
+                    table_extras[uri] = event.extra or {}
+
+        assert table_extras, "the load run emitted no per-table dataset/asset events"
+        # issue #125 regression guard: each table event must carry the full
+        # runtime metadata onto the event, not be dropped to {}.
+        for uri, extra in table_extras.items():
+            assert extra.get(URI), f"event for {uri} lost {URI} (extra={extra})"
+            assert extra.get(SINK), f"event for {uri} lost {SINK} (extra={extra})"
+            assert "ts" in extra, f"event for {uri} lost ts (extra={extra})"
+        for table in ("customers", "orders", "products"):
+            assert any(table in uri for uri in table_extras), (
+                f"no per-table event for '{table}'; saw {set(table_extras)}"
+            )
+
 
 # ===================================================================
 # TestAirflowRuntimeTransform
@@ -388,10 +461,22 @@ class TestAirflowDatasetTriggering:
             )
 
     def test_any_strategy_uses_or_combination(self, transform_pipelines_loaded):
-        """Default strategy (ANY) builds the condition with DatasetAny/AssetAny."""
+        """Default strategy (ANY) builds the condition with DatasetAny/AssetAny.
+
+        The timetable only exposes the condition object from Airflow 2.10 on;
+        below that (incl. 2.9, where DatasetAny builds but isn't introspectable,
+        and 2.5-2.8, where ANY degrades to a flat list) we can only assert the
+        DAG is dataset-triggered (issue #125)."""
         pls, _, _ = transform_pipelines_loaded
         for pipeline in pls:
             timetable = pipeline.dag.timetable
+            if not SUPPORTS_CONDITION_INTROSPECTION:
+                assert "Dataset" in type(timetable).__name__, (
+                    f"Expected a dataset-triggered timetable, got "
+                    f"{type(timetable).__name__}"
+                )
+                assert len(pipeline.events) > 0
+                continue
             assert hasattr(timetable, _CONDITION_ATTR), (
                 f"Timetable {type(timetable).__name__} has no {_CONDITION_ATTR}"
             )
@@ -447,6 +532,14 @@ class TestAirflowDatasetTriggering:
             pass
 
         timetable = pipeline.dag.timetable
+        if not SUPPORTS_CONDITION_INTROSPECTION:
+            # Below Airflow 2.10 the timetable does not expose the condition
+            # object (2.9 builds DatasetAll but hides it; 2.5-2.8 use a native
+            # flat list). Either way the DAG is dataset-triggered.
+            assert "Dataset" in type(timetable).__name__
+            assert len(pipeline.events) == 2
+            return
+
         assert hasattr(timetable, _CONDITION_ATTR)
         condition = getattr(timetable, _CONDITION_ATTR)
 

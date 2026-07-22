@@ -307,6 +307,7 @@ class TestBashSensorMode:
 
     def test_sensor_construction(self, tmp_path):
         from ai.starlake.airflow.bash.starlake_airflow_bash_job import StarlakePreloadBashSensor
+        from ai.starlake.airflow.compat import supports_bash_retry_exit_code
         sensor = self._sensor(tmp_path)
         assert isinstance(sensor, StarlakePreloadBashSensor)
         # 6.2 contracts intact
@@ -314,8 +315,11 @@ class TestBashSensorMode:
         assert sensor.timeout == 120
         assert sensor.mode == "reschedule"
         assert sensor.retries == 0
-        # 6.12 — closed exit-code contract
-        assert sensor.retry_exit_code == 2
+        # 6.12 — closed exit-code contract. retry_exit_code is an Airflow 2.10+
+        # BashSensor parameter; below 2.10 it is dropped so the sensor still
+        # constructs (issue #125).
+        expected_rec = 2 if supports_bash_retry_exit_code() else None
+        assert getattr(sensor, "retry_exit_code", None) == expected_rec
         assert sensor.env["SL_SENTINEL_SCOPE"] == "{{ ti.dag_id }}__{{ run_id }}"
         cmd = sensor.bash_command
         assert f'cd "{str(tmp_path)}" &&' in cmd
@@ -325,9 +329,13 @@ class TestBashSensorMode:
     def test_caller_retry_exit_code_override_is_ignored(self, tmp_path):
         """Review finding — the closed {0,1,2} contract owns retry_exit_code:
         a caller override would invert real-failure vs poke-again."""
+        from ai.starlake.airflow.compat import supports_bash_retry_exit_code
         job = _make_bash_job(_bash_sentinel_options(tmp_path, self.SENSOR_EXTRA))
         sensor = job.sl_pre_load(domain="starbake", tables={"customers"}, retry_exit_code=1)
-        assert sensor.retry_exit_code == 2
+        # Below 2.10 there is no retry_exit_code param at all, so the caller
+        # value is dropped (not honoured either) — "ignored" holds on both.
+        expected_rec = 2 if supports_bash_retry_exit_code() else None
+        assert getattr(sensor, "retry_exit_code", None) == expected_rec
 
     def test_sensor_without_sentinel_unchanged(self, tmp_path):
         """6.2 regression pin — sensor mode without the sentinel option keeps
@@ -338,7 +346,9 @@ class TestBashSensorMode:
         }
         options.update(self.SENSOR_EXTRA)
         sensor = _make_bash_job(options).sl_pre_load(domain="starbake", tables={"customers"})
-        assert sensor.retry_exit_code is None
+        # No sentinel → no forced exit-code contract. On 2.10+ the attribute is
+        # present and None; below 2.10 the BashSensor has no such attribute.
+        assert getattr(sensor, "retry_exit_code", None) is None
         assert "return_code=$?" not in sensor.bash_command
 
     def test_sensor_wrapper_exit_codes(self, tmp_path):
