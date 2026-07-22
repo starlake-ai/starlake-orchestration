@@ -25,7 +25,7 @@ concurrency:
 env:
   JAVA_VERSION: 17
   PYTHON_VERSION: "3.11"
-  SL_VERSION: "1.5.11"
+  SL_VERSION: "1.5.16"
   # Secondary CLI for the NFR7 version-tolerance test (orchestration leg only).
   SL_VERSION_SECONDARY: "1.5.15"
   SL_ENV: DUCKDB
@@ -294,6 +294,13 @@ jobs:
               uv pip install "apache-airflow==${{ matrix.orchestrator_version }}" \
                 --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.orchestrator_version }}/constraints-${{ matrix.python_version || env.PYTHON_VERSION }}.txt"
               uv pip install starlake-airflow/src/main/python/
+              # The shared "Install test dependencies" step pulls an unpinned
+              # (latest) pytest; the Airflow constraint above then pins an older
+              # test ecosystem (e.g. 2.5.3 -> pluggy 1.0.0, packaging 21.3) that
+              # the latest pytest rejects at import. Re-resolve pytest under the
+              # SAME constraint so the test runner matches the leg's environment.
+              uv pip install pytest \
+                --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.orchestrator_version }}/constraints-${{ matrix.python_version || env.PYTHON_VERSION }}.txt"
               ;;
             dagster)
               uv pip install "dagster==${{ matrix.orchestrator_version }}" "${{ matrix.companion }}"
