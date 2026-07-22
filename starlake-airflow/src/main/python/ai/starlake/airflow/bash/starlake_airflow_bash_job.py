@@ -22,7 +22,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, Starla
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeDatasetMixin
 
-from ai.starlake.airflow.compat import BaseOperator, BashOperator, BashSensor, PythonOperator
+from ai.starlake.airflow.compat import BaseOperator, BashOperator, BashSensor, PythonOperator, supports_bash_retry_exit_code
 
 class StarlakeAirflowBashJob(StarlakeAirflowJob):
     """Airflow Starlake Bash Job."""
@@ -199,6 +199,12 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
                 # the closed {0,1,2} contract OWNS this code — a caller
                 # override would invert real-failure vs poke-again
                 kwargs['retry_exit_code'] = 2
+            # BashSensor only accepts retry_exit_code on Airflow >= 2.10; drop
+            # it (including any caller value) on older Airflow so the sensor
+            # constructs. The sentinel exit-code contract is a 2.10+/core-1.5.15
+            # opt-in feature; on 2.10+ this pop is a no-op.
+            if not supports_bash_retry_exit_code():
+                kwargs.pop('retry_exit_code', None)
             return StarlakePreloadBashSensor(
                 task_id=task_id,
                 dataset=dataset,

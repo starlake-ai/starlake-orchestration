@@ -25,7 +25,7 @@ concurrency:
 env:
   JAVA_VERSION: 17
   PYTHON_VERSION: "3.11"
-  SL_VERSION: "1.5.11"
+  SL_VERSION: "1.5.16"
   # Secondary CLI for the NFR7 version-tolerance test (orchestration leg only).
   SL_VERSION_SECONDARY: "1.5.15"
   SL_ENV: DUCKDB
@@ -39,6 +39,9 @@ env:
   #   orchestrator_version → pip pin for the orchestrator ("-" = none; the
   #                          snowflake SDK comes via install_requires)
   #   companion            → extra coupled pin (dagster-shell tracks dagster)
+  #   python_version       → per-leg Python override (optional; falls back to
+  #                          env.PYTHON_VERSION). Airflow 2.5.x predates
+  #                          Python 3.11 support, so its leg pins 3.10.
   #   tests                → pytest path(s) for the leg
   #   enabled              → spawn switch
   # tests/airflow/ is a DUAL-VERSION suite (compat layer + commit b4ab4da):
@@ -49,6 +52,8 @@ env:
   TEST_MATRIX: >-
     [
       {"name":"orchestration","module":"orchestration","orchestrator_version":"-","tests":"tests/orchestration/ tests/shared/","enabled":true},
+      {"name":"airflow-2.5.3","module":"airflow","orchestrator_version":"2.5.3","python_version":"3.10","tests":"tests/airflow/","enabled":true},
+      {"name":"airflow-2.9.3","module":"airflow","orchestrator_version":"2.9.3","tests":"tests/airflow/","enabled":true},
       {"name":"airflow-2.10.5","module":"airflow","orchestrator_version":"2.10.5","tests":"tests/airflow/","enabled":true},
       {"name":"airflow-3.3.0","module":"airflow","orchestrator_version":"3.3.0","tests":"tests/airflow/","enabled":true},
       {"name":"dagster-1.9.13","module":"dagster","orchestrator_version":"1.9.13","companion":"dagster-shell==0.25.13","tests":"tests/dagster/","enabled":true},
@@ -248,7 +253,7 @@ jobs:
         run: SL_VERSION=${{ env.SL_VERSION_SECONDARY }} "$HOME/starlake-${{ env.SL_VERSION_SECONDARY }}/starlake" --version | grep -F "${{ env.SL_VERSION_SECONDARY }}"
 
       - name: Create virtual environment
-        run: uv venv --python ${{ env.PYTHON_VERSION }}
+        run: uv venv --python ${{ matrix.python_version || env.PYTHON_VERSION }}
 
       - name: Install test dependencies
         run: uv pip install -r pyproject.toml --extra test
@@ -287,8 +292,15 @@ jobs:
               ;;
             airflow)
               uv pip install "apache-airflow==${{ matrix.orchestrator_version }}" \
-                --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.orchestrator_version }}/constraints-${{ env.PYTHON_VERSION }}.txt"
+                --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.orchestrator_version }}/constraints-${{ matrix.python_version || env.PYTHON_VERSION }}.txt"
               uv pip install starlake-airflow/src/main/python/
+              # The shared "Install test dependencies" step pulls an unpinned
+              # (latest) pytest; the Airflow constraint above then pins an older
+              # test ecosystem (e.g. 2.5.3 -> pluggy 1.0.0, packaging 21.3) that
+              # the latest pytest rejects at import. Re-resolve pytest under the
+              # SAME constraint so the test runner matches the leg's environment.
+              uv pip install pytest \
+                --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.orchestrator_version }}/constraints-${{ matrix.python_version || env.PYTHON_VERSION }}.txt"
               ;;
             dagster)
               uv pip install "dagster==${{ matrix.orchestrator_version }}" "${{ matrix.companion }}"

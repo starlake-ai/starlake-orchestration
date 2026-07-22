@@ -323,7 +323,11 @@ class TestAirflowPipeline:
 
     def test_dag_with_dataset_triggers_any(self):
         """Pipeline with ANY strategy produces a dataset/asset-triggered DAG
-        carrying all upstream datasets as events."""
+        carrying all upstream datasets as events.
+
+        On Airflow >= 2.9 this uses a ``DatasetAny`` (``|``) condition; below 2.9
+        (no conditional operators) it degrades to a native flat-list dataset
+        schedule — still a dataset-triggered timetable (issue #125)."""
         from ai.starlake.dataset import DatasetTriggeringStrategy
 
         pipeline = self._make_dataset_pipeline("any")
@@ -353,3 +357,18 @@ class TestAirflowPipeline:
         assert "Dataset" in timetable_cls or "Asset" in timetable_cls
         assert len(pipeline.events) == 2
         assert pipeline.job.dataset_triggering_strategy == DatasetTriggeringStrategy.ALL
+
+    def test_any_below_2_9_falls_back_to_all_with_warning(self, caplog):
+        """Below Airflow 2.9 (no DatasetAny/``|``) the ANY strategy degrades to
+        a native flat-list dataset schedule and logs a warning; on 2.9+ it uses
+        the conditional operator natively and does not warn (issue #125)."""
+        import logging
+
+        from ai.starlake.airflow.compat import supports_dataset_conditions
+
+        with caplog.at_level(logging.WARNING):
+            pipeline = self._make_dataset_pipeline("any")
+        timetable_cls = type(pipeline.dag.timetable).__name__
+        assert "Dataset" in timetable_cls or "Asset" in timetable_cls
+        warned = any("falling back to ALL" in r.getMessage() for r in caplog.records)
+        assert warned is (not supports_dataset_conditions())

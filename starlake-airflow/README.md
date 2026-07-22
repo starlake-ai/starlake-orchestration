@@ -12,7 +12,7 @@ Before installing starlake-airflow, ensure the following minimum versions are in
 
 - starlake: 1.5.7 or higher
 - Python: 3.8 or higher
-- Apache Airflow: 2.10.0 or higher
+- Apache Airflow: 2.5.0 or higher (3.x supported). Airflow 2.5–2.9 are supported for the full data-aware round-trip, with some advanced features gated to higher versions — see [Airflow version compatibility](#airflow-version-compatibility).
 
 ### Airflow API Configuration
 
@@ -307,10 +307,24 @@ In conjunction with the starlake dag generation, the `outlets` property can be u
 
 ### Airflow version compatibility
 
-The library detects the installed Airflow version and adapts its behavior:
+The library supports **Apache Airflow 2.5.0 → 3.x** from a single codebase. It detects the installed Airflow version at runtime and adapts its behavior, so the full data-aware round-trip (a load DAG emits dataset outlets carrying Starlake's runtime metadata; a transform DAG is triggered by them and reads that metadata) works across the whole range. Some capabilities that depend on newer Airflow APIs are gated by version and degrade gracefully below their floor:
 
-- **`supports_inlet_events()`** -- returns `True` for Airflow >= 2.10.0, enabling inlet event support for dataset readiness validation via `ShortCircuitOperator` in the `start_op()`.
-- **`supports_assets()`** -- returns `True` for Airflow >= 3.0.0, enabling asset-based scheduling.
+| Capability | Airflow floor | Below the floor |
+| --- | --- | --- |
+| Datasets (outlets / triggering) | 2.4 (2.5 for `triggering_dataset_events`) | n/a — 2.5 is the supported floor |
+| Outlet `extra` carried onto the emitted event (`supports_inlet_events()`) | 2.10 (native `outlet_events` accessor) | forwarded by a thin `DatasetManager.register_dataset_change` wrapper so the runtime `extra` is not dropped (issue #125) |
+| Conditional dataset scheduling — `DatasetAny`/`DatasetAll` via `\|`/`&` (`supports_dataset_conditions()`) | 2.9 | `ALL` uses a native flat-list schedule; `ANY` degrades to `ALL` (flat list) with a logged warning, since OR is not expressible (issue #127) |
+| `retry_exit_code` on `BashOperator`/`BashSensor` (`supports_bash_retry_exit_code()`) | 2.10 | the pre-load sentinel drops `retry_exit_code` so the sensor still constructs; the closed {0,1,2} exit-code contract is a 2.10+ feature (issue #128) |
+| Assets (replace datasets) (`supports_assets()`) | 3.0 | datasets are used instead |
+
+Notes:
+
+- **`supports_inlet_events()`** — `True` for Airflow >= 2.10.0. Also enables inlet-event dataset-readiness validation via `ShortCircuitOperator` in `start_op()`.
+- **`supports_assets()`** — `True` for Airflow >= 3.0.0, enabling asset-based scheduling (`Asset`/`AssetAny`/`AssetAll`).
+- The `scheduledDate` templating (`ts_as_datetime`/`sl_dates` macros) uses Jinja's `@pass_context` so it renders correctly during execution on every version, including Airflow 2.5–2.9 (issue #126).
+- The dataset-triggering strategy is set with the `dataset_triggering_strategy` option (`any` — default — or `all`). Below Airflow 2.9, `any` behaves as `all`; use Airflow >= 2.9 for true OR (`DatasetAny`) triggering.
+
+Advanced opt-in features (deferrable cloud pre-load, the pre-load not-ready sentinel's forced exit-code contract, dataset aliases) remain 2.10+.
 
 ### StarlakeDatasetMixin
 

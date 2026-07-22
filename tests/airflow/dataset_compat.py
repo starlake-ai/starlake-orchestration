@@ -30,16 +30,31 @@ try:
     AIRFLOW_AVAILABLE = True
     AIRFLOW_VERSION = tuple(int(x) for x in airflow.__version__.split(".")[:2])
     SUPPORTS_ASSETS = AIRFLOW_VERSION >= (3, 0)
+    # Conditional dataset expressions (DatasetAny/DatasetAll via |/&) landed in
+    # Airflow 2.9. Before that, datasets still exist but a DAG can only be
+    # scheduled on a flat list (native ALL semantics) — so DatasetAll/DatasetAny
+    # are absent. Do NOT conflate that with "Airflow unavailable" (issue #125).
+    SUPPORTS_DATASET_CONDITIONS = SUPPORTS_ASSETS or AIRFLOW_VERSION >= (2, 9)
+    # The condition object can be *built* on 2.9, but the timetable only exposes
+    # it (``.dataset_condition`` / ``.asset_condition``) from Airflow 2.10 on —
+    # so condition *introspection* in tests needs a separate, higher boundary.
+    SUPPORTS_CONDITION_INTROSPECTION = SUPPORTS_ASSETS or AIRFLOW_VERSION >= (2, 10)
     if SUPPORTS_ASSETS:
         from airflow.sdk import Asset as Dataset
         from airflow.sdk import AssetAll as DatasetAll
         from airflow.sdk import AssetAny as DatasetAny
     else:
-        from airflow.datasets import Dataset, DatasetAll, DatasetAny
+        from airflow.datasets import Dataset
+        if SUPPORTS_DATASET_CONDITIONS:
+            from airflow.datasets import DatasetAll, DatasetAny
+        else:
+            DatasetAll = DatasetAny = None
 except ImportError:  # pragma: no cover — collection guard only
     AIRFLOW_AVAILABLE = False
     AIRFLOW_VERSION = (0, 0)
     SUPPORTS_ASSETS = False
+    SUPPORTS_DATASET_CONDITIONS = False
+    SUPPORTS_CONDITION_INTROSPECTION = False
     Dataset = DatasetAll = DatasetAny = None
 
 # Name of the condition attribute on dataset/asset-triggered timetables.

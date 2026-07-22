@@ -1477,10 +1477,24 @@ class StarlakeDatasetMixin:
         if self.scheduled_dataset:
             dataset = Dataset(uri=self.scheduled_dataset, extra=self.extra)
             self.outlets.append(dataset)
-        for outlet in self.outlets:
-            outlet_event = context["outlet_events"][outlet]
-            self.log.info(f"updating outlet event {outlet_event} with extra {self.extra}")
-            outlet_event.extra = self.extra
+        if supports_inlet_events():
+            # Airflow 2.10+: the runtime outlet_events accessor carries extra
+            # onto the emitted DatasetEvent (register_dataset_change(extra=...)).
+            for outlet in self.outlets:
+                outlet_event = context["outlet_events"][outlet]
+                self.log.info(f"updating outlet event {outlet_event} with extra {self.extra}")
+                outlet_event.extra = self.extra
+        else:
+            # Airflow < 2.10: no outlet_events accessor and the default emission
+            # path calls register_dataset_change without an extra. Re-sync the
+            # rendered extra onto each outlet Dataset itself — render_template_fields
+            # replaced self.extra with a new dict, breaking the by-reference link
+            # established in __init__. The register_dataset_change wrapper installed
+            # in compat.py then forwards this extra onto the DatasetEvent.
+            for outlet in self.outlets:
+                if isinstance(outlet, Dataset):
+                    outlet.extra = self.extra  # attrs Dataset is not frozen
+                    self.log.info(f"updating outlet {outlet} with extra {self.extra}")
         return super().pre_execute(context)
 
 class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
