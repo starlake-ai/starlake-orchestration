@@ -85,7 +85,19 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             max_active_runs = 1
             default_args.update({'max_active_runs': 1})
             from functools import reduce
-            if supports_dataset_conditions():
+            if len(events) == 1:
+                # A single triggering dataset. reduce(| / &) over one element
+                # returns the *bare* Dataset, and Airflow 2.9 serializes a
+                # bare-Dataset schedule as a dict — not the array that
+                # `dataset_triggers` requires — so the scheduler fails schema
+                # validation ("... is not of type 'array'") even though DAG
+                # import succeeds (issue #130). A one-element flat list
+                # serializes as a DATASET_ALL array on every 2.4+ version and is
+                # semantically identical (ANY == ALL for one dataset). 2.10
+                # tolerated the bare Dataset, which is why the break only
+                # surfaced on Airflow 2.9.
+                airflow_schedule = list(events)
+            elif supports_dataset_conditions():
                 # Airflow >= 2.9: conditional dataset expressions.
                 # ANY → DatasetAny (|), ALL → DatasetAll (&).
                 if job.dataset_triggering_strategy == DatasetTriggeringStrategy.ANY:
