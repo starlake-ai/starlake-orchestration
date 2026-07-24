@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from ai.starlake.common import MissingEnvironmentVariable, StarlakeCronPeriod, sl_schedule_format
+from ai.starlake.common import MissingEnvironmentVariable, StarlakeCronPeriod, is_valid_cron, sl_schedule_format
 
 from ai.starlake.job.starlake_pre_load_strategy import StarlakePreLoadStrategy
 from ai.starlake.job.starlake_options import StarlakeOptions
@@ -206,7 +206,15 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
 
         self.__optional_dataset_enabled = str(__class__.get_context_var(var_name='optional_dataset_enabled', default_value="false", options=self.options)).strip().lower() == "true"
         self.__data_cycle_enabled = str(__class__.get_context_var(var_name='data_cycle_enabled', default_value="false", options=self.options)).strip().lower() == "true"
-        self.__data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
+        # Route the option through the `data_cycle` SETTER: assigning the raw
+        # value to the private field left the literal "none" default in place,
+        # and `check_datasets` (`if self.data_cycle:` — "none" is truthy) then
+        # crashed the start task of every dataset-triggered DAG with
+        # "ValueError: Invalid cron expression: none" (issue #135). The setter
+        # normalizes ("none" -> None, presets -> crons, invalid -> loud
+        # ValueError at parse time) and forces None when the feature is off.
+        self.__data_cycle = None
+        self.data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
         self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
         self.__min_timedelta_between_runs = int(__class__.get_context_var(var_name='min_timedelta_between_runs', default_value=15*60, options=self.options))
         self.__run_dependencies_first = __class__.get_context_var(var_name='run_dependencies_first', default_value='False', options=self.options).lower() == 'true'
@@ -236,8 +244,13 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         return self.__data_cycle_enabled
 
     @property
-    def data_cycle(self) -> str:
-        """Get the data cycle of the job"""
+    def data_cycle(self) -> Optional[str]:
+        """Get the data cycle of the job (None unless the feature is enabled).
+        The gate mirrors the setter's: the invariant "no data cycle when
+        data_cycle_enabled is false" holds at the read point regardless of how
+        the private field was populated (issue #135)."""
+        if not self.data_cycle_enabled:
+            return None
         return self.__data_cycle
 
     @data_cycle.setter
