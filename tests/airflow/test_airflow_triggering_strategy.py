@@ -32,7 +32,6 @@ from tests.airflow.dataset_compat import (
     CONDITION_ATTR,
     SUPPORTS_ASSETS,
     SUPPORTS_CONDITION_INTROSPECTION,
-    Dataset,
     DatasetAll,
     DatasetAny,
 )
@@ -118,18 +117,27 @@ class TestAirflowTriggeringStructure:
         )
 
     @pytest.mark.parametrize("strategy", ["any", "all"])
-    def test_single_upstream_condition_is_bare_event(self, strategy):
-        """reduce() over one event returns the event itself — for BOTH
-        strategies the condition is a plain Dataset/Asset."""
+    def test_single_upstream_condition_is_all_of_one(self, strategy):
+        """A single upstream must schedule as a one-element DatasetAll (flat
+        list), NOT a bare Dataset. reduce(| / &) over one event returns the
+        bare event, and Airflow 2.9 serializes a bare single-Dataset schedule
+        as a dict — but the ``dataset_triggers`` schema requires an array — so
+        the scheduler crashes with "... is not of type 'array'" (issue #130).
+        ANY == ALL for one dataset, so both strategies wrap identically.
+        (This condition-introspection assertion runs on Airflow >= 2.10; the
+        serialization guard for the 2.9 failure lives in
+        test_airflow_single_dataset_serialization.py.)"""
         pipeline = _make_pipeline(
             strategy, SINGLE_UPSTREAM, f"test_single_{strategy}.py"
         )
         condition = _condition(pipeline)
-        assert isinstance(condition, Dataset), (
-            f"Expected bare {Dataset.__name__} for single upstream, "
+        assert isinstance(condition, DatasetAll), (
+            f"Expected one-element {DatasetAll.__name__} for single upstream, "
             f"got {type(condition).__name__}"
         )
-        assert condition.uri == "starbake_orders"
+        assert {d.uri for d in condition.objects} == set(
+            EXPECTED_URIS[SINGLE_UPSTREAM]
+        )
 
     @pytest.mark.parametrize("strategy", ["any", "all"])
     def test_no_upstream_dag_is_not_dataset_triggered(self, strategy):
