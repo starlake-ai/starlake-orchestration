@@ -18,14 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       root_changed: ${{ steps.filter.outputs.root }}
-      py_sl_airflow_changed: ${{ steps.filter.outputs.py_sl_airflow }}
-      jar_sl_airflow_changed: ${{ steps.filter.outputs.jar_sl_airflow }}
-      py_sl_dagster_changed: ${{ steps.filter.outputs.py_sl_dagster }}
-      jar_sl_dagster_changed: ${{ steps.filter.outputs.jar_sl_dagster }}
-      py_sl_orchestration_changed: ${{ steps.filter.outputs.py_sl_orchestration }}
-      jar_sl_orchestration_changed: ${{ steps.filter.outputs.jar_sl_orchestration }}
-      py_sl_snowflake_changed: ${{ steps.filter.outputs.py_sl_snowflake }}
-      jar_sl_snowflake_changed: ${{ steps.filter.outputs.jar_sl_snowflake }}
+      sl_airflow_changed: ${{ steps.filter.outputs.sl_airflow }}
+      sl_dagster_changed: ${{ steps.filter.outputs.sl_dagster }}
+      sl_orchestration_changed: ${{ steps.filter.outputs.sl_orchestration }}
+      sl_snowflake_changed: ${{ steps.filter.outputs.sl_snowflake }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -34,56 +30,39 @@ jobs:
           filters: |
             root:
               - 'pom.xml'
-            py_sl_airflow:
-              - 'starlake-airflow/src/main/python/**'
-            jar_sl_airflow:
-              - 'starlake-airflow/src/main/resources/**'
-            py_sl_dagster:
-              - 'starlake-dagster/src/main/python/**'
-            jar_sl_dagster:
-              - 'starlake-dagster/src/main/resources/**'
-            py_sl_orchestration:
-              - 'starlake-orchestration/src/main/python/**'
-            jar_sl_orchestration:
-              - 'starlake-orchestration/src/main/resources/**'
-            py_sl_snowflake:
-              - 'starlake-snowflake/src/main/python/**'
-            jar_sl_snowflake:
-              - 'starlake-snowflake/src/main/resources/**'
+            sl_airflow:
+              - 'starlake-airflow/**'
+            sl_dagster:
+              - 'starlake-dagster/**'
+            sl_orchestration:
+              - 'starlake-orchestration/**'
+            sl_snowflake:
+              - 'starlake-snowflake/**'
 
   deploy-artefacts:
     needs: detect-changes
     if: >
       (
         needs.detect-changes.outputs.root_changed == 'true' ||
-        needs.detect-changes.outputs.jar_sl_airflow_changed == 'true' ||
-        needs.detect-changes.outputs.jar_sl_dagster_changed == 'true' ||
-        needs.detect-changes.outputs.jar_sl_orchestration_changed == 'true' ||
-        needs.detect-changes.outputs.jar_sl_snowflake_changed == 'true' ||
-        needs.detect-changes.outputs.py_sl_airflow_changed == 'true' ||
-        needs.detect-changes.outputs.py_sl_dagster_changed == 'true' ||
-        needs.detect-changes.outputs.py_sl_orchestration_changed == 'true' ||
-        needs.detect-changes.outputs.py_sl_snowflake_changed == 'true'
+        needs.detect-changes.outputs.sl_airflow_changed == 'true' ||
+        needs.detect-changes.outputs.sl_dagster_changed == 'true' ||
+        needs.detect-changes.outputs.sl_orchestration_changed == 'true' ||
+        needs.detect-changes.outputs.sl_snowflake_changed == 'true'
       )
     runs-on: ubuntu-latest
     strategy:
       matrix:
         module:
           - name: root
-            jar_changed: ${{ needs.detect-changes.outputs.root_changed }}
-            py_changed: 'false'
+            changed: ${{ needs.detect-changes.outputs.root_changed }}
           - name: starlake-airflow
-            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_airflow_changed }}
-            py_changed: ${{ needs.detect-changes.outputs.py_sl_airflow_changed }}
+            changed: ${{ needs.detect-changes.outputs.sl_airflow_changed }}
           - name: starlake-dagster
-            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_dagster_changed }}
-            py_changed: ${{ needs.detect-changes.outputs.py_sl_dagster_changed }}
+            changed: ${{ needs.detect-changes.outputs.sl_dagster_changed }}
           - name: starlake-orchestration
-            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_orchestration_changed }}
-            py_changed: ${{ needs.detect-changes.outputs.py_sl_orchestration_changed }}
+            changed: ${{ needs.detect-changes.outputs.sl_orchestration_changed }}
           - name: starlake-snowflake
-            jar_changed: ${{ needs.detect-changes.outputs.jar_sl_snowflake_changed }}
-            py_changed: ${{ needs.detect-changes.outputs.py_sl_snowflake_changed }}
+            changed: ${{ needs.detect-changes.outputs.sl_snowflake_changed }}
     steps:
       # 1️⃣ Checkout
       - name: Checkout repository
@@ -117,21 +96,18 @@ jobs:
           pip install setuptools wheel twine build
 
       # 5️⃣ Jar and PyPI Deployment
+      # The starlake core setup pins a single version per module for both the
+      # Maven template jar and the PyPI wheel (starlake-ai/starlake#1661), so
+      # both artefacts are always deployed together whenever any file of the
+      # module changed.
       - name: Deploy ${{ matrix.module.name }}
-        if: ${{ matrix.module.jar_changed == 'true' || matrix.module.py_changed == 'true' }}
+        if: ${{ matrix.module.changed == 'true' }}
         run: |
-          PROFILE=all
-          if [[ "${{ matrix.module.jar_changed }}" == "true" && "${{ matrix.module.py_changed }}" == "false" ]]; then
-            if [[ "${{ matrix.module.name }}" == "root" ]]; then
-              echo "Root module changed, deploying the root pom."
-              PROFILE=release
-            else
-              echo "Only JAR changes detected for module ${{ matrix.module.name }}."
-              PROFILE=jar
-            fi
-          elif [[ "${{ matrix.module.jar_changed }}" == "false" && "${{ matrix.module.py_changed }}" == "true" ]]; then
-            echo "Only Python changes detected for module ${{ matrix.module.name }}." 
-            PROFILE=py
+          if [[ "${{ matrix.module.name }}" == "root" ]]; then
+            echo "Root module changed, deploying the root pom."
+            PROFILE=release
+          else
+            PROFILE=all
           fi
           echo "Activating Maven profile: $PROFILE for module ${{ matrix.module.name }}"
           mvn -B deploy -nsu -pl ${{ matrix.module.name }} -P $PROFILE
