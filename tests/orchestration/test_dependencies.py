@@ -306,3 +306,53 @@ class TestImportIsolation:
             f"NFR13 violation — core module imports orchestrator modules:\n"
             + "\n".join(violations)
         )
+
+
+# ---------------------------------------------------------------------------
+# StarlakeDependency sink "None" sentinel (issue #132)
+# ---------------------------------------------------------------------------
+
+class TestStarlakeDependencySinkSentinel:
+    """Dependency payloads from starlake core <= 1.5.15 carry the literal
+    string ``"None"`` in the ``sink`` field of table dependencies (core issue
+    #1654 leaked the schedule placeholder into the sink). Taken at face value
+    it produced domain="None"/table="None" and the dataset URI ``none_none``,
+    which can never match a producer's outlet — the dataset-triggered DAG
+    silently never fired. The constructor must treat it like the (already
+    guarded) cron ``'none'`` sentinel and fall back to ``name``."""
+
+    def test_sink_none_string_falls_back_to_name(self):
+        dep = StarlakeDependency(
+            name="pack__crm2__client.stg_monext_use_mdes",
+            dependency_type=StarlakeDependencyType.TABLE,
+            sink="None",
+        )
+        assert dep.domain == "pack__crm2__client"
+        assert dep.table == "stg_monext_use_mdes"
+        assert dep.uri == "pack__crm2__client_stg_monext_use_mdes"
+
+    @pytest.mark.parametrize("sentinel", ["none", " None ", "NONE"])
+    def test_sink_none_is_case_and_space_insensitive(self, sentinel):
+        dep = StarlakeDependency(
+            name="starbake.orders",
+            dependency_type=StarlakeDependencyType.TABLE,
+            sink=sentinel,
+        )
+        assert dep.uri == "starbake_orders"
+
+    def test_absent_sink_still_falls_back_to_name(self):
+        dep = StarlakeDependency(
+            name="starbake.orders",
+            dependency_type=StarlakeDependencyType.TABLE,
+        )
+        assert dep.uri == "starbake_orders"
+
+    def test_real_sink_still_wins_over_name(self):
+        dep = StarlakeDependency(
+            name="some_task_name",
+            dependency_type=StarlakeDependencyType.TASK,
+            sink="starbake.kpis",
+        )
+        assert dep.domain == "starbake"
+        assert dep.table == "kpis"
+        assert dep.uri == "starbake_kpis"
