@@ -16,7 +16,7 @@
 
 """Story 6.12 (issue #122) — Dagster pre-load not-ready sentinel.
 
-Shell + cloud variants: run-time ``<job_name>__<run_id>`` scope substitution
+Shell + cloud variants: run-time ``<job_name>__<op_name>__<run_id>`` scope substitution
 (never Jinja, never mutating the closure ``arguments``), consume-then-signal
 verdicts through the EXISTING primitives (optional-output skip, in-op poke
 loop), fail-fast on real failures when the sentinel is configured, and
@@ -274,14 +274,19 @@ class TestShellOneShot:
         assert len(failures) == 1
         assert "real failure" in str(failures[0].event_specific_data.error)
 
-    def test_substitution_uses_job_name_and_run_id_without_token(self, tmp_path, monkeypatch):
+    def test_substitution_uses_job_op_and_run_id_without_token(self, tmp_path, monkeypatch):
+        """Issue #142: the op name is part of the scope — the preload ops of
+        a multi-table job must NOT share one marker path (see the Airflow
+        twin, #137)."""
         node, commands = self._run(tmp_path, monkeypatch, touch_sentinel=False)
         result, _ = _execute_with_downstream(node)
         command = commands[0]
         assert SENTINEL_SCOPE_TOKEN not in command
         sentinel = _sentinel_arg(command)
         run_id = result.dagster_run.run_id
-        assert sentinel.endswith(f"{sanitize_scope('preload_sentinel_graph__' + run_id)}.notready")
+        assert sentinel.endswith(
+            f"{sanitize_scope('preload_sentinel_graph__' + PRELOAD_TASK_ID + '__' + run_id)}.notready"
+        )
 
     def test_closure_arguments_not_mutated_across_runs(self, tmp_path, monkeypatch):
         """Two executions of the SAME node must each substitute their own

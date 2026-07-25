@@ -134,14 +134,35 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
         return sentinel_path
 
     @classmethod
+    def _sl_sentinel_scope_parts(cls, context) -> tuple:
+        """Resolve the (job_name, op_name, run_id) scope parts (issue #142).
+
+        The op name is REQUIRED in the scope: a multi-table domain has one
+        preload op PER TABLE in the same run — without it they share one
+        marker path and cross-consume each other's verdict under concurrent
+        executors (a not-ready table then reads READY), the Dagster twin of
+        the Airflow race fixed by #137."""
+        op_def = getattr(context, "op_def", None)
+        op_name = getattr(op_def, "name", None)
+        if not op_name:
+            op_name = getattr(getattr(context, "op", None), "name", None)
+        if not op_name:
+            raise ValueError(
+                "cannot resolve the pre-load sentinel scope — no op name in "
+                "the execution context"
+            )
+        return str(context.job_name), str(op_name), str(context.run_id)
+
+    @classmethod
     def _sl_sentinel_substitute_args(cls, arguments: List[str], context) -> List[str]:
         """Run-time scope substitution over a per-attempt COPY of the command
         vector: the SENTINEL_SCOPE_TOKEN embedded in the --notReadySentinel
-        value becomes the sanitized ``<job_name>__<run_id>`` scope. Never
-        mutates the closure list (6.9/6.10 rule)."""
+        value becomes the sanitized ``<job_name>__<op_name>__<run_id>`` scope.
+        Never mutates the closure list (6.9/6.10 rule)."""
         from ai.starlake.sentinel import substitute_scope
+        scope_parts = cls._sl_sentinel_scope_parts(context)
         return [
-            substitute_scope(argument, context.job_name, context.run_id)
+            substitute_scope(argument, *scope_parts)
             if isinstance(argument, str) else argument
             for argument in arguments
         ]
@@ -156,7 +177,7 @@ class StarlakeDagsterJob(IStarlakeJob[NodeDefinition, AssetKey], StarlakeOptions
             default_sentinel_handlers,
             substitute_scope,
         )
-        path = substitute_scope(sentinel_path, context.job_name, context.run_id)
+        path = substitute_scope(sentinel_path, *cls._sl_sentinel_scope_parts(context))
         exists_fn, delete_fn = default_sentinel_handlers(path)
         return consume_sentinel(path, exists_fn, delete_fn)
 

@@ -213,7 +213,7 @@ The following options can be specified in all concrete factory classes. Options 
 | **pre_load_poke_interval**         | int  | seconds between two pokes while waiting (`300` by default)                                  |
 | **pre_load_timeout**               | int  | wall-clock timeout in seconds for the pre-load wait (`3600` by default); on timeout the task fails (or is skipped with `pre_load_sensor_soft_fail`) and the downstream loads are skipped |
 | **pre_load_sensor_soft_fail**      | bool | `true`/`false` (default `false`) — on wait timeout mark the task SKIPPED instead of FAILED (run stays green) |
-| **pre_load_not_ready_sentinel_path** | str | opt-in (absent/blank = off, zero change) — parent prefix for the CLI's `--notReadySentinel` marker (requires starlake CLI **1.5.15+**), resolved to `<prefix>/<domain>/<dag_id>__<run_id>.notready` (sanitized). Scheme is engine-gated at DAG-parse time: absolute local/`file://` on the shell (bash) engine, `gs://` on cloud_run/dataproc, `s3://` on fargate. See "Pre-load not-ready sentinel" below |
+| **pre_load_not_ready_sentinel_path** | str | opt-in (absent/blank = off, zero change) — parent prefix for the CLI's `--notReadySentinel` marker (requires starlake CLI **1.5.15+**), resolved to `<prefix>/<domain>/<dag_id>__<task_id>__<run_id>.notready` (sanitized; task-scoped since 0.6.13, #137). Scheme is engine-gated at DAG-parse time: absolute local/`file://` on the shell (bash) engine, `gs://` on cloud_run/dataproc, `s3://` on fargate. See "Pre-load not-ready sentinel" below |
 | **dataset_triggering_strategy**    | str  | the dataset triggering strategy to use                                                      |
 | **max_active_runs**                | int  | maximum number of active DAG runs (`3` by default)                                          |
 
@@ -225,7 +225,7 @@ Starlake CLI **1.5.15+** writes a zero-byte marker at `--notReadySentinel <uri>`
 - **exit 0 + marker present** → the marker is **consumed (deleted first)**, then NOT READY is signaled through the existing primitive: falsy XCom → `skip_or_start` skips (one-shot), `exit 2`/poke-again (sensor mode, `retry_exit_code=2`), the retries-as-poke raise (deferrable waiting), poke-again (cloud sensor waiting);
 - **non-zero exit / engine failure** → REAL FAILURE → the task fails NOW. This removes two documented deficiencies (opt-in only): the one-shot wrapper no longer swallows a crashed CLI as "nothing to load", and the waiting paths no longer poke a broken invocation until timeout. **Sentinel semantics win over `retry_on_failure`** for preload.
 
-The run scope (`<dag_id>__<run_id>`, whitelist-sanitized — a manual-trigger run_id is user-controlled free text) is substituted at RUN time as data: on the bash paths it travels as the `SL_SENTINEL_SCOPE` env VALUE (Jinja renders the ids into the templated `env` field, never into shell code) and is re-sanitized in the flat wrapper via `tr`; on the python cloud paths it is substituted python-side at execute/poke time into both the submitted payload and the polled path; on the gcloud waiting sensor the sanitized scope is exported python-side around the poke (BashSensor has no `append_env`).
+The run scope (`<dag_id>__<task_id>__<run_id>`, whitelist-sanitized — a manual-trigger run_id is user-controlled free text; the task_id is part of the scope since 0.6.13, #137: the per-table preload sensors of a multi-table domain poke concurrently under non-sequential executors, and a dag+run-only scope made them share and cross-consume one marker) is substituted at RUN time as data: on the bash paths it travels as the `SL_SENTINEL_SCOPE` env VALUE (Jinja renders the ids into the templated `env` field, never into shell code) and is re-sanitized in the flat wrapper via `tr`; on the python cloud paths it is substituted python-side at execute/poke time into both the submitted payload and the polled path; on the gcloud waiting sensor the sanitized scope is exported python-side around the poke (BashSensor has no `append_env`).
 
 Per-engine consumption (always inside the task that ran the CLI): bash = `[ -f ]`/`rm -f`; cloud_run/dataproc python paths = `GCSHook` (honoring `gcp_conn_id` and `impersonation_chain`); cloud_run gcloud paths = `gcloud storage ls`/`rm` with the same impersonation CLI fragment as the other probes; fargate = `S3Hook` (honoring `aws_conn_id`). One combination is rejected loudly at DAG-parse time: `use_gcloud=true` + `cloud_run_async=true` + `retry_on_failure=true` + sentinel (that topology's completion sensor cannot carry a consume-then-signal verdict).
 
@@ -322,6 +322,7 @@ Notes:
 - **`supports_inlet_events()`** — `True` for Airflow >= 2.10.0. Also enables inlet-event dataset-readiness validation via `ShortCircuitOperator` in `start_op()`.
 - **`supports_assets()`** — `True` for Airflow >= 3.0.0, enabling asset-based scheduling (`Asset`/`AssetAny`/`AssetAll`).
 - The `scheduledDate` templating (`ts_as_datetime`/`sl_dates` macros) uses Jinja's `@pass_context` so it renders correctly during execution on every version, including Airflow 2.5–2.9 (issue #126).
+- **Airflow 3 asset-triggered runs** are fully supported since 0.6.13 (issue #139): the task-SDK event shape (`Asset` keys mapped to `AssetEventDagRunReference` lists) is recognized by the `start` task's dataset checks, and the command templates are undefined-safe — an asset-triggered run carries **no data interval** and Airflow 3 omits `data_interval_end` from the Jinja context, so every call site renders `(data_interval_end | default(dag_run.run_after, true)) | ts` (the value is only a fallback: the macros prefer the `sl_data_interval_*` XComs pushed by `start`).
 - The dataset-triggering strategy is set with the `dataset_triggering_strategy` option (`any` — default — or `all`). Below Airflow 2.9, `any` behaves as `all`; use Airflow >= 2.9 for true OR (`DatasetAny`) triggering.
 
 Advanced opt-in features (deferrable cloud pre-load, the pre-load not-ready sentinel's forced exit-code contract, dataset aliases) remain 2.10+.
@@ -650,7 +651,7 @@ with DAG(dag_id=os.path.basename(__file__).replace(".py", "").replace(".pyc", ""
         cron_expr = None
 
     if cron_expr:
-        transform_options = "{{sl_dates(params.cron_expr, ts_as_datetime(data_interval_end | ts))}}"
+        transform_options = "{{sl_dates(params.cron_expr, ts_as_datetime((data_interval_end | default(dag_run.run_after, true)) | ts))}}"
     else:
         transform_options = None
 
