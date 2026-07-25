@@ -54,7 +54,8 @@ SENTINEL_OPTION = 'pre_load_not_ready_sentinel_path'
 #: NOT a ``{{ ... }}`` Jinja placeholder: an Airflow template pass over a
 #: command string can never render it away or empty it.  Each orchestrator
 #: replaces it at RUN time with the sanitized run scope
-#: (``<dag_id>__<run_id>`` on Airflow, ``<job_name>__<run_id>`` on Dagster).
+#: (``<dag_id>__<task_id>__<run_id>`` on Airflow, ``<job_name>__<run_id>``
+#: on Dagster).
 SENTINEL_SCOPE_TOKEN = "__SL_SENTINEL_SCOPE__"
 
 #: Whitelist used by :func:`sanitize_scope` — any other character maps to

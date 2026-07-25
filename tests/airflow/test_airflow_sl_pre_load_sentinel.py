@@ -155,10 +155,11 @@ def _run_wrapper(command: str, tmp_path, scope: str, touch_sentinel: bool, exit_
     )
 
 
-def _fake_context(dag_id="my_dag", run_id="scheduled__2026-07-18T00:00:00+00:00", try_number=1, max_tries=4):
+def _fake_context(dag_id="my_dag", task_id="wait_for", run_id="scheduled__2026-07-18T00:00:00+00:00", try_number=1, max_tries=4):
     return {
         "ti": SimpleNamespace(
             dag_id=dag_id,
+            task_id=task_id,
             try_number=try_number,
             max_tries=max_tries,
             xcom_push=lambda **kwargs: None,
@@ -210,7 +211,7 @@ class TestBashOneShotConstruction:
         # the swallow is REMOVED: a non-zero CLI exit fails the task
         assert "exit $return_code" in cmd
         # env carries the scope as DATA (Jinja renders ids into a value)
-        assert task.env["SL_SENTINEL_SCOPE"] == "{{ ti.dag_id }}__{{ run_id }}"
+        assert task.env["SL_SENTINEL_SCOPE"] == "{{ ti.dag_id }}__{{ ti.task_id }}__{{ run_id }}"
         assert "env" in task.template_fields
 
     def test_scope_env_value_renders_ids(self, tmp_path):
@@ -218,9 +219,9 @@ class TestBashOneShotConstruction:
         task = job.sl_pre_load(domain="starbake", tables={"customers"})
         rendered = task.render_template(
             task.env,
-            {"ti": SimpleNamespace(dag_id="my_dag"), "run_id": "run_1"},
+            {"ti": SimpleNamespace(dag_id="my_dag", task_id="wait_for"), "run_id": "run_1"},
         )
-        assert rendered["SL_SENTINEL_SCOPE"] == "my_dag__run_1"
+        assert rendered["SL_SENTINEL_SCOPE"] == "my_dag__wait_for__run_1"
 
     def test_gs_prefix_rejected_on_shell(self, tmp_path):
         options = _bash_sentinel_options(tmp_path)
@@ -320,7 +321,7 @@ class TestBashSensorMode:
         # constructs (issue #125).
         expected_rec = 2 if supports_bash_retry_exit_code() else None
         assert getattr(sensor, "retry_exit_code", None) == expected_rec
-        assert sensor.env["SL_SENTINEL_SCOPE"] == "{{ ti.dag_id }}__{{ run_id }}"
+        assert sensor.env["SL_SENTINEL_SCOPE"] == "{{ ti.dag_id }}__{{ ti.task_id }}__{{ run_id }}"
         cmd = sensor.bash_command
         assert f'cd "{str(tmp_path)}" &&' in cmd
         assert "exit 2" in cmd and "exit 0" in cmd and "exit 1" in cmd
@@ -398,15 +399,48 @@ class TestSentinelScopeParts:
 
     def test_scope_parts_from_context(self):
         from ai.starlake.airflow import StarlakeAirflowJob
-        dag_id, run_id = StarlakeAirflowJob._sl_sentinel_scope_parts(_fake_context())
+        dag_id, task_id, run_id = StarlakeAirflowJob._sl_sentinel_scope_parts(_fake_context())
         assert dag_id == "my_dag"
+        assert task_id == "wait_for"
         assert run_id == "scheduled__2026-07-18T00:00:00+00:00"
 
     def test_missing_run_id_raises(self):
         from airflow.exceptions import AirflowException
         from ai.starlake.airflow import StarlakeAirflowJob
         with pytest.raises(AirflowException):
-            StarlakeAirflowJob._sl_sentinel_scope_parts({"ti": SimpleNamespace(dag_id="d")})
+            StarlakeAirflowJob._sl_sentinel_scope_parts(
+                {"ti": SimpleNamespace(dag_id="d", task_id="t")}
+            )
+
+    def test_missing_task_id_raises(self):
+        from airflow.exceptions import AirflowException
+        from ai.starlake.airflow import StarlakeAirflowJob
+        with pytest.raises(AirflowException):
+            StarlakeAirflowJob._sl_sentinel_scope_parts(
+                {"ti": SimpleNamespace(dag_id="d"), "run_id": "r"}
+            )
+
+    def test_scope_is_task_unique_within_one_run(self):
+        """Issue #137 pin: the sensors of a multi-table domain belong to ONE
+        dag run — their substituted sentinel paths MUST differ (a shared path
+        lets one wrapper consume the other's not-ready marker under a
+        concurrent executor, turning a not-ready table into a false READY)."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+        from ai.starlake.sentinel import substitute_scope
+        path = f"file:///sentinels/starbake/{SENTINEL_SCOPE_TOKEN}.notready"
+        paths = {
+            substitute_scope(
+                path,
+                *StarlakeAirflowJob._sl_sentinel_scope_parts(
+                    _fake_context(task_id=task_id)
+                ),
+            )
+            for task_id in (
+                "starbake.stg_t_trs.wait_for",
+                "starbake.stg_m_trs.wait_for",
+            )
+        }
+        assert len(paths) == 2
 
 
 class TestPayloadSubstitution:
@@ -427,7 +461,7 @@ class TestPayloadSubstitution:
         )
         flattened = json.dumps(substituted)
         assert SENTINEL_SCOPE_TOKEN not in flattened
-        expected_scope = sanitize_scope("my_dag__manual 'run'")
+        expected_scope = sanitize_scope("my_dag__wait_for__manual 'run'")
         assert f"gs://b/d/{expected_scope}.notready" in flattened
         # the original payload is NOT mutated (per-attempt copies)
         assert SENTINEL_SCOPE_TOKEN in json.dumps(self.PAYLOAD)
@@ -443,7 +477,7 @@ class TestSentinelReadyHelper:
             path, _fake_context(), lambda p: True, deleted.append
         )
         assert ready is False
-        assert deleted == ["gs://b/d/my_dag__scheduled__2026-07-18T00:00:00+00:00.notready"]
+        assert deleted == ["gs://b/d/my_dag__wait_for__scheduled__2026-07-18T00:00:00+00:00.notready"]
         assert StarlakeAirflowJob._sl_sentinel_ready(
             path, _fake_context(), lambda p: False, deleted.append
         ) is True
@@ -525,7 +559,7 @@ class TestCloudPreloadSensorSentinel:
         assert verdict.xcom_value is True
 
     def test_not_ready_consumes_and_pokes_again(self):
-        expected = "gs://b/d/my_dag__scheduled__2026-07-18T00:00:00+00:00.notready"
+        expected = "gs://b/d/my_dag__wait_for__scheduled__2026-07-18T00:00:00+00:00.notready"
         store = {expected}
         verdict = self._sensor(store=store).poke(_fake_context())
         assert verdict is None  # poke again
@@ -665,7 +699,7 @@ class TestCloudRunSentinel:
         assert "${SL_SENTINEL_SCOPE_SAFE}" in cmd
         assert "tr -c 'A-Za-z0-9_.+:=-' '_'" in cmd
         assert "exit $return_code" in cmd
-        assert task.env["SL_SENTINEL_SCOPE"] == "{{ ti.dag_id }}__{{ run_id }}"
+        assert task.env["SL_SENTINEL_SCOPE"] == "{{ ti.dag_id }}__{{ ti.task_id }}__{{ run_id }}"
         assert task.append_env is True
 
     def _run_gcloud_wrapper(self, command, tmp_path, gcs_mode):
@@ -809,7 +843,7 @@ class TestCloudRunSentinel:
         options = dict(self.GS_OPTIONS, cloud_run_async="false", use_gcloud="false")
         task = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
         monkeypatch.setattr(CloudRunExecuteJobOperator, "execute", lambda self, context: "job")
-        expected = "gs://bucket/sentinels/starbake/my_dag__scheduled__2026-07-18T00:00:00+00:00.notready"
+        expected = "gs://bucket/sentinels/starbake/my_dag__wait_for__scheduled__2026-07-18T00:00:00+00:00.notready"
         store = {expected}
         monkeypatch.setattr(
             type(task), "_sl_sentinel_hook_handlers",
@@ -1042,7 +1076,7 @@ class TestFargateSentinel:
             preload=True,
             sentinel_path=sentinel,
         )
-        expected = "s3://bucket/sentinels/starbake/my_dag__scheduled__2026-07-18T00:00:00+00:00.notready"
+        expected = "s3://bucket/sentinels/starbake/my_dag__wait_for__scheduled__2026-07-18T00:00:00+00:00.notready"
         store = {expected}
         monkeypatch.setattr(
             StarlakeAirflowJob, "_sl_s3_sentinel_hook_handlers",
