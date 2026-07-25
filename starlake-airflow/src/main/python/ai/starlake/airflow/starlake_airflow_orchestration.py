@@ -128,7 +128,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         # contextvar is only established during rendering from Airflow 2.10 on,
         # so relying on it broke dataset-triggered DAG execution on 2.5-2.9
         # (issue #125). Template call sites are UNCHANGED: Jinja injects the
-        # context automatically, so ``ts_as_datetime(data_interval_end | ts)``
+        # context automatically, so ``ts_as_datetime((data_interval_end | default(dag_run.run_after, true)) | ts)``
         # still passes a single visible argument. The get_current_context()
         # branch is a defensive fallback for a Jinja render whose context has no
         # ``task_instance`` (Airflow always supplies it during task rendering);
@@ -203,7 +203,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
 
     def sl_transform_options(self, cron_expr: Optional[str] = None) -> Optional[str]:
         if cron_expr:
-            return "{{sl_dates(params.cron_expr, ts_as_datetime(data_interval_end | ts))}}"
+            return "{{sl_dates(params.cron_expr, ts_as_datetime((data_interval_end | default(dag_run.run_after, true)) | ts))}}"
         return None
 
     def deploy(self, **kwargs) -> None:
