@@ -100,7 +100,7 @@ class StarlakeAirflowBashJob(StarlakeAirflowJob):
             if scheduled_date:
                 tmp_arguments.append(f"\'{scheduled_date}\'")
             else:
-                tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
+                tmp_arguments.append("\'{{sl_scheduled_date(params.cron, ts_as_datetime((data_interval_end | default(dag_run.run_after, true)) | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}\'")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
 

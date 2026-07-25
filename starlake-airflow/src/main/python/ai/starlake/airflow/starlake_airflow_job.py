@@ -94,6 +94,42 @@ class PreLoadWait(NamedTuple):
     retries: int
     retry_delay: timedelta
 
+def triggering_datasets_from_events(triggering_dataset_events) -> List[Dataset]:
+    """Normalize the triggering-events mapping into the most recent Dataset per
+    URI — version-portable (issue #139):
+
+    - Airflow 2 maps URI strings to ``DatasetEvent`` lists;
+    - the Airflow 3 task SDK maps ``Asset``/``AssetAlias`` OBJECTS to
+      ``AssetEventDagRunReference(Result)`` lists (same extra/timestamp shape).
+    """
+    triggering_uris = {}
+    dataset_uris = {}
+    for key, events in (triggering_dataset_events or {}).items():
+        uri = getattr(key, "uri", key)
+        if not isinstance(events, (list, tuple)):
+            continue
+        for event in events:
+            if type(event).__name__ not in (
+                "AssetEvent",
+                "DatasetEvent",
+                "AssetEventDagRunReference",
+                "AssetEventDagRunReferenceResult",
+            ):
+                continue
+            extra = dict(event.extra or {})
+            if not extra.get("ts", None):
+                extra.update({"ts": event.timestamp})
+            ds = Dataset(uri=uri, extra=extra)
+            if uri not in triggering_uris:
+                triggering_uris[uri] = event
+                dataset_uris.update({uri: ds})
+            else:
+                previous_event = triggering_uris[uri]
+                if event.timestamp > previous_event.timestamp:
+                    triggering_uris[uri] = event
+                    dataset_uris.update({uri: ds})
+    return list(dataset_uris.values())
+
 def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Optional[str] = None) -> str:
     """Jinja macro rendering the runtime starlake --options fragment carried by the
     triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in the event
@@ -280,30 +316,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     # No triggering assets
                     return []
 
-                triggering_uris = {}
-                dataset_uris = {}
-                for uri, events in triggering_dataset_events.items():
-                    if not isinstance(events, list):
-                        continue
-
-                    for event in events:
-                        if type(event).__name__ not in ("AssetEvent", "DatasetEvent"):
-                            continue
-
-                        extra = event.extra or {}
-                        if not extra.get("ts", None):
-                            extra.update({"ts": event.timestamp})
-                        ds = Dataset(uri=uri, extra=extra)
-                        if uri not in triggering_uris:
-                            triggering_uris[uri] = event
-                            dataset_uris.update({uri: ds})
-                        else:
-                            previous_event = triggering_uris[uri]
-                            if event.timestamp > previous_event.timestamp:
-                                triggering_uris[uri] = event
-                                dataset_uris.update({uri: ds})
-
-                return list(dataset_uris.values())
+                return triggering_datasets_from_events(triggering_dataset_events)
 
             def find_previous_dag_runs_api(
                     dag,
@@ -1403,10 +1416,10 @@ class StarlakeDatasetMixin:
                     StarlakeParameters.FRESHNESS_PARAMETER.value: dataset.freshness,
                 })
                 if dataset.cron: # if the dataset is scheduled
-                    self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, ts_as_datetime(dag_run.data_interval_end | ts), params.sl_schedule_parameter_name, params.sl_schedule_format)}}"
+                    self.scheduled_dataset = "{{sl_scheduled_dataset(params.uri, params.cron, ts_as_datetime((dag_run.data_interval_end | default(dag_run.run_after, true)) | ts), params.sl_schedule_parameter_name, params.sl_schedule_format)}}"
                 else:
                     self.scheduled_dataset = None
-                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts))}}"
+                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime((dag_run.data_interval_end | default(dag_run.run_after, true)) | ts))}}"
                 uri = dataset.uri
             else:
                 self.scheduled_dataset = None
@@ -1418,7 +1431,7 @@ class StarlakeDatasetMixin:
                     'sl_schedule_format': None
                 })
                 kwargs['params'] = params
-                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime(dag_run.data_interval_end | ts))}}"
+                self.scheduled_date = "{{sl_scheduled_date(params.cron, ts_as_datetime((dag_run.data_interval_end | default(dag_run.run_after, true)) | ts))}}"
             outlets.append(Dataset(uri=uri, extra=extra))
             kwargs["outlets"] = outlets
             self.template_fields = getattr(self, "template_fields", tuple()) + ("scheduled_dataset", "scheduled_date", "extra",)
