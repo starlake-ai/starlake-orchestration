@@ -325,8 +325,8 @@ class StarlakePreloadBashSensor(StarlakeDatasetMixin, BashSensor):
         if self._sentinel_scope_in_environ:
             import os
             from ai.starlake.sentinel import sanitize_scope
-            dag_id, run_id = StarlakeAirflowJob._sl_sentinel_scope_parts(context)
-            scope = sanitize_scope(f"{dag_id}__{run_id}")
+            scope_parts = StarlakeAirflowJob._sl_sentinel_scope_parts(context)
+            scope = sanitize_scope("__".join(scope_parts))
             previous = os.environ.get('SL_SENTINEL_SCOPE_SAFE', None)
             os.environ['SL_SENTINEL_SCOPE_SAFE'] = scope
             try:

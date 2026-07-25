@@ -967,7 +967,10 @@ fi
     #: the ids render into data (an env var), never into shell code; the
     #: wrapper's tr whitelist then applies the same [A-Za-z0-9_.+:=-]
     #: whitelist as ai.starlake.sentinel.sanitize_scope.
-    _SL_SENTINEL_SCOPE_JINJA = "{{ ti.dag_id }}__{{ run_id }}"
+    #: task_id is part of the scope (issue #137): the sensors of a multi-table
+    #: domain poke concurrently under non-sequential executors, and a
+    #: dag+run-only scope makes them share (and cross-consume) one marker.
+    _SL_SENTINEL_SCOPE_JINJA = "{{ ti.dag_id }}__{{ ti.task_id }}__{{ run_id }}"
 
     #: Flat-wrapper sanitizer line (story 6.4 rules: no nested bash -c, no
     #: set -e). Same whitelist as sanitize_scope, but tr is BYTE-wise while
@@ -984,25 +987,32 @@ fi
 
     @classmethod
     def _sl_sentinel_scope_parts(cls, context) -> tuple:
-        """Resolve the (dag_id, run_id) scope parts from the task context.
+        """Resolve the (dag_id, task_id, run_id) scope parts from the context.
 
         dag_id is REQUIRED in the scope: run_id is only unique WITHIN one
         DAG — two generated DAGs covering the same domain on the same
         schedule tick share identical ``scheduled__...`` run_ids.
+        task_id is REQUIRED too (issue #137): a multi-table domain has one
+        preload sensor PER TABLE in the same run — without it they share one
+        marker path and cross-consume each other's verdict under concurrent
+        executors (a not-ready table then reads READY).
         """
         ti = context.get("ti", None)
         dag_id = getattr(ti, "dag_id", None)
         if not dag_id:
             dag_id = getattr(context.get("dag", None), "dag_id", None)
+        task_id = getattr(ti, "task_id", None)
+        if not task_id:
+            task_id = getattr(context.get("task", None), "task_id", None)
         run_id = context.get("run_id", None)
         if not run_id:
             run_id = getattr(context.get("dag_run", None), "run_id", None)
-        if not dag_id or not run_id:
+        if not dag_id or not task_id or not run_id:
             raise AirflowException(
-                "cannot resolve the pre-load sentinel scope — dag_id/run_id "
-                "missing from the task context"
+                "cannot resolve the pre-load sentinel scope — "
+                "dag_id/task_id/run_id missing from the task context"
             )
-        return str(dag_id), str(run_id)
+        return str(dag_id), str(task_id), str(run_id)
 
     @classmethod
     def _sl_sentinel_substitute_payload(cls, payload, context):
@@ -1013,11 +1023,11 @@ fi
         embedded in cloud payloads carries the sanitized run scope; a
         token-leak test pins that the token never reaches a submitted
         payload."""
-        dag_id, run_id = cls._sl_sentinel_scope_parts(context)
+        scope_parts = cls._sl_sentinel_scope_parts(context)
 
         def walk(value):
             if isinstance(value, str):
-                return substitute_scope(value, dag_id, run_id)
+                return substitute_scope(value, *scope_parts)
             if isinstance(value, dict):
                 return {key: walk(item) for key, item in value.items()}
             if isinstance(value, (list, tuple)):
@@ -1032,8 +1042,8 @@ fi
         substitute the run scope into the polled path, then check-and-consume
         the marker. ``True`` = READY (proceed), ``False`` = NOT READY (the
         marker was deleted FIRST — no stale positives on the next check)."""
-        dag_id, run_id = cls._sl_sentinel_scope_parts(context)
-        path = substitute_scope(sentinel_path, dag_id, run_id)
+        scope_parts = cls._sl_sentinel_scope_parts(context)
+        path = substitute_scope(sentinel_path, *scope_parts)
         return consume_sentinel(path, exists_fn, delete_fn)
 
     @classmethod
