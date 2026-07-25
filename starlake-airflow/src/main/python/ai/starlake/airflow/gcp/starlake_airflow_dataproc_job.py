@@ -255,7 +255,7 @@ class StarlakeAirflowDataprocCluster(StarlakeAirflowOptions):
             if scheduled_date:
                 tmp_arguments.append(f"{scheduled_date}")
             else:
-                tmp_arguments.append("{{sl_scheduled_date(params.cron, ts_as_datetime(data_interval_end | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}")
+                tmp_arguments.append("{{sl_scheduled_date(params.cron, ts_as_datetime((data_interval_end | default(dag_run.run_after, true)) | ts)).strftime('%Y-%m-%dT%H:%M:%S%z')}}")
             command = arguments.pop(0)
             arguments = [command] + tmp_arguments + arguments
         jar_list = __class__.get_context_var(var_name="spark_jar_list", options=self.options).split(",") if not jar_list else jar_list
