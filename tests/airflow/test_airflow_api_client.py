@@ -304,6 +304,64 @@ def test_list_dag_runs_passes_data_interval_end_filters_through_on_airflow_3(mak
     assert params["order_by"] == ["-run_after", "-start_date"]
 
 
+def test_list_dag_runs_backfills_data_interval_end_from_run_after_on_airflow_3(make_client):
+    """
+    An Airflow 3 run without a data interval (asset-triggered, manually
+    triggered) has a NULL data_interval_end; run_after carries its
+    schedule-equivalent timestamp and must be exposed under both names, or
+    every consumer of data_interval_end reads None (issue #145).
+    """
+    client = make_client(
+        "3.0.2",
+        responses={
+            "/dagRuns": {
+                # the v2 listing serializes the id as dag_run_id, like v1
+                "dag_runs": [
+                    {
+                        "dag_run_id": "asset_triggered__2026-07-25T07:45:27+00:00_LYIrISJQ",
+                        "data_interval_end": None,
+                        "run_after": "2026-07-25T07:45:27+00:00",
+                    },
+                    {
+                        "dag_run_id": "scheduled__2026-07-24T06:00:00+00:00",
+                        "data_interval_end": "2026-07-25T06:00:00+00:00",
+                        "run_after": "2026-07-25T06:00:00+00:00",
+                    },
+                ],
+                "total_entries": 2,
+            }
+        },
+    )
+
+    runs = client.list_dag_runs("my_dag")
+
+    # the asset-triggered run reports run_after as its data_interval_end...
+    assert runs[0].data_interval_end == "2026-07-25T07:45:27+00:00"
+    assert runs[0].run_after == "2026-07-25T07:45:27+00:00"
+    assert runs[0].run_id == "asset_triggered__2026-07-25T07:45:27+00:00_LYIrISJQ"
+    # ...while a scheduled run keeps its own interval end untouched
+    assert runs[1].data_interval_end == "2026-07-25T06:00:00+00:00"
+
+
+def test_get_dag_run_backfills_data_interval_end_from_run_after_on_airflow_3(make_client):
+    """Single-run reads go through the same normalization as listings."""
+    client = make_client(
+        "3.0.2",
+        responses={
+            "/dagRuns/asset_triggered__x": {
+                "dag_run_id": "asset_triggered__x",
+                "data_interval_end": None,
+                "run_after": "2026-07-25T07:45:27+00:00",
+            }
+        },
+    )
+
+    run = client.get_dag_run("my_dag", "asset_triggered__x")
+
+    assert run.data_interval_end == "2026-07-25T07:45:27+00:00"
+    assert run.run_id == "asset_triggered__x"
+
+
 def test_list_dag_runs_aliases_v1_dag_run_id(make_client):
     """The v1 API names the field dag_run_id; both spellings must be exposed."""
     client = make_client(

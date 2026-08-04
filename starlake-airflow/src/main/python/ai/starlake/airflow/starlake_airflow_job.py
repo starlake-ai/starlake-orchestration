@@ -393,7 +393,16 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
 
 
 
-            def ts_as_datetime(ts: Any) -> datetime:
+            def ts_as_datetime(ts: Any) -> Optional[datetime]:
+                if ts is None:
+                    # a DagRun payload may carry no timestamp at all — an
+                    # Airflow 2 metadata row predating data intervals, or a run
+                    # whose start_date is not set. Returning None lets each
+                    # caller apply its own fallback (the DAG start date for the
+                    # previous run, skipping the min-interval guard for the last
+                    # one) instead of failing on str(None) reaching the ISO
+                    # parser (issue #145)
+                    return None
                 if isinstance(ts, datetime):
                     return ts
                 else:
@@ -441,7 +450,9 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 if not previous_dag_checked:
                     # if the dag never run successfuly,
                     # we set the previous dag checked to the start date of the dag
-                    previous_dag_checked = dag.start_date
+                    # (falling back to the current start date if the dag has none,
+                    # so the checked window stays a datetime)
+                    previous_dag_checked = dag.start_date or ts
                     print(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
 
                 if last_dag_ts and last_dag_checked:
@@ -455,6 +466,11 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             print(f"The last succeeded dag run with scheduled date {last_dag_checked} started more than {self.min_timedelta_between_runs} seconds ago ({diff.seconds} seconds)...")
                     else:
                         print(f"The last succeeded dag run with scheduled date {last_dag_checked} started at {last_dag_ts.strftime(sl_timestamp_format)}...")
+                elif __dag_runs:
+                    # a run without a scheduled date or a start date cannot be
+                    # compared: say so rather than silently dropping the
+                    # min_timedelta_between_runs guard
+                    logging.warning("The last succeeded dag run has no scheduled date or no start date; the minimum delay between runs is not enforced for this execution")
 
                 data_cycle_freshness = None
                 if self.data_cycle:

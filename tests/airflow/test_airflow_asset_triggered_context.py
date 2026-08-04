@@ -50,6 +50,7 @@ def _event(cls_name: str, extra: dict, ts: datetime):
 
 TS_1 = datetime(2026, 7, 25, 6, 0, tzinfo=timezone.utc)
 TS_2 = datetime(2026, 7, 25, 7, 0, tzinfo=timezone.utc)
+DAG_START_DATE = datetime(2026, 7, 1, tzinfo=timezone.utc)
 
 
 class TestTriggeringDatasetsFromEvents:
@@ -150,3 +151,87 @@ class TestDataIntervalEndFallback:
         options = AirflowPipeline.sl_transform_options(SimpleNamespace(), "0 6 * * *")
         assert options is not None
         assert "data_interval_end | default(dag_run.run_after, true)" in options
+
+
+class TestStartTaskWithoutPreviousDataInterval:
+    """
+    Issue #145 — the start task read the previous successful DagRun's
+    data_interval_end and fed it straight to an ISO parser. An Airflow 3
+    asset-triggered run has none, so from the SECOND run on the whole DAG died
+    with ``invalid literal for int() with base 10: b'None'`` (str(None) reaching
+    dateutil). The run must instead be treated as having no known interval and
+    fall back to the DAG start date.
+    """
+
+    URI = "starbake_orders"
+
+    def _start_callable(self, monkeypatch, previous_runs, windows):
+        from ai.starlake.airflow import starlake_airflow_job as job_module
+        from ai.starlake.airflow.bash.starlake_airflow_bash_job import StarlakeAirflowBashJob
+        from ai.starlake.dataset import StarlakeDataset
+
+        class FakeClient:
+            def find_previous_dag_runs(self, dag_id, scheduled_date, leaf_task_ids, at_scheduled_date=False):
+                return previous_runs
+
+            def find_dataset_events(self, uri, timestamp_lte, **window):
+                # the window start is what the previous run's interval end
+                # decides — recording it is what makes these tests diagnostic
+                windows.append(window)
+                return []
+
+        monkeypatch.setattr(job_module, "StarlakeAirflowApiClient", FakeClient)
+
+        job = StarlakeAirflowBashJob(
+            filename="test_airflow.py",
+            module_name="tests.airflow.test_airflow_asset_triggered_context",
+            options={},
+        )
+        dataset = StarlakeDataset(name=self.URI, cron="0 6 * * *")
+        start = job.start_op(
+            task_id="start",
+            scheduled=False,
+            not_scheduled_datasets=[],
+            least_frequent_datasets=[],
+            most_frequent_datasets=[dataset],
+        )
+        return start.python_callable
+
+    def _context(self, monkeypatch):
+        """A task context whose triggering event carries the asset URI."""
+        from unittest.mock import MagicMock
+
+        asset = type("Asset", (), {"uri": self.URI})()
+        event = _event("AssetEventDagRunReferenceResult", {}, TS_2)
+        ti = MagicMock()
+        ti.get_template_context.return_value = {"triggering_asset_events": {asset: [event]}}
+        dag = SimpleNamespace(
+            dag_id="ing_starlake_transform",
+            leaves=[SimpleNamespace(task_id="end")],
+            start_date=DAG_START_DATE,
+        )
+        return {"task_instance": ti, "dag": dag}
+
+    def test_previous_asset_triggered_run_without_data_interval_does_not_crash(self, monkeypatch):
+        previous = {"dag_id": "ing_starlake_transform", "data_interval_end": None, "start_date": None}
+        windows = []
+        should_continue = self._start_callable(monkeypatch, [SimpleNamespace(**previous)], windows)
+
+        # returns instead of raising on str(None) reaching the ISO parser...
+        assert should_continue(start_date=TS_2.isoformat(), **self._context(monkeypatch)) is False
+        # ...and the run with no known interval is treated as no run at all:
+        # the checked window starts at the DAG start date
+        assert windows[0]["data_interval_end_gt"] == DAG_START_DATE
+
+    def test_previous_run_with_data_interval_is_still_honoured(self, monkeypatch):
+        previous = {
+            "dag_id": "ing_starlake_transform",
+            "data_interval_end": TS_1.isoformat(),
+            "start_date": TS_1.isoformat(),
+        }
+        windows = []
+        should_continue = self._start_callable(monkeypatch, [SimpleNamespace(**previous)], windows)
+
+        assert should_continue(start_date=TS_2.isoformat(), **self._context(monkeypatch)) is False
+        # a known interval end still bounds the window — no fallback applied
+        assert windows[0]["data_interval_end_gt"] == TS_1

@@ -582,12 +582,24 @@ class StarlakeAirflowApiClient(BaseHook):
         return order_by
 
     @staticmethod
-    def _alias_run_ids(run: DotDict) -> DotDict:
-        """Expose both run_id (v2/database naming) and dag_run_id (v1 naming)."""
+    def _normalize_run(run: DotDict) -> DotDict:
+        """
+        Make a REST DagRun payload consumable whatever the Airflow version.
+
+        Exposes both run_id (v2/database naming) and dag_run_id (v1 naming), and
+        backfills data_interval_end from run_after: on Airflow 3 a run without a
+        data interval (asset-triggered, manually triggered) carries a NULL
+        data_interval_end while the non-nullable run_after holds its
+        schedule-equivalent timestamp. This mirrors the translation already
+        applied to the data_interval_end filters and sort fields (issue #145).
+        A no-op on Airflow 2, whose v1 payloads have no run_after key.
+        """
         if run.get("run_id") is None and run.get("dag_run_id") is not None:
             run["run_id"] = run["dag_run_id"]
         elif run.get("dag_run_id") is None and run.get("run_id") is not None:
             run["dag_run_id"] = run["run_id"]
+        if run.get("data_interval_end") is None and run.get("run_after") is not None:
+            run["data_interval_end"] = run["run_after"]
         return run
 
     def list_dag_runs(self, dag_id: str, **params) -> List[DotDict]:
@@ -644,7 +656,7 @@ class StarlakeAirflowApiClient(BaseHook):
             ed_lt = params.pop("end_date_lt", None)
         limit = params.pop("limit", None)
         runs = [
-            self._alias_run_ids(r)
+            self._normalize_run(r)
             for r in self._get_paged(f"dags/{dag_id}/dagRuns", "dag_runs", params=params, limit=int(limit) if limit else None)
         ]
         if di_gt is not None:
@@ -666,7 +678,7 @@ class StarlakeAirflowApiClient(BaseHook):
 
     def get_dag_run(self, dag_id: str, dag_run_id: str) -> DotDict:
         run = self._get(f"dags/{dag_id}/dagRuns/{dag_run_id}")
-        return self._alias_run_ids(run) if run else run
+        return self._normalize_run(run) if run else run
 
     def trigger_dag_run(
             self,
@@ -690,7 +702,7 @@ class StarlakeAirflowApiClient(BaseHook):
         elif logical_date is not None:
             payload["logical_date"] = logical_date
         run = self._post(f"dags/{dag_id}/dagRuns", json=payload)
-        return self._alias_run_ids(run) if run else run
+        return self._normalize_run(run) if run else run
 
     def delete_dag(self, dag_id: str) -> None:
         """
