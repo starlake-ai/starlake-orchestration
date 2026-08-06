@@ -550,7 +550,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                     extra = event.extra or event.dataset.extra or dataset.extra or {}
                                     scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
                                     if scheduled_datetime:
-                                        if scheduled_date_to_check_min >= scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
+                                        if scheduled_date_to_check_min > scheduled_datetime or scheduled_datetime > scheduled_date_to_check_max:
                                             print(f"Dataset event {event.id} for {dataset.uri} with scheduled datetime {scheduled_datetime} not between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
                                             i += 1
                                         else:
