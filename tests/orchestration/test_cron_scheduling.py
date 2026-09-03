@@ -279,6 +279,47 @@ class TestStarlakeDependenciesFromJson:
         assert parent.dependency_type == StarlakeDependencyType.TASK
         assert len(parent.dependencies) == 1
         assert parent.dependencies[0].name == "child.table"
+        assert deps.get_dependency("parent_task") is parent
+        assert deps.get_dependency("child.table") is parent.dependencies[0]
+        assert deps.get_dependency("missing") is None
+
+    def test_diamond_name_collision_first_level_wins(self):
+        # Diamond shape: "shared.table" appears both as a first-level
+        # dependency and nested as a child of another first-level task.
+        # get_dependency must return the first-level instance.
+        json_str = json.dumps([
+            {
+                "data": {
+                    "name": "shared.table",
+                    "typ": "table",
+                    "cron": "0 0 * * *",
+                },
+                "children": [],
+            },
+            {
+                "data": {
+                    "name": "consumer_task",
+                    "typ": "task",
+                },
+                "children": [
+                    {
+                        "data": {
+                            "name": "shared.table",
+                            "typ": "table",
+                            "cron": "0 0 * * *",
+                        },
+                        "children": [],
+                    }
+                ],
+            },
+        ])
+        deps = StarlakeDependencies(json_str)
+        first_level = deps.dependencies[0]
+        nested = deps.dependencies[1].dependencies[0]
+        assert first_level.name == "shared.table"
+        assert nested.name == "shared.table"
+        assert first_level is not nested
+        assert deps.get_dependency("shared.table") is first_level
 
 
 # ---------------------------------------------------------------------------
