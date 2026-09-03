@@ -39,6 +39,7 @@ from ai.starlake.airflow.compat import (
     BaseSensorOperator,
     BashOperator,
     BashSensor,
+    Context,
     PokeReturnValue,
     TaskGroup,
     ti_xcom_pull,
@@ -46,8 +47,6 @@ from ai.starlake.airflow.compat import (
 
 from airflow.providers.google.cloud.hooks.cloud_run import CloudRunHook
 from airflow.providers.google.cloud.operators.cloud_run import  CloudRunExecuteJobOperator
-
-from airflow.utils.context import Context
 
 from google.cloud.run_v2.types import Execution
 from google.longrunning import operations_pb2

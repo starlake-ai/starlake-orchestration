@@ -42,6 +42,24 @@ try:
 except ImportError:
     from airflow.models.baseoperator import BaseOperator  # Airflow 2.x
 
+# Airflow 3.2 deprecates the whole airflow.utils.context module (one warning on
+# import, one more per attribute read). The Task SDK home of the type is
+# airflow.sdk.definitions.context, which is where Airflow 3 itself re-exports
+# it from.
+try:
+    from airflow.sdk.definitions.context import Context  # Airflow 3.x
+except ImportError:
+    from airflow.utils.context import Context  # Airflow 2.x
+
+# airflow.models.Variable still resolves on Airflow 3 but warns on every read,
+# and the Task SDK class renamed the fallback keyword default_var -> default.
+try:
+    from airflow.sdk import Variable as _Variable  # Airflow 3.x
+    _VARIABLE_DEFAULT_KWARG = "default"
+except ImportError:
+    from airflow.models import Variable as _Variable  # Airflow 2.x
+    _VARIABLE_DEFAULT_KWARG = "default_var"
+
 try:
     from airflow.sdk.bases.sensor import BaseSensorOperator, PokeReturnValue  # Airflow 3.x
 except ImportError:
@@ -92,6 +110,7 @@ __all__ = [
     "Dataset",
     "BaseOperator",
     "BaseSensorOperator",
+    "Context",
     "PokeReturnValue",
     "TaskGroup",
     "get_current_context",
@@ -112,6 +131,7 @@ __all__ = [
     "install_dataset_extra_forwarding",
     "ti_xcom_pull",
     "ti_xcom_push",
+    "get_variable",
 ]
 
 
@@ -131,6 +151,16 @@ def ti_xcom_pull(context, **kwargs):
     is what the Airflow 2 operator method delegated to.
     """
     return context["ti"].xcom_pull(**kwargs)
+
+
+def get_variable(key, default=None, **kwargs):
+    """Read an Airflow Variable through the API of the running major.
+
+    Reads go through the secrets backends on both versions, so the value is
+    the same one ``airflow.models.Variable`` returns — the Task SDK class only
+    spells the fallback keyword differently.
+    """
+    return _Variable.get(key, **{_VARIABLE_DEFAULT_KWARG: default}, **kwargs)
 
 
 def ti_xcom_push(context, **kwargs):

@@ -58,7 +58,7 @@ from airflow.exceptions import AirflowException
 
 from airflow.models import DagRun, TaskInstance
 
-from airflow.utils.context import Context
+from ai.starlake.airflow.compat import Context
 
 import logging
 
