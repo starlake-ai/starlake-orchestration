@@ -44,8 +44,8 @@ class TestStarlakeAirflowOptions:
         )
         assert result == "from_options"
 
-    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
-    def test_default_value_second(self, mock_variable_cls):
+    @patch("ai.starlake.airflow.starlake_airflow_options.get_variable")
+    def test_default_value_second(self, mock_get_variable):
         """Default value is returned when options dict does not contain the var."""
         result = StarlakeAirflowOptions.get_context_var(
             var_name="my_var",
@@ -53,12 +53,12 @@ class TestStarlakeAirflowOptions:
             options={},
         )
         assert result == "from_default"
-        mock_variable_cls.get.assert_not_called()
+        mock_get_variable.assert_not_called()
 
-    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
-    def test_airflow_variable_third(self, mock_variable_cls):
+    @patch("ai.starlake.airflow.starlake_airflow_options.get_variable")
+    def test_airflow_variable_third(self, mock_get_variable):
         """Airflow Variable is checked when options and default are absent."""
-        mock_variable_cls.get.return_value = "from_airflow_var"
+        mock_get_variable.return_value = "from_airflow_var"
         result = StarlakeAirflowOptions.get_context_var(
             var_name="my_var",
             default_value=None,
@@ -66,10 +66,10 @@ class TestStarlakeAirflowOptions:
         )
         assert result == "from_airflow_var"
 
-    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
-    def test_env_var_fourth(self, mock_variable_cls, monkeypatch):
+    @patch("ai.starlake.airflow.starlake_airflow_options.get_variable")
+    def test_env_var_fourth(self, mock_get_variable, monkeypatch):
         """Environment variable is checked when Airflow Variable returns None."""
-        mock_variable_cls.get.return_value = None
+        mock_get_variable.return_value = None
         monkeypatch.setenv("my_var", "from_env")
         result = StarlakeAirflowOptions.get_context_var(
             var_name="my_var",
@@ -78,10 +78,10 @@ class TestStarlakeAirflowOptions:
         )
         assert result == "from_env"
 
-    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
-    def test_raises_when_nothing_found(self, mock_variable_cls, monkeypatch):
+    @patch("ai.starlake.airflow.starlake_airflow_options.get_variable")
+    def test_raises_when_nothing_found(self, mock_get_variable, monkeypatch):
         """MissingEnvironmentVariable is raised when no source has the var."""
-        mock_variable_cls.get.return_value = None
+        mock_get_variable.return_value = None
         monkeypatch.delenv("nonexistent_var", raising=False)
         with pytest.raises(MissingEnvironmentVariable):
             StarlakeAirflowOptions.get_context_var(
@@ -90,12 +90,12 @@ class TestStarlakeAirflowOptions:
                 options={},
             )
 
-    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
-    def test_variable_store_failure_falls_through_to_env(self, mock_variable_cls, monkeypatch):
+    @patch("ai.starlake.airflow.starlake_airflow_options.get_variable")
+    def test_variable_store_failure_falls_through_to_env(self, mock_get_variable, monkeypatch):
         """An unavailable Variable store (unmigrated/unreachable metadata DB)
         behaves like an unset variable: the chain continues to the environment
         variable instead of crashing DAG parsing (issue #56)."""
-        mock_variable_cls.get.side_effect = Exception("no such column: variable.team_name")
+        mock_get_variable.side_effect = Exception("no such column: variable.team_name")
         monkeypatch.setenv("my_var", "from_env")
         result = StarlakeAirflowOptions.get_context_var(
             var_name="my_var",
@@ -104,11 +104,11 @@ class TestStarlakeAirflowOptions:
         )
         assert result == "from_env"
 
-    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
-    def test_variable_store_failure_without_env_raises_missing(self, mock_variable_cls, monkeypatch):
+    @patch("ai.starlake.airflow.starlake_airflow_options.get_variable")
+    def test_variable_store_failure_without_env_raises_missing(self, mock_get_variable, monkeypatch):
         """A Variable store failure with no other source still surfaces as
         MissingEnvironmentVariable, not as the underlying database error."""
-        mock_variable_cls.get.side_effect = Exception("no such table: variable")
+        mock_get_variable.side_effect = Exception("no such table: variable")
         monkeypatch.delenv("nonexistent_var", raising=False)
         with pytest.raises(MissingEnvironmentVariable):
             StarlakeAirflowOptions.get_context_var(
@@ -117,20 +117,61 @@ class TestStarlakeAirflowOptions:
                 options={},
             )
 
-    @patch("ai.starlake.airflow.starlake_airflow_options.Variable")
-    def test_variable_fetched_with_a_single_guarded_call(self, mock_variable_cls):
-        """The value is returned from one Variable.get(default_var=None) call —
+    @patch("ai.starlake.airflow.starlake_airflow_options.get_variable")
+    def test_variable_fetched_with_a_single_guarded_call(self, mock_get_variable):
+        """The value is returned from one guarded read —
         the old double-call raised KeyError if the variable vanished between
         the existence check and the unguarded second fetch (issue #56)."""
-        mock_variable_cls.get.return_value = "from_airflow_var"
+        mock_get_variable.return_value = "from_airflow_var"
         result = StarlakeAirflowOptions.get_context_var(
             var_name="my_var",
             default_value=None,
             options={},
         )
         assert result == "from_airflow_var"
-        assert mock_variable_cls.get.call_count == 1
-        assert mock_variable_cls.get.call_args.kwargs.get("default_var", "MISSING") is None
+        assert mock_get_variable.call_count == 1
+        assert mock_get_variable.call_args.kwargs.get("default", "MISSING") is None
+
+
+# ------------------------------------------------------------------
+# 4.1.b  compat.get_variable / compat.Context — the deprecation-free paths
+# ------------------------------------------------------------------
+
+class TestCompatVariableAndContext:
+    """Airflow 3.2 warns on every airflow.models.Variable read and on every
+    airflow.utils.context attribute; compat routes both to the Task SDK homes
+    without changing what Airflow 2 does."""
+
+    def test_get_variable_spells_the_default_keyword_per_major(self):
+        """default_var on Airflow 2, default on the Task SDK class.
+
+        Passing the wrong one is a TypeError at the first read, so the mapping
+        is the whole point of the helper.
+        """
+        from ai.starlake.airflow import compat
+
+        with patch.object(compat, "_Variable") as mock_variable_cls:
+            mock_variable_cls.get.return_value = "valeur"
+            assert compat.get_variable("ma_var", default=None) == "valeur"
+
+        attendu = "default" if compat.supports_assets() else "default_var"
+        kwargs = mock_variable_cls.get.call_args.kwargs
+        assert attendu in kwargs and kwargs[attendu] is None
+        assert mock_variable_cls.get.call_args.args == ("ma_var",)
+
+    def test_context_comes_from_the_task_sdk_on_airflow_3(self):
+        """The exported Context must not be the deprecated attribute.
+
+        Reading airflow.utils.context.Context is what emits one warning per
+        importing module on Airflow 3.2+.
+        """
+        from ai.starlake.airflow import compat
+
+        if compat.supports_assets():
+            assert compat.Context.__module__ != "airflow.utils.context"
+            assert compat.Context.__module__.startswith("airflow.sdk")
+        else:
+            assert compat.Context is not None
 
 
 # ------------------------------------------------------------------

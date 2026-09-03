@@ -31,7 +31,7 @@ from ai.starlake.job import StarlakePreLoadStrategy, StarlakeSparkConfig, Starla
 
 from ai.starlake.airflow import StarlakeAirflowJob, StarlakeAirflowOptions, StarlakeDatasetMixin, StarlakeCloudPreloadSensor, PreLoadWait
 
-from ai.starlake.airflow.compat import BaseOperator, TriggerRule
+from ai.starlake.airflow.compat import BaseOperator, TriggerRule, ti_xcom_push
 
 class StarlakeAirflowDataprocMasterConfig(StarlakeDataprocMasterConfig, StarlakeAirflowOptions):
     def __init__(self, machine_type: str, disk_type: str, disk_size: int, options: dict, **kwargs):
@@ -547,24 +547,26 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
         try:
             job_id = super().execute(context)
             if self.preload and self.sentinel_path:
-                # story 6.12 — keep the job_id XCom (best-effort extra, never
-                # gated on — Airflow 3 operators have no xcom_push), then
+                # story 6.12 — keep the job_id XCom (best-effort extra), then
                 # consume-then-signal: sentinel present → falsy return_value
                 # XCom → skip_or_start skips downstream
-                if self.do_xcom_push and hasattr(self, "xcom_push"):
-                    self.xcom_push(context, key="job_id", value=job_id)
+                if self.do_xcom_push:
+                    ti_xcom_push(context, key="job_id", value=job_id)
                 exists_fn, delete_fn = self._sl_sentinel_hook_handlers()
                 return StarlakeAirflowJob._sl_sentinel_ready(
                     self.sentinel_path, context, exists_fn, delete_fn
                 )
             if self.do_xcom_push:
-                self.xcom_push(context, key="job_id", value=job_id)
+                ti_xcom_push(context, key="job_id", value=job_id)
                 return True
             else:
                 return job_id
         except Exception as e:
             if self.do_xcom_push:
-                self.xcom_push(context, key="return_value", value=False)
+                # the falsy return_value XCom the skip_or_start gate reads —
+                # self.xcom_push here raised AttributeError on Airflow 3 and
+                # masked the original failure
+                ti_xcom_push(context, key="return_value", value=False)
             raise e
 
     def execute_complete(self, context, event=None):

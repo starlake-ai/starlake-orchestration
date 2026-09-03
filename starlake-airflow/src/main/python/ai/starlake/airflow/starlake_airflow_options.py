@@ -22,7 +22,7 @@ from ai.starlake.common import MissingEnvironmentVariable
 
 from ai.starlake.job import StarlakeOptions
 
-from airflow.models import Variable
+from ai.starlake.airflow.compat import get_variable
 
 V = TypeVar("V")
 
@@ -57,7 +57,7 @@ class StarlakeAirflowOptions(StarlakeOptions):
         # install before `airflow db migrate`) must behave like an unset
         # variable and let the chain fall through, not crash DAG parsing.
         try:
-            value = Variable.get(var_name, default_var=None, **kwargs)
+            value = get_variable(var_name, default=None, **kwargs)
         except Exception:
             value = None
         if value is not None:

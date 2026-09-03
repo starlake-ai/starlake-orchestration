@@ -39,14 +39,14 @@ from ai.starlake.airflow.compat import (
     BaseSensorOperator,
     BashOperator,
     BashSensor,
+    Context,
     PokeReturnValue,
     TaskGroup,
+    ti_xcom_pull,
 )
 
 from airflow.providers.google.cloud.hooks.cloud_run import CloudRunHook
 from airflow.providers.google.cloud.operators.cloud_run import  CloudRunExecuteJobOperator
-
-from airflow.utils.context import Context
 
 from google.cloud.run_v2.types import Execution
 from google.longrunning import operations_pb2
@@ -741,7 +741,10 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
             try:
                 job = super(CloudRunJobOperator, self).execute(context)
                 # Airflow 3 Task-SDK operators have no xcom_push attribute —
-                # the "job" XCom is a best-effort extra, never gated on
+                # the "job" XCom is a best-effort extra, never gated on. Left
+                # on the Airflow 2 path only: nothing reads it, and the value
+                # is a Job.to_dict() payload whose serializability under the
+                # Airflow 3 XCom backend is unverified
                 if self.do_xcom_push and hasattr(self, "xcom_push"):
                     self.xcom_push(context, key="job", value=job)
                 if self.preload and self.sentinel_path:
@@ -834,7 +837,13 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
         )
-        operation_name = self.xcom_pull(context, task_ids=self.source_task_id)
+        # self.xcom_pull is an Airflow 2 BaseOperator method: the Airflow 3
+        # Task SDK sensor base has no such attribute and the poke raised
+        # AttributeError on every async Cloud Run task. return_value is the
+        # operation name the submission returns.
+        operation_name = ti_xcom_pull(
+            context, task_ids=self.source_task_id, key="return_value"
+        )
         operation_request = operations_pb2.GetOperationRequest(name=operation_name)
         operation: operations_pb2.Operation = hook.get_conn().get_operation(
             operation_request

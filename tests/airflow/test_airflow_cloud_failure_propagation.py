@@ -661,6 +661,15 @@ class TestCloudRunJobOperatorExecute:
 class TestCloudRunJobCompletionSensorPoke:
 
     def _make_sensor(self, monkeypatch, *, preload, error_bytes):
+        """Build the sensor and a context whose task instance serves the XCom.
+
+        The operation name is served by ``context["ti"]``, never by a stub
+        installed on the sensor itself. Stubbing the instance hid the fact
+        that ``BaseSensorOperator.xcom_pull`` is an Airflow 2 method: setting
+        the attribute created it where Airflow 3 has none, so the suite stayed
+        green while every async Cloud Run poke raised ``AttributeError`` at
+        task runtime.
+        """
         import ai.starlake.airflow.gcp.starlake_airflow_cloud_run_job as cloud_run_module
         from ai.starlake.airflow.gcp.starlake_airflow_cloud_run_job import (
             CloudRunJobCompletionSensor,
@@ -682,29 +691,63 @@ class TestCloudRunJobCompletionSensorPoke:
         mock_hook_cls = MagicMock()
         mock_hook_cls.return_value.get_conn.return_value.get_operation.return_value = operation
         monkeypatch.setattr(cloud_run_module, "CloudRunHook", mock_hook_cls)
-        monkeypatch.setattr(sensor, "xcom_pull", MagicMock(return_value="operation-name"))
-        return sensor
+        ti = MagicMock()
+        ti.xcom_pull.return_value = "operation-name"
+        return sensor, {"ti": ti}
 
     def test_non_preload_failure_raises(self, monkeypatch):
         """V3 (issue #92): do_xcom_push defaults to True on BaseOperator, so
         the old do_xcom_push-keyed branch swallowed every failure."""
         from airflow.exceptions import AirflowException
 
-        sensor = self._make_sensor(monkeypatch, preload=False, error_bytes=b"\x08\x03")
+        sensor, context = self._make_sensor(monkeypatch, preload=False, error_bytes=b"\x08\x03")
         with pytest.raises(AirflowException, match="job failed"):
-            sensor.poke(context={})
+            sensor.poke(context=context)
 
     def test_preload_failure_completes_with_falsy_xcom(self, monkeypatch):
-        sensor = self._make_sensor(monkeypatch, preload=True, error_bytes=b"\x08\x03")
-        verdict = sensor.poke(context={})
+        sensor, context = self._make_sensor(monkeypatch, preload=True, error_bytes=b"\x08\x03")
+        verdict = sensor.poke(context=context)
         assert verdict.is_done is True
         assert verdict.xcom_value is False
 
     def test_success_completes_truthy(self, monkeypatch):
-        sensor = self._make_sensor(monkeypatch, preload=False, error_bytes=b"")
-        verdict = sensor.poke(context={})
+        sensor, context = self._make_sensor(monkeypatch, preload=False, error_bytes=b"")
+        verdict = sensor.poke(context=context)
         assert verdict.is_done is True
         assert verdict.xcom_value is True
+
+    def test_operation_name_read_through_the_task_instance(self, monkeypatch):
+        """The poke must reach the XCom through ``context["ti"]``, on both majors.
+
+        Asserting the exact call is what makes this a regression test on
+        Airflow 2 as well: ``BaseOperator.xcom_pull`` delegates to the same
+        task instance, but adds ``dag_id`` and ``include_prior_dates``, so a
+        return to ``self.xcom_pull`` fails this assertion instead of passing
+        through unnoticed. On Airflow 3 it raises ``AttributeError``.
+        """
+        sensor, context = self._make_sensor(monkeypatch, preload=False, error_bytes=b"")
+        sensor.poke(context=context)
+        context["ti"].xcom_pull.assert_called_once_with(
+            task_ids="cloud_run_task", key="return_value"
+        )
+
+    def test_sensor_base_carries_no_xcom_api_on_airflow_3(self):
+        """Pin the API boundary the fix is written against.
+
+        Airflow 2 bases carry ``xcom_pull``/``xcom_push``; the Airflow 3 Task
+        SDK bases carry neither. Whichever major runs the suite, the operator
+        code may not depend on those attributes.
+        """
+        from ai.starlake.airflow.compat import (
+            BaseOperator,
+            BaseSensorOperator,
+            supports_assets,
+        )
+
+        attendu = not supports_assets()  # present on Airflow 2 only
+        for base in (BaseOperator, BaseSensorOperator):
+            assert hasattr(base, "xcom_pull") is attendu
+            assert hasattr(base, "xcom_push") is attendu
 
 
 # ---------------------------------------------------------------------------

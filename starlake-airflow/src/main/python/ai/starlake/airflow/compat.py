@@ -42,6 +42,24 @@ try:
 except ImportError:
     from airflow.models.baseoperator import BaseOperator  # Airflow 2.x
 
+# Airflow 3.2 deprecates the whole airflow.utils.context module (one warning on
+# import, one more per attribute read). The Task SDK home of the type is
+# airflow.sdk.definitions.context, which is where Airflow 3 itself re-exports
+# it from.
+try:
+    from airflow.sdk.definitions.context import Context  # Airflow 3.x
+except ImportError:
+    from airflow.utils.context import Context  # Airflow 2.x
+
+# airflow.models.Variable still resolves on Airflow 3 but warns on every read,
+# and the Task SDK class renamed the fallback keyword default_var -> default.
+try:
+    from airflow.sdk import Variable as _Variable  # Airflow 3.x
+    _VARIABLE_DEFAULT_KWARG = "default"
+except ImportError:
+    from airflow.models import Variable as _Variable  # Airflow 2.x
+    _VARIABLE_DEFAULT_KWARG = "default_var"
+
 try:
     from airflow.sdk.bases.sensor import BaseSensorOperator, PokeReturnValue  # Airflow 3.x
 except ImportError:
@@ -92,6 +110,7 @@ __all__ = [
     "Dataset",
     "BaseOperator",
     "BaseSensorOperator",
+    "Context",
     "PokeReturnValue",
     "TaskGroup",
     "get_current_context",
@@ -110,12 +129,47 @@ __all__ = [
     "supports_assets",
     "api_prefix",
     "install_dataset_extra_forwarding",
+    "ti_xcom_pull",
+    "ti_xcom_push",
+    "get_variable",
 ]
 
 
 def airflow_version() -> Version:
     """Return the running Airflow version."""
     return parse(airflow.__version__)
+
+
+def ti_xcom_pull(context, **kwargs):
+    """Pull an XCom through the task instance carried by the context.
+
+    Airflow 2 exposed ``xcom_pull(context, ...)`` on ``BaseOperator`` (and so
+    on ``BaseSensorOperator``); the Airflow 3 Task SDK bases have neither
+    ``xcom_pull`` nor ``xcom_push``, so ``self.xcom_pull(...)`` raises
+    ``AttributeError`` at task runtime. The task instance itself carries the
+    same call on both majors — ``ti.xcom_pull(task_ids=..., key=...)`` — and
+    is what the Airflow 2 operator method delegated to.
+    """
+    return context["ti"].xcom_pull(**kwargs)
+
+
+def get_variable(key, default=None, **kwargs):
+    """Read an Airflow Variable through the API of the running major.
+
+    Reads go through the secrets backends on both versions, so the value is
+    the same one ``airflow.models.Variable`` returns — the Task SDK class only
+    spells the fallback keyword differently.
+    """
+    return _Variable.get(key, **{_VARIABLE_DEFAULT_KWARG: default}, **kwargs)
+
+
+def ti_xcom_push(context, **kwargs):
+    """Push an XCom through the task instance carried by the context.
+
+    Same reason as :func:`ti_xcom_pull`: ``self.xcom_push`` exists on Airflow 2
+    operators only. ``ti.xcom_push(key=..., value=...)`` is available on both.
+    """
+    context["ti"].xcom_push(**kwargs)
 
 
 def supports_datasets() -> bool:

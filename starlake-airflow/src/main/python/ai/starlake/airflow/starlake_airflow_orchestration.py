@@ -36,7 +36,7 @@ from ai.starlake.airflow.compat import BaseOperator, Dataset, TaskGroup, get_cur
 
 from ai.starlake.airflow.starlake_airflow_api import StarlakeAirflowApiClient
 
-from airflow.utils.context import Context
+from ai.starlake.airflow.compat import Context
 
 from airflow.utils.state import DagRunState
 
