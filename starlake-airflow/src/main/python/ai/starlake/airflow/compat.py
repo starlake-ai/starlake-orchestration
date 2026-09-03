@@ -110,12 +110,36 @@ __all__ = [
     "supports_assets",
     "api_prefix",
     "install_dataset_extra_forwarding",
+    "ti_xcom_pull",
+    "ti_xcom_push",
 ]
 
 
 def airflow_version() -> Version:
     """Return the running Airflow version."""
     return parse(airflow.__version__)
+
+
+def ti_xcom_pull(context, **kwargs):
+    """Pull an XCom through the task instance carried by the context.
+
+    Airflow 2 exposed ``xcom_pull(context, ...)`` on ``BaseOperator`` (and so
+    on ``BaseSensorOperator``); the Airflow 3 Task SDK bases have neither
+    ``xcom_pull`` nor ``xcom_push``, so ``self.xcom_pull(...)`` raises
+    ``AttributeError`` at task runtime. The task instance itself carries the
+    same call on both majors — ``ti.xcom_pull(task_ids=..., key=...)`` — and
+    is what the Airflow 2 operator method delegated to.
+    """
+    return context["ti"].xcom_pull(**kwargs)
+
+
+def ti_xcom_push(context, **kwargs):
+    """Push an XCom through the task instance carried by the context.
+
+    Same reason as :func:`ti_xcom_pull`: ``self.xcom_push`` exists on Airflow 2
+    operators only. ``ti.xcom_push(key=..., value=...)`` is available on both.
+    """
+    context["ti"].xcom_push(**kwargs)
 
 
 def supports_datasets() -> bool:
