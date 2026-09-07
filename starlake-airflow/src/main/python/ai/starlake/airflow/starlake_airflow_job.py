@@ -222,13 +222,36 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             self.__end_date = None
         # set max_active_runs
         self.__max_active_runs = int(__class__.get_context_var(var_name='max_active_runs', default_value="3", options=self.options))
-        # the Airflow REST client's knobs, declared like every other one: the
-        # instance to query, the connection holding its credentials and the way
-        # to authenticate against it. Empty means "let the client decide from
-        # airflow.cfg, the connection and the host".
-        self.airflow_api_conn_id = str(__class__.get_context_var(var_name='airflow_api_conn_id', default_value="airflow_api", options=self.options))
-        self.airflow_api_base_url = str(__class__.get_context_var(var_name='airflow_api_base_url', default_value="", options=self.options)) or None
-        self.airflow_api_auth = str(__class__.get_context_var(var_name='airflow_api_auth', default_value="", options=self.options)) or None
+
+    def __api_client_option(self, var_name: str, default: Optional[str] = None) -> Optional[str]:
+        """An optional Airflow REST client setting: the instance to query, the
+        connection holding its credentials, the way to authenticate against it.
+        Unset means "let the client decide from airflow.cfg, the connection and
+        the host".
+
+        Resolved when the client is built — that is, in the worker running the
+        start task — and never at DAG parse: the variable store answers over
+        the execution API on Airflow 3, and no DAG needs regenerating for a
+        deployment to change its mind. A default value would shadow that store
+        entirely, since get_context_var stops at the first of options, default,
+        variable, environment that answers.
+        """
+        try:
+            return str(__class__.get_context_var(var_name=var_name, options=self.options)) or default
+        except MissingEnvironmentVariable:
+            return default
+
+    @property
+    def airflow_api_conn_id(self) -> str:
+        return self.__api_client_option('airflow_api_conn_id', "airflow_api")
+
+    @property
+    def airflow_api_base_url(self) -> Optional[str]:
+        return self.__api_client_option('airflow_api_base_url')
+
+    @property
+    def airflow_api_auth(self) -> Optional[str]:
+        return self.__api_client_option('airflow_api_auth')
 
     @property
     def end_date(self) -> Optional[datetime]:
