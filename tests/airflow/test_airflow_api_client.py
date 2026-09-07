@@ -24,6 +24,9 @@ regardless of the Airflow version installed in the test environment.
 from __future__ import annotations
 
 import json
+import sys
+import types
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,6 +54,7 @@ class FakeResponse:
 class FakeConnection:
     login = "user"
     password = "pass"
+    extra_dejson: dict = {}
 
 
 class FakeConf:
@@ -514,6 +518,210 @@ def test_client_tolerates_missing_connection_on_airflow_2(monkeypatch):
 
     assert client.conn is None
     assert client.session.auth is None
+
+
+# ---------------------------------------------------------------------------
+# Google-managed instances (Cloud Composer)
+# ---------------------------------------------------------------------------
+
+COMPOSER_URL = "https://abcdef-dot-europe-west1.composer.googleusercontent.com"
+
+
+class FakeComposerConf:
+    @staticmethod
+    def get(section, key):
+        return COMPOSER_URL
+
+
+class FakeGoogleCredentials:
+    def __init__(self, valid=True):
+        self.token = "initial-token"
+        self.valid = valid
+        self.refreshed = 0
+
+    def refresh(self, request):
+        self.refreshed += 1
+        self.valid = True
+        self.token = "refreshed-token"
+
+
+def _connection_not_found(conn_id):
+    raise RuntimeError(f"The conn_id `{conn_id}` isn\'t defined")
+
+
+def _no_token_exchange(*args, **kwargs):
+    raise AssertionError("a Google-managed instance exposes no /auth/token")
+
+
+@pytest.fixture
+def fake_google_auth(monkeypatch):
+    """Stand in for google-auth: it is not installed in every test venv."""
+    credentials = FakeGoogleCredentials()
+    seen = {}
+
+    google_auth = types.ModuleType("google.auth")
+
+    def default(scopes=None):
+        seen["scopes"] = scopes
+        return credentials, "a-project"
+
+    google_auth.default = default
+
+    transport = types.ModuleType("google.auth.transport")
+    transport_requests = types.ModuleType("google.auth.transport.requests")
+    transport_requests.Request = lambda: "google-auth-request"
+    transport.requests = transport_requests
+    google_auth.transport = transport
+
+    google = sys.modules.get("google") or types.ModuleType("google")
+    monkeypatch.setitem(sys.modules, "google", google)
+    monkeypatch.setitem(sys.modules, "google.auth", google_auth)
+    monkeypatch.setitem(sys.modules, "google.auth.transport", transport)
+    monkeypatch.setitem(sys.modules, "google.auth.transport.requests", transport_requests)
+    monkeypatch.setattr(google, "auth", google_auth, raising=False)
+    return SimpleNamespace(credentials=credentials, seen=seen)
+
+
+def test_composer_instance_authenticates_without_a_connection(monkeypatch, fake_google_auth):
+    """Cloud Composer has no user database: the airflow_api connection cannot
+    exist and POST /auth/token has nothing to authenticate against. The task's
+    own Google identity is the credential."""
+    monkeypatch.setattr(airflow, "__version__", "3.0.2")
+    monkeypatch.setattr(api_module, "conf", FakeComposerConf())
+    monkeypatch.setattr(api_module.BaseHook, "get_connection", staticmethod(_connection_not_found))
+    monkeypatch.setattr(api_module.requests, "post", _no_token_exchange)
+
+    client = StarlakeAirflowApiClient()
+
+    assert client.auth_mode == api_module.AUTH_GOOGLE
+    assert isinstance(client.session.auth, api_module.GoogleCredentialsAuth)
+    assert "Authorization" not in client.session.headers
+    assert fake_google_auth.seen["scopes"] == [api_module.GOOGLE_AUTH_SCOPE]
+
+
+def test_google_token_is_carried_and_refreshed_per_request():
+    """The access token outlives neither a long DAG run nor its own hour."""
+    credentials = FakeGoogleCredentials(valid=False)
+    auth = api_module.GoogleCredentialsAuth(credentials, "google-auth-request")
+
+    request = SimpleNamespace(headers={})
+    assert auth(request) is request
+    assert request.headers["Authorization"] == "Bearer refreshed-token"
+    assert credentials.refreshed == 1
+
+    auth(request)  # still valid: no second round-trip
+    assert credentials.refreshed == 1
+
+
+def test_explicit_jwt_mode_overrides_the_managed_host(monkeypatch):
+    """The host only decides when nothing else does."""
+    monkeypatch.setattr(airflow, "__version__", "3.0.2")
+    monkeypatch.setattr(api_module, "conf", FakeComposerConf())
+    monkeypatch.setattr(
+        api_module.BaseHook, "get_connection", staticmethod(lambda conn_id: FakeConnection())
+    )
+    monkeypatch.setattr(
+        api_module.requests, "post", lambda *a, **kw: FakeResponse(200, {"access_token": "tok"})
+    )
+
+    client = StarlakeAirflowApiClient(auth="jwt")
+
+    assert client.auth_mode == api_module.AUTH_JWT
+    assert client.session.headers["Authorization"] == "Bearer tok"
+    assert client.session.auth is None
+
+
+def test_connection_extra_selects_google_auth_and_scopes(monkeypatch, fake_google_auth):
+    """Any other proxied instance opts in through the connection."""
+    monkeypatch.setattr(airflow, "__version__", "3.0.2")
+    monkeypatch.setattr(api_module, "conf", FakeConf())
+
+    class ProxiedConnection:
+        login = None
+        password = None
+        extra_dejson = {"auth": "gcp", "scopes": "https://www.googleapis.com/auth/userinfo.email, openid"}
+
+    monkeypatch.setattr(
+        api_module.BaseHook, "get_connection", staticmethod(lambda conn_id: ProxiedConnection())
+    )
+    monkeypatch.setattr(api_module.requests, "post", _no_token_exchange)
+
+    client = StarlakeAirflowApiClient()
+
+    assert client.auth_mode == api_module.AUTH_GOOGLE
+    assert fake_google_auth.seen["scopes"] == [
+        "https://www.googleapis.com/auth/userinfo.email",
+        "openid",
+    ]
+
+
+def test_managed_host_wins_over_credentials_that_cannot_work(monkeypatch, fake_google_auth, caplog):
+    """A login left over from a self-hosted setup authenticates nothing on a
+    Google-managed instance — it is ignored, and said so."""
+    monkeypatch.setattr(airflow, "__version__", "3.0.2")
+    monkeypatch.setattr(api_module, "conf", FakeComposerConf())
+    monkeypatch.setattr(
+        api_module.BaseHook, "get_connection", staticmethod(lambda conn_id: FakeConnection())
+    )
+    monkeypatch.setattr(api_module.requests, "post", _no_token_exchange)
+
+    with caplog.at_level("WARNING"):
+        client = StarlakeAirflowApiClient()
+
+    assert client.auth_mode == api_module.AUTH_GOOGLE
+    assert "are ignored" in caplog.text
+
+
+def test_unknown_auth_mode_falls_back_to_the_host(monkeypatch, fake_google_auth, caplog):
+    monkeypatch.setattr(airflow, "__version__", "3.0.2")
+    monkeypatch.setattr(api_module, "conf", FakeComposerConf())
+    monkeypatch.setattr(api_module.BaseHook, "get_connection", staticmethod(_connection_not_found))
+    monkeypatch.setattr(api_module.requests, "post", _no_token_exchange)
+
+    with caplog.at_level("WARNING"):
+        client = StarlakeAirflowApiClient(auth="gogle")
+
+    assert client.auth_mode == api_module.AUTH_GOOGLE
+    assert "Unknown authentication mode" in caplog.text
+
+
+def test_unreadable_connection_extra_keeps_the_connection(monkeypatch):
+    monkeypatch.setattr(airflow, "__version__", "2.10.5")
+    monkeypatch.setattr(api_module, "conf", FakeConf())
+
+    class ListExtraConnection:
+        login = "user"
+        password = "pass"
+        extra_dejson = ["not", "an", "object"]
+
+    monkeypatch.setattr(
+        api_module.BaseHook, "get_connection", staticmethod(lambda conn_id: ListExtraConnection())
+    )
+
+    client = StarlakeAirflowApiClient()
+
+    assert client.auth_mode == api_module.AUTH_JWT
+    assert client.session.auth == ("user", "pass")
+
+
+def test_google_auth_without_google_auth_installed_names_the_missing_package(monkeypatch):
+    monkeypatch.setattr(airflow, "__version__", "3.0.2")
+    monkeypatch.setattr(api_module, "conf", FakeComposerConf())
+    monkeypatch.setattr(api_module.BaseHook, "get_connection", staticmethod(_connection_not_found))
+    monkeypatch.setitem(sys.modules, "google.auth", None)
+
+    with pytest.raises(RuntimeError, match="google-auth is not installed"):
+        StarlakeAirflowApiClient()
+
+
+def test_missing_connection_still_raises_on_a_self_hosted_airflow_3(monkeypatch):
+    """Nothing changes where /auth/token IS the way in."""
+    monkeypatch.setattr(airflow, "__version__", "3.0.2")
+    monkeypatch.setattr(api_module, "conf", FakeConf())
+    monkeypatch.setattr(api_module.BaseHook, "get_connection", staticmethod(_connection_not_found))
+
+    with pytest.raises(RuntimeError, match="airflow_api"):
+        StarlakeAirflowApiClient()
 
 
 def test_db_available_is_false_on_airflow_3(make_client):

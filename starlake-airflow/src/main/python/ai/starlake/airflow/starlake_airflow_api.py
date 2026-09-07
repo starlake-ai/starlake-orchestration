@@ -17,10 +17,11 @@
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+from requests.auth import AuthBase
 from urllib3.util.retry import Retry
 
 from airflow.configuration import conf
@@ -69,6 +70,46 @@ def _as_datetime(value: Any) -> datetime:
 
 
 # ---------------------------------------------------------------------------
+# Authentication modes
+# ---------------------------------------------------------------------------
+
+AUTH_JWT = "jwt"
+AUTH_GOOGLE = "google"
+
+_GOOGLE_AUTH_ALIASES = {AUTH_GOOGLE, "gcp", "composer", "google_oauth"}
+
+# A Cloud Composer environment answers on one of these hosts. Its API sits
+# behind a Google-managed proxy and the Airflow instance has no user database:
+# POST /auth/token has nothing to authenticate against. The proxy expects an
+# OAuth 2.0 access token minted from the caller's own Google credentials.
+GOOGLE_MANAGED_HOSTS = (
+    ".composer.googleusercontent.com",
+    ".composer.cloud.google.com",
+)
+
+GOOGLE_AUTH_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+
+class GoogleCredentialsAuth(AuthBase):
+    """Bearer authentication carrying a Google OAuth 2.0 access token.
+
+    An access token expires within the hour while a DAG run may last longer, so
+    the credentials are refreshed lazily before each request instead of once at
+    construction time.
+    """
+
+    def __init__(self, credentials, request) -> None:
+        self.credentials = credentials
+        self._request = request
+
+    def __call__(self, request):
+        if not self.credentials.valid:
+            self.credentials.refresh(self._request)
+        request.headers["Authorization"] = f"Bearer {self.credentials.token}"
+        return request
+
+
+# ---------------------------------------------------------------------------
 # Airflow API Client (supports Airflow 2 & 3)
 # ---------------------------------------------------------------------------
 
@@ -91,6 +132,12 @@ class StarlakeAirflowApiClient(BaseHook):
         * Assets instead of datasets
         * API prefix: /api/v2
 
+    - Google-managed instances (Cloud Composer), on either major:
+        * Bearer OAuth 2.0 access token from Application Default Credentials.
+          Such an instance has no user database, so there is no login to
+          exchange for a token: the caller's own Google identity is the
+          credential.
+
     Features:
         * Automatic version detection
         * Automatic authentication mode
@@ -107,6 +154,7 @@ class StarlakeAirflowApiClient(BaseHook):
             base_url: Optional[str] = None,
             username: Optional[str] = None,
             password: Optional[str] = None,
+            auth: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -117,6 +165,10 @@ class StarlakeAirflowApiClient(BaseHook):
                 (it does not belong to the targeted instance): all calls go
                 through the REST API.
             username/password: explicit REST credentials, overriding conn_id.
+            auth: authentication mode, ``jwt`` (the instance mints the token)
+                or ``google`` (Application Default Credentials). Overrides the
+                ``auth`` key of the connection extra; both are optional, the
+                mode is otherwise deduced from the targeted instance.
         """
         super().__init__()
         self.timeout = timeout
@@ -131,6 +183,8 @@ class StarlakeAirflowApiClient(BaseHook):
         self.api_base_url = f"{base}{api_prefix()}"
 
         # REST credentials: explicit override, else Airflow connection
+        conn_error: Optional[Exception] = None
+        extra: Dict[str, Any] = {}
         if username is not None:
             self.conn = None
             self._login: Optional[str] = username
@@ -141,18 +195,21 @@ class StarlakeAirflowApiClient(BaseHook):
                 self._login = self.conn.login
                 self._password = self.conn.password
             except Exception as e:
-                if self._supports_assets and base_url is None:
-                    raise
-                # Airflow 2.x works database-first: the connection is only
-                # needed by the REST fallback
-                log.info(
-                    "Airflow connection '%s' not found (%s); the REST API fallback will be unauthenticated",
-                    conn_id,
-                    e,
-                )
+                conn_error = e
                 self.conn = None
                 self._login = None
                 self._password = None
+            else:
+                try:
+                    parsed = self.conn.extra_dejson or {}
+                    if not isinstance(parsed, dict):
+                        raise TypeError(f"expected a JSON object, got {type(parsed).__name__}")
+                    extra = parsed
+                except Exception as e:
+                    # an unreadable extra must not discard a usable connection
+                    log.warning("Ignoring the extra of connection '%s': %s", conn_id, e)
+
+        self.auth_mode = self._resolve_auth_mode(auth or extra.get("auth"))
 
         # HTTP session with retry strategy
         self.session = requests.Session()
@@ -168,17 +225,89 @@ class StarlakeAirflowApiClient(BaseHook):
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
-        # Authentication mode
-        if self._supports_assets:
+        # Authentication
+        if self.auth_mode == AUTH_GOOGLE:
+            self._configure_google_auth(extra.get("scopes"))
+        elif self._supports_assets:
             # Airflow 3.x → JWT Bearer
+            if conn_error is not None:
+                if base_url is None:
+                    raise conn_error
+                log.info(
+                    "Airflow connection '%s' not found (%s); requesting an unauthenticated token from %s",
+                    conn_id,
+                    conn_error,
+                    self.base_url,
+                )
             self._configure_bearer_auth()
         elif self._login:
             # Airflow 2.x → Basic Auth
             self.session.auth = (self._login, self._password)
+        elif conn_error is not None:
+            # Airflow 2.x works database-first: the connection is only
+            # needed by the REST fallback
+            log.info(
+                "Airflow connection '%s' not found (%s); the REST API fallback will be unauthenticated",
+                conn_id,
+                conn_error,
+            )
 
     # -----------------------------------------------------------------------
-    # Authentication for Airflow 3.x
+    # Authentication
     # -----------------------------------------------------------------------
+
+    def _resolve_auth_mode(self, requested: Optional[str]) -> str:
+        """Name the authentication mode of the targeted instance.
+
+        An explicit request wins. Otherwise the host decides: a Google-managed
+        Airflow answers behind a proxy that expects a Google access token, and
+        exposes no /auth/token to exchange a login for one.
+        """
+        if requested:
+            mode = str(requested).strip().lower()
+            if mode in _GOOGLE_AUTH_ALIASES:
+                return AUTH_GOOGLE
+            if mode == AUTH_JWT:
+                return AUTH_JWT
+            log.warning(
+                "Unknown authentication mode '%s'; deducing it from %s instead",
+                requested,
+                self.base_url,
+            )
+        host = urlparse(self.base_url).hostname or ""
+        if host.endswith(GOOGLE_MANAGED_HOSTS):
+            if self._login:
+                log.warning(
+                    "%s is a Google-managed instance and authenticates no login of its own: "
+                    "the credentials given for it are ignored",
+                    self.base_url,
+                )
+            return AUTH_GOOGLE
+        return AUTH_JWT
+
+    def _configure_google_auth(self, scopes: Any = None) -> None:
+        """Authenticate with the caller's Google credentials.
+
+        Nothing has to be stored anywhere: a Cloud Composer task already runs
+        as the environment's service account, and Application Default
+        Credentials mint the token from the metadata server.
+        """
+        try:
+            import google.auth
+            from google.auth.transport.requests import Request as GoogleAuthRequest
+        except ImportError as e:
+            raise RuntimeError(
+                f"Google authentication selected for {self.base_url} "
+                "but google-auth is not installed"
+            ) from e
+
+        if isinstance(scopes, str):
+            scopes = [scope.strip() for scope in scopes.split(",") if scope.strip()]
+        credentials, _ = google.auth.default(
+            scopes=list(scopes) if scopes else [GOOGLE_AUTH_SCOPE]
+        )
+        log.info("Authenticating against %s with Google credentials", self.base_url)
+        self.session.auth = GoogleCredentialsAuth(credentials, GoogleAuthRequest())
 
     def _configure_bearer_auth(self) -> None:
         """
