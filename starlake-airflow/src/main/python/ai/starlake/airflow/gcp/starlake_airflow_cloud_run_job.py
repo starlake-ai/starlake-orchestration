@@ -509,6 +509,11 @@ class StarlakeAirflowCloudRunJob(StarlakeAirflowJob):
                         impersonation_chain=impersonation_chain,
                         preload=preload,
                         sentinel_path=sentinel_path,
+                        # same option as the gcloud sensor above: unset here,
+                        # the sensor falls back to Airflow's own 60 s default
+                        # and cloud_run_async_poke_interval means nothing on
+                        # the operator path
+                        poke_interval=self.cloud_run_async_poke_interval,
                         **kwargs
                     )
 
