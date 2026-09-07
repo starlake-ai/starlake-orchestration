@@ -16,10 +16,18 @@ Before installing starlake-airflow, ensure the following minimum versions are in
 
 ### Airflow API Configuration
 
-The following environment variables should be defined to enable the Airflow API interaction:
+Starlake reads the Airflow metadata (datasets/assets, events, DAG runs) through `StarlakeAirflowApiClient`. On Airflow 2 that is the metadata database, with the REST API as a fallback; on Airflow 3 the Task SDK removed database access from tasks, so every lookup is a REST call and the client has to authenticate.
+
+**A self-hosted instance mints the token itself.** Define these on the instance:
 
 - `AIRFLOW__API__SECRET_KEY`
 - `AIRFLOW__API_AUTH__JWT_SECRET`
+
+and give the client an `airflow_api` connection carrying a login and a password: it POSTs them to `/auth/token` on Airflow 3, and uses them as basic auth on the Airflow 2 REST fallback.
+
+**A Google-managed instance authenticates no login of its own.** Cloud Composer — on `*.composer.googleusercontent.com` or `*.composer.cloud.google.com` — runs no auth manager: there is no user database, so `/auth/token` has nothing to authenticate and an `airflow_api` connection has no object. Its API takes an OAuth 2.0 access token instead, which the client obtains from Application Default Credentials — on Composer, the service account the task already runs as — and refreshes per request. Nothing to configure and no credential to store anywhere: the client recognises those hosts. Two conditions on the environment: `google-auth` must be importable (it ships with `apache-airflow-providers-google`), and the account must hold the role Composer designates for API access, `roles/composer.user` — `roles/composer.worker` alone does not carry its `composer.dags.*` permissions.
+
+Three options override that deduction (see [Options](#options)): `airflow_api_auth`, `airflow_api_base_url` and `airflow_api_conn_id`. They are read when the start task builds the client, never at DAG parse, so an **Airflow variable** of the same name settles the question for a whole instance without regenerating a single DAG.
 
 ## Installation
 
@@ -216,6 +224,9 @@ The following options can be specified in all concrete factory classes. Options 
 | **pre_load_not_ready_sentinel_path** | str | opt-in (absent/blank = off, zero change) — parent prefix for the CLI's `--notReadySentinel` marker (requires starlake CLI **1.5.15+**), resolved to `<prefix>/<domain>/<dag_id>__<task_id>__<run_id>.notready` (sanitized; task-scoped since 0.6.13, #137). Scheme is engine-gated at DAG-parse time: absolute local/`file://` on the shell (bash) engine, `gs://` on cloud_run/dataproc, `s3://` on fargate. See "Pre-load not-ready sentinel" below |
 | **dataset_triggering_strategy**    | str  | the dataset triggering strategy to use                                                      |
 | **max_active_runs**                | int  | maximum number of active DAG runs (`3` by default)                                          |
+| **airflow_api_auth**               | str  | how the start task authenticates against the Airflow REST API: `jwt` (the instance mints the token, `POST /auth/token` on Airflow 3, basic auth on the Airflow 2 fallback) or `google` (an OAuth 2.0 access token from Application Default Credentials, the only way into a Google-managed instance). Unset: the `auth` key of the connection extra decides, then the instance host |
+| **airflow_api_base_url**           | str  | the Airflow instance the start task queries (unset: `[api] base_url` from `airflow.cfg`)    |
+| **airflow_api_conn_id**            | str  | the connection holding the REST API credentials (`airflow_api` by default)                  |
 
 ### Pre-load not-ready sentinel
 

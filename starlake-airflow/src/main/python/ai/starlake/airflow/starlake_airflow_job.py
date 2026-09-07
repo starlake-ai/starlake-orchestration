@@ -223,6 +223,36 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
         # set max_active_runs
         self.__max_active_runs = int(__class__.get_context_var(var_name='max_active_runs', default_value="3", options=self.options))
 
+    def __api_client_option(self, var_name: str, default: Optional[str] = None) -> Optional[str]:
+        """An optional Airflow REST client setting: the instance to query, the
+        connection holding its credentials, the way to authenticate against it.
+        Unset means "let the client decide from airflow.cfg, the connection and
+        the host".
+
+        Resolved when the client is built — that is, in the worker running the
+        start task — and never at DAG parse: the variable store answers over
+        the execution API on Airflow 3, and no DAG needs regenerating for a
+        deployment to change its mind. A default value would shadow that store
+        entirely, since get_context_var stops at the first of options, default,
+        variable, environment that answers.
+        """
+        try:
+            return str(__class__.get_context_var(var_name=var_name, options=self.options)) or default
+        except MissingEnvironmentVariable:
+            return default
+
+    @property
+    def airflow_api_conn_id(self) -> str:
+        return self.__api_client_option('airflow_api_conn_id', "airflow_api")
+
+    @property
+    def airflow_api_base_url(self) -> Optional[str]:
+        return self.__api_client_option('airflow_api_base_url')
+
+    @property
+    def airflow_api_auth(self) -> Optional[str]:
+        return self.__api_client_option('airflow_api_auth')
+
     @property
     def end_date(self) -> Optional[datetime]:
         """Get the end date value."""
@@ -428,7 +458,11 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 last_dag_ts: Optional[datetime] = None
 
                 dag = context["dag"]
-                client = StarlakeAirflowApiClient()
+                client = StarlakeAirflowApiClient(
+                    conn_id=self.airflow_api_conn_id,
+                    base_url=self.airflow_api_base_url,
+                    auth=self.airflow_api_auth,
+                )
 
                 # we look for the first succeeded dag run before the scheduled date
                 __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=False)

@@ -50,7 +50,9 @@ The module supports Airflow 2.4+ and Airflow 3.x from a single code base. All im
 | `supports_assets()` | `>= 3.0.0` | Asset-based APIs (REST v2, JWT auth) |
 | `api_prefix()` | version-derived | `/api/v1` vs `/api/v2` |
 
-Metadata lookups (datasets/assets, events, DAG runs, task instances) go through `StarlakeAirflowApiClient`, which selects its transport internally: the metadata database on Airflow 2 (REST v1 as fallback), REST v2 on Airflow 3. See **[COMPATIBILITY.md](COMPATIBILITY.md)** for the step-by-step reference, the parity analysis against the previous session-based implementation, and the per-version parameter translation tables.
+Metadata lookups (datasets/assets, events, DAG runs, task instances) go through `StarlakeAirflowApiClient`, which selects its transport internally: the metadata database on Airflow 2 (REST v1 as fallback), REST v2 on Airflow 3.
+
+Authentication is chosen apart from the transport: either the instance's own credentials — basic auth on Airflow 2, a JWT minted by `POST /auth/token` on Airflow 3, both taken from the `airflow_api` connection — or a Google OAuth 2.0 access token from Application Default Credentials, refreshed per request. A Google-managed instance (`*.composer.googleusercontent.com`, `*.composer.cloud.google.com`) authenticates no login of its own, so it accepts only the latter and needs no connection at all. The mode is named by the `airflow_api_auth` DAG option, else the client's `auth` argument, else the `auth` key of the connection extra, else the instance's host. `airflow_api_conn_id` and `airflow_api_base_url` are the two other options of that group. All three are resolved as properties where the client is built — in the worker running the start task, never at DAG parse — and carry no default value into `get_context_var`, so an Airflow variable of the same name answers for a whole instance without regenerating a DAG. See **[COMPATIBILITY.md](COMPATIBILITY.md)** for the step-by-step reference, the parity analysis against the previous session-based implementation, and the per-version parameter translation tables.
 
 ## Class-by-Class Reference
 

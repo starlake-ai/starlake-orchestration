@@ -165,12 +165,16 @@ class TestStartTaskWithoutPreviousDataInterval:
 
     URI = "starbake_orders"
 
-    def _start_callable(self, monkeypatch, previous_runs, windows):
+    def _start_callable(self, monkeypatch, previous_runs, windows, options=None, built=None):
         from ai.starlake.airflow import starlake_airflow_job as job_module
         from ai.starlake.airflow.bash.starlake_airflow_bash_job import StarlakeAirflowBashJob
         from ai.starlake.dataset import StarlakeDataset
 
         class FakeClient:
+            def __init__(self, **kwargs):
+                if built is not None:
+                    built.append(kwargs)
+
             def find_previous_dag_runs(self, dag_id, scheduled_date, leaf_task_ids, at_scheduled_date=False):
                 return previous_runs
 
@@ -185,7 +189,7 @@ class TestStartTaskWithoutPreviousDataInterval:
         job = StarlakeAirflowBashJob(
             filename="test_airflow.py",
             module_name="tests.airflow.test_airflow_asset_triggered_context",
-            options={},
+            options=options or {},
         )
         dataset = StarlakeDataset(name=self.URI, cron="0 6 * * *")
         start = job.start_op(
@@ -235,3 +239,81 @@ class TestStartTaskWithoutPreviousDataInterval:
         assert should_continue(start_date=TS_2.isoformat(), **self._context(monkeypatch)) is False
         # a known interval end still bounds the window — no fallback applied
         assert windows[0]["data_interval_end_gt"] == TS_1
+
+
+class TestApiClientOptions:
+    """The instance to query, its connection and its authentication mode are
+    DAG options like any other — a managed Airflow needs no code change, and no
+    connection it cannot have."""
+
+    def test_options_reach_the_api_client(self, monkeypatch):
+        harness = TestStartTaskWithoutPreviousDataInterval()
+        built = []
+        harness._start_callable(
+            monkeypatch,
+            previous_runs=[],
+            windows=[],
+            options={
+                "airflow_api_auth": "google",
+                "airflow_api_base_url": "https://x-dot-europe-west1.composer.googleusercontent.com",
+                "airflow_api_conn_id": "another_airflow_api",
+            },
+            built=built,
+        )(start_date=TS_2.isoformat(), **harness._context(monkeypatch))
+
+        assert built == [
+            {
+                "conn_id": "another_airflow_api",
+                "base_url": "https://x-dot-europe-west1.composer.googleusercontent.com",
+                "auth": "google",
+            }
+        ]
+
+    def test_building_the_job_asks_the_variable_store_nothing(self, monkeypatch):
+        """These three are read when the client is built, in the worker — a DAG
+        parse must not pay a round-trip per option per file."""
+        from ai.starlake.airflow import starlake_airflow_options as options_module
+        from ai.starlake.airflow.bash.starlake_airflow_bash_job import StarlakeAirflowBashJob
+
+        asked = []
+        monkeypatch.setattr(
+            options_module,
+            "get_variable",
+            lambda var_name, default=None, **kwargs: asked.append(var_name),
+        )
+
+        StarlakeAirflowBashJob(
+            filename="test_airflow.py",
+            module_name="tests.airflow.test_airflow_asset_triggered_context",
+            options={},
+        )
+
+        assert [name for name in asked if name.startswith("airflow_api")] == []
+
+    def test_an_airflow_variable_names_the_mode(self, monkeypatch):
+        """Settable on a deployed instance without regenerating a DAG: a
+        default value would have shadowed the variable store."""
+        from ai.starlake.airflow import starlake_airflow_options as options_module
+
+        monkeypatch.setattr(
+            options_module,
+            "get_variable",
+            lambda var_name, default=None, **kwargs: "google" if var_name == "airflow_api_auth" else default,
+        )
+
+        harness = TestStartTaskWithoutPreviousDataInterval()
+        built = []
+        harness._start_callable(monkeypatch, previous_runs=[], windows=[], built=built)(
+            start_date=TS_2.isoformat(), **harness._context(monkeypatch)
+        )
+
+        assert built == [{"conn_id": "airflow_api", "base_url": None, "auth": "google"}]
+
+    def test_no_option_leaves_every_choice_to_the_client(self, monkeypatch):
+        harness = TestStartTaskWithoutPreviousDataInterval()
+        built = []
+        harness._start_callable(monkeypatch, previous_runs=[], windows=[], built=built)(
+            start_date=TS_2.isoformat(), **harness._context(monkeypatch)
+        )
+
+        assert built == [{"conn_id": "airflow_api", "base_url": None, "auth": None}]

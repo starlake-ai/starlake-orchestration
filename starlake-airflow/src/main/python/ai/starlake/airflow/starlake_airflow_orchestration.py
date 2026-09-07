@@ -224,10 +224,10 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
         """Client targeting the Airflow instance given by kwargs/environment.
 
         AIRFLOW_BASE_URL / AIRFLOW_USERNAME / AIRFLOW_PASSWORD select the
-        instance and its REST credentials; the client picks the version-
-        appropriate API (/api/v1 + basic auth on Airflow 2, /api/v2 + JWT on
-        Airflow 3) and never touches the local metadata database when a base
-        URL is explicitly targeted.
+        instance and its REST credentials, AIRFLOW_AUTH the way to authenticate
+        against it; the client picks the version-appropriate API (/api/v1 +
+        basic auth on Airflow 2, /api/v2 + JWT on Airflow 3) and never touches
+        the local metadata database when a base URL is explicitly targeted.
         """
         import os
         env = os.environ.copy()
@@ -235,6 +235,7 @@ class AirflowPipeline(AbstractPipeline[DAG, BaseOperator, TaskGroup, Dataset], A
             base_url=kwargs.get('AIRFLOW_BASE_URL', env.get('AIRFLOW_BASE_URL', "http://localhost:8080")),
             username=kwargs.get('AIRFLOW_USERNAME', env.get('AIRFLOW_USERNAME', None)),
             password=kwargs.get('AIRFLOW_PASSWORD', env.get('AIRFLOW_PASSWORD', None)),
+            auth=kwargs.get('AIRFLOW_AUTH', env.get('AIRFLOW_AUTH', None)),
         )
 
     def delete(self, **kwargs) -> None:
