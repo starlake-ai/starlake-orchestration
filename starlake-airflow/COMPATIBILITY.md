@@ -21,7 +21,7 @@ All Airflow metadata lookups (datasets/assets, dataset events, DAG runs, task in
 |---|---|---|
 | Default transport | **metadata database** (SQLAlchemy session, like the old implementation) | **REST `/api/v2`** (the Task SDK removed database access from tasks) |
 | Fallback | REST `/api/v1` when the database is unreachable or a query fails | — |
-| Authentication | none needed for the database; Basic Auth for the REST fallback (optional `airflow_api` connection, `basic_auth` in `[api] auth_backends`) | JWT bearer token (`POST /auth/token`) |
+| Authentication | none needed for the database; Basic Auth for the REST fallback (optional `airflow_api` connection, `basic_auth` in `[api] auth_backends`) | JWT bearer token (`POST /auth/token`), or a Google OAuth 2.0 access token on a Google-managed instance |
 | Concepts | Datasets, `DatasetEvent` | Assets, `AssetEvent` |
 
 Every transport returns the **same normalized shape**: `DotDict` objects with ISO-8601 timestamp strings, and DAG runs exposing both `run_id` (v2/database naming) and `dag_run_id` (v1 naming). Callers never know which transport served them.
@@ -172,7 +172,7 @@ All REST collection reads go through `_get_paged`: a `total_entries`-driven offs
 | Previous-runs lookup | REST composition, `run_after` window, paginated skipped-leaf exclusion | `run_after == data_interval_end` for **scheduled** runs; for asset-triggered runs `run_after` is the trigger time and `data_interval_end` may be null — the client-side final sort treats nulls last |
 | Dataset-events lookup | REST composition (asset by uri_pattern → events by timestamp → runs by run_after window → client-side join) | complete (paginated) but O(#producing DAGs + pages) HTTP calls where Airflow 2 does 1 SQL query |
 | Replay of old dates | ✅ window on the producing run, native `timestamp_lte`, full pagination | none |
-| Authentication | JWT bearer (`/auth/token`) | requires api-server reachability from workers |
+| Authentication | JWT bearer (`/auth/token`), Google access token (ADC) on a managed instance | requires api-server reachability from workers; a Google-managed instance runs no auth manager, so `/auth/token` and the `airflow_api` connection have no object there |
 | Lineage inlets XCom | hook removed in Airflow 3 | conversion in the mixin is a no-op there — harmless |
 | Runtime `sl_options` fragment | context key selected at DAG-build time: `triggering_asset_events` (3.x) / `triggering_dataset_events` (2.x) — #54 | none |
 | Pipeline lifecycle (`run()`, `delete()`) | routed through the client: `trigger_dag_run`/`get_dag_run`/`delete_dag` on `/api/v2` + JWT (v1 + basic auth on 2.x) — #55 | v2 trigger body requires the nullable `logical_date` key (handled) |
