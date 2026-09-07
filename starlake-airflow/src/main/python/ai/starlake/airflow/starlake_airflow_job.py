@@ -222,6 +222,13 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             self.__end_date = None
         # set max_active_runs
         self.__max_active_runs = int(__class__.get_context_var(var_name='max_active_runs', default_value="3", options=self.options))
+        # the Airflow REST client's knobs, declared like every other one: the
+        # instance to query, the connection holding its credentials and the way
+        # to authenticate against it. Empty means "let the client decide from
+        # airflow.cfg, the connection and the host".
+        self.airflow_api_conn_id = str(__class__.get_context_var(var_name='airflow_api_conn_id', default_value="airflow_api", options=self.options))
+        self.airflow_api_base_url = str(__class__.get_context_var(var_name='airflow_api_base_url', default_value="", options=self.options)) or None
+        self.airflow_api_auth = str(__class__.get_context_var(var_name='airflow_api_auth', default_value="", options=self.options)) or None
 
     @property
     def end_date(self) -> Optional[datetime]:
@@ -428,7 +435,11 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 last_dag_ts: Optional[datetime] = None
 
                 dag = context["dag"]
-                client = StarlakeAirflowApiClient()
+                client = StarlakeAirflowApiClient(
+                    conn_id=self.airflow_api_conn_id,
+                    base_url=self.airflow_api_base_url,
+                    auth=self.airflow_api_auth,
+                )
 
                 # we look for the first succeeded dag run before the scheduled date
                 __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=False)
