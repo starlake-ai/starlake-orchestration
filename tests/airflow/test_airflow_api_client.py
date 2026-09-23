@@ -791,6 +791,152 @@ def test_find_dataset_events_rest_composition_on_airflow_3(make_client):
 
 
 # ---------------------------------------------------------------------------
+# find_dataset_events_published — bounded on each event's own publication
+# time, never on its producing run (issue #150)
+# ---------------------------------------------------------------------------
+
+def test_find_dataset_events_published_rest_on_airflow_3(make_client):
+    """3.0.x accepts only timestamp_gte/timestamp_lte and FastAPI ignores an
+    unknown parameter: timestamp_gt is never sent, every bound is re-applied
+    client-side, and the v2 keys are normalized."""
+    uri = "s3://bucket/table"
+    client = make_client(
+        "3.0.2",
+        responses={
+            # first match wins: /assets/events must precede /assets
+            "/assets/events": {
+                "asset_events": [
+                    {"id": 1, "asset_id": 7, "uri": uri, "timestamp": "2026-07-01T00:00:00+00:00"},
+                    {"id": 5, "asset_id": 7, "uri": uri, "timestamp": "2026-07-02T00:00:00+00:00", "extra": {"k": "v"}},
+                    {"id": 3, "asset_id": 7, "uri": None, "timestamp": "2026-07-02T00:00:00+00:00"},
+                    {"id": 2, "asset_id": 7, "uri": uri, "timestamp": "2026-07-01T12:00:00.000001+00:00"},
+                    {"id": 9, "asset_id": 7, "uri": uri, "timestamp": "2026-07-05T00:00:00+00:00"},
+                ],
+                "total_entries": 5,
+            },
+            "/assets": {"assets": [{"id": 7, "uri": uri}], "total_entries": 1},
+        },
+    )
+
+    events = client.find_dataset_events_published(
+        uri,
+        "2026-07-03T00:00:00+00:00",
+        timestamp_gt="2026-07-01T00:00:00+00:00",
+    )
+
+    # id 1 sits exactly on the strict lower bound, id 9 after the upper bound
+    # (a server that ignored the filter): both dropped client-side; ties on
+    # the timestamp are ordered by id
+    assert [event.id for event in events] == [2, 3, 5]
+    assert all(event.dataset_id == 7 for event in events)
+    assert all(event.dataset_uri == uri for event in events)  # a null v2 uri falls back to the dataset's
+    assert all(event.dataset.id == 7 for event in events)
+    events_call = client.calls[-1]
+    assert events_call["url"] == f"{BASE_URL}/api/v2/assets/events"
+    assert events_call["params"]["asset_id"] == 7
+    assert events_call["params"]["timestamp_gte"] == "2026-07-01T00:00:00+00:00"
+    assert events_call["params"]["timestamp_lte"] == "2026-07-03T00:00:00+00:00"
+    assert "timestamp_gt" not in events_call["params"]
+    assert events_call["params"]["order_by"] == "timestamp"
+
+
+def test_find_dataset_events_published_rest_on_airflow_2(make_client):
+    """The v1 API has no timestamp filter at all: nothing is sent, the whole
+    (gt|gte, lte] window is applied client-side."""
+    uri = "s3://bucket/table"
+    client = make_client(
+        "2.10.5",
+        responses={
+            # first match wins: /datasets/events must precede /datasets/
+            "/datasets/events": {
+                "dataset_events": [
+                    {"id": 1, "dataset_id": 42, "dataset_uri": uri, "timestamp": "2026-06-30T23:59:59+00:00"},
+                    {"id": 2, "dataset_id": 42, "dataset_uri": uri, "timestamp": "2026-07-01T00:00:00+00:00"},
+                    {"id": 3, "dataset_id": 42, "dataset_uri": uri, "timestamp": "2026-07-03T00:00:00+00:00"},
+                    {"id": 4, "dataset_id": 42, "dataset_uri": uri, "timestamp": "2026-07-03T00:00:00.000001+00:00"},
+                ],
+                "total_entries": 4,
+            },
+            "/datasets/": {"id": 42, "uri": uri},
+        },
+    )
+
+    inclusive = client.find_dataset_events_published(
+        uri, "2026-07-03T00:00:00+00:00", timestamp_gte="2026-07-01T00:00:00+00:00"
+    )
+    strict = client.find_dataset_events_published(
+        uri, "2026-07-03T00:00:00+00:00", timestamp_gt="2026-07-01T00:00:00+00:00"
+    )
+
+    assert [event.id for event in inclusive] == [2, 3]
+    assert [event.id for event in strict] == [3]
+    assert all(event.dataset.id == 42 for event in inclusive)
+    events_calls = [call for call in client.calls if call["url"].endswith("/datasets/events")]
+    assert len(events_calls) == 2
+    for call in events_calls:
+        assert call["params"]["dataset_id"] == 42
+        assert not [key for key in call["params"] if key.startswith("timestamp")]
+
+
+def test_find_dataset_events_published_unknown_dataset(make_client):
+    client = make_client("3.0.2", responses={"/assets": {"assets": [], "total_entries": 0}})
+
+    assert client.find_dataset_events_published("s3://bucket/missing", "2026-07-03T00:00:00+00:00") == []
+    # no event is listed for a dataset the instance does not know
+    assert [call["url"] for call in client.calls] == [f"{BASE_URL}/api/v2/assets"]
+
+
+def test_find_dataset_events_published_uses_database_when_available(make_client, monkeypatch):
+    client = make_client("2.10.5")
+    client._db_available = True
+    received = {}
+
+    def from_database(uri, timestamp_lte, timestamp_gt=None, timestamp_gte=None):
+        received.update(uri=uri, timestamp_lte=timestamp_lte, timestamp_gt=timestamp_gt, timestamp_gte=timestamp_gte)
+        return [{"id": 99}]
+
+    monkeypatch.setattr(client, "_find_dataset_events_published_db", from_database)
+
+    events = client.find_dataset_events_published("s3://bucket/table", "2026-07-03T00:00:00+00:00", timestamp_gt="2026-07-01T00:00:00+00:00")
+
+    assert events == [{"id": 99}]
+    assert received == {
+        "uri": "s3://bucket/table",
+        "timestamp_lte": "2026-07-03T00:00:00+00:00",
+        "timestamp_gt": "2026-07-01T00:00:00+00:00",
+        "timestamp_gte": None,
+    }
+    assert client.calls == []  # no HTTP call
+
+
+def test_find_dataset_events_published_falls_back_to_rest_on_database_error(make_client, monkeypatch):
+    uri = "s3://bucket/table"
+    client = make_client(
+        "2.10.5",
+        responses={
+            "/datasets/events": {
+                "dataset_events": [{"id": 1, "dataset_id": 42, "dataset_uri": uri, "timestamp": "2026-07-02T00:00:00+00:00"}],
+                "total_entries": 1,
+            },
+            "/datasets/": {"id": 42, "uri": uri},
+        },
+    )
+    client._db_available = True
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(client, "_find_dataset_events_published_db", boom)
+    # the fallback's dataset lookup must also reach REST
+    monkeypatch.setattr(client, "_get_dataset_by_uri_db", boom)
+    monkeypatch.setattr(client, "_list_events_db", boom)
+
+    events = client.find_dataset_events_published(uri, "2026-07-03T00:00:00+00:00")
+
+    assert [event.id for event in events] == [1]
+
+
+# ---------------------------------------------------------------------------
 # Database transport against a real (isolated) sqlite metadata database
 # ---------------------------------------------------------------------------
 
@@ -957,6 +1103,34 @@ class TestDatabaseTransport:
             data_interval_end_lte=db_client.base.isoformat(),
         )
         assert [event.source_run_id for event in events] == ["run_0"]
+
+    def test_find_dataset_events_published_window_in_sql(self, db_client):
+        """Bounded on the event's own timestamp: strictly after timestamp_gt,
+        up to timestamp_lte included — whatever the producing runs' intervals."""
+        from datetime import timedelta
+        events = db_client.find_dataset_events_published(
+            "s3://bucket/table",
+            db_client.base + timedelta(days=2),
+            timestamp_gt=db_client.base,
+        )
+        assert [event.source_run_id for event in events] == ["run_1", "run_2"]
+        assert all(event.dataset.uri == "s3://bucket/table" for event in events)
+        assert all(event.dataset.id == db_client.dataset_id for event in events)
+        assert all(event.dataset_uri == "s3://bucket/table" for event in events)
+        assert all(isinstance(event.timestamp, str) for event in events)
+
+    def test_find_dataset_events_published_inclusive_lower_bound(self, db_client):
+        from datetime import timedelta
+        events = db_client.find_dataset_events_published(
+            "s3://bucket/table",
+            (db_client.base + timedelta(days=1)).isoformat(),
+            timestamp_gte=db_client.base.isoformat(),
+        )
+        assert [event.source_run_id for event in events] == ["run_0", "run_1"]
+
+    def test_find_dataset_events_published_unknown_dataset(self, db_client):
+        from datetime import timedelta
+        assert db_client.find_dataset_events_published("s3://bucket/missing", db_client.base + timedelta(days=10)) == []
 
     def test_find_previous_dag_runs_anti_join(self, db_client):
         from datetime import timedelta

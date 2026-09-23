@@ -305,7 +305,11 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
             if not dag_id:
                 dag_id = self.source
 
-            def get_scheduled_datetime(dataset: Dataset) -> Optional[datetime]:
+            # an AWARE minimum: comparing a naive datetime.min with an aware
+            # scheduled date raises TypeError (issue #150)
+            MIN_UTC = datetime.min.replace(tzinfo=pytz.UTC)
+
+            def get_scheduled_datetime(dataset: Dataset, strict: bool = True) -> Optional[datetime]:
                 extra = dataset.extra or {}
                 scheduled_date = extra.get(StarlakeParameters.SCHEDULED_DATE_PARAMETER.value, extra.get('scheduled_date', None))
                 if not scheduled_date:
@@ -323,7 +327,16 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             scheduled_date = None
                 if scheduled_date:
                     from dateutil import parser
-                    return parser.isoparse(scheduled_date).astimezone(pytz.timezone('UTC'))
+                    try:
+                        return parser.isoparse(scheduled_date).astimezone(pytz.timezone('UTC'))
+                    except (ValueError, OverflowError, TypeError) as e:
+                        if strict:
+                            raise
+                        # an event that belongs to no schedule is retained by
+                        # its presence: a foreign producer's unreadable date
+                        # must not fail the check (issue #150)
+                        print(f"Dataset {dataset.uri} carries an unreadable {StarlakeParameters.SCHEDULED_DATE_PARAMETER.value} '{scheduled_date}' ({e}): it is treated as absent")
+                        return None
                 else:
                     print(f"Dataset {dataset.uri} has no scheduled date in its extra data. Please ensure that the dataset has a '{StarlakeParameters.SCHEDULED_DATE_PARAMETER.value}' key in its extra data.")
                     return None
@@ -421,7 +434,39 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 logging.info("Returning %d filtered events for uri=%s", len(events), uri)
                 return events
 
+            def find_dataset_events_published_api(
+                    client: StarlakeAirflowApiClient,
+                    uri: str,
+                    timestamp_lte: datetime,
+                    timestamp_gt: Optional[datetime] = None,
+                    timestamp_gte: Optional[datetime] = None,
+            ) -> List[DotDict]:
+                """
+                Dataset/asset events for ``uri`` PUBLISHED in the window —
+                bounded on each event's own timestamp, never on its producing
+                run — sorted by (timestamp, id) ascending, each with the dataset
+                attached (see StarlakeAirflowApiClient.find_dataset_events_published).
 
+                The lookup of the datasets that belong to no schedule: their
+                producing runs may have no data interval (Airflow 3), while
+                every event carries its publication time (issue #150).
+                """
+                lower = timestamp_gt if timestamp_gt is not None else timestamp_gte
+                logging.info(
+                    "Finding dataset events for %s published within %s%s, %s]",
+                    uri,
+                    "(" if timestamp_gt is not None else "[",
+                    lower.isoformat() if lower is not None else "-inf",
+                    timestamp_lte.isoformat(),
+                )
+                events = client.find_dataset_events_published(
+                    uri,
+                    timestamp_lte,
+                    timestamp_gt=timestamp_gt,
+                    timestamp_gte=timestamp_gte,
+                )
+                logging.info("Returning %d published events for uri=%s", len(events), uri)
+                return events
 
             def ts_as_datetime(ts: Any) -> Optional[datetime]:
                 if ts is None:
@@ -440,8 +485,29 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     import pytz
                     return parser.isoparse(str(ts)).astimezone(pytz.timezone('UTC'))
 
-            def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context) -> bool:
+            def run_trigger_time(run: Any) -> Optional[datetime]:
+                """The instant a run was triggered: run_after on Airflow 3 (an
+                asset-triggered run's queue time, a manual run's trigger
+                instant), the logical date on Airflow 2 (a dataset-triggered
+                run's queue time). Non-nullable on both majors and never moved
+                by a clear, unlike start_date (issue #150)."""
+                if run is None:
+                    return None
+                return ts_as_datetime(
+                    getattr(run, "run_after", None)          # Airflow 3 payload / task SDK DagRun
+                    or getattr(run, "execution_date", None)  # Airflow 2 DagRun, database and v1 payloads
+                    or getattr(run, "logical_date", None)
+                )
+
+            def check_datasets(scheduled_date: datetime, datasets: List[Dataset], ts: datetime, context: Context, triggering_uris: Optional[set] = None) -> bool:
                 from croniter import croniter
+                triggering_uris = set(triggering_uris or ())
+                # the window of the publication-time lookup (issue #150):
+                # published after the previous successful run's trigger, up to
+                # this run's trigger — neither moves when a run is cleared,
+                # unlike its start date (ts)
+                upper_published: datetime = run_trigger_time(context.get("dag_run")) or ts
+                previous_published: Optional[datetime] = None
                 # We start by initializing the result to True (datasets are present)
                 # We will set it to False if any required dataset is missing.
                 dataset_res = True
@@ -471,7 +537,8 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     # we take the first dag run before the scheduled date
                     __dag_run = __dag_runs[0]
                     previous_dag_checked = ts_as_datetime(__dag_run.data_interval_end)
-                    print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked} and start date {__dag_run.start_date}")
+                    previous_published = run_trigger_time(__dag_run) or ts_as_datetime(getattr(__dag_run, "start_date", None))
+                    print(f"Found previous succeeded dag run {__dag_run.dag_id} with scheduled date {previous_dag_checked}, start date {__dag_run.start_date} and trigger time {previous_published}")
 
                 __dag_runs = find_previous_dag_runs_api(dag=dag, client=client, scheduled_date=scheduled_date, at_scheduled_date=True)
                 if __dag_runs and len(__dag_runs) > 0:
@@ -488,6 +555,10 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     # so the checked window stays a datetime)
                     previous_dag_checked = dag.start_date or ts
                     print(f"No previous succeeded dag run found, we set the previous dag checked to the start date of the dag {previous_dag_checked}")
+
+                if not previous_published:
+                    previous_published = previous_dag_checked
+                print(f"Non-scheduled datasets that did not trigger this run are looked up by publication time within ({previous_published}, {upper_published}]")
 
                 if last_dag_ts and last_dag_checked:
                     if last_dag_checked.strftime(sl_timestamp_format) == scheduled_date.strftime(sl_timestamp_format):
@@ -528,6 +599,16 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 for dataset in datasets:
                     extra = dataset.extra or {}
                     original_cron = extra.get(StarlakeParameters.CRON_PARAMETER.value, None)
+                    if dataset.uri in triggering_uris and not (original_cron and is_valid_cron(original_cron)):
+                        # the triggering event declares no schedule: it
+                        # correlates with no cron boundary — nor with the data
+                        # cycle — and its presence among the triggering events
+                        # is the whole test (issue #150)
+                        scheduled_datetime = get_scheduled_datetime(dataset, strict=False)
+                        print(f"Triggering dataset {dataset.uri} declares no schedule: its triggering event (scheduled date {scheduled_datetime}) is retained")
+                        if scheduled_datetime and scheduled_datetime > max_scheduled_date:
+                            max_scheduled_date = scheduled_datetime
+                        continue
                     cron = original_cron or self.data_cycle
                     scheduled = cron and is_valid_cron(cron)
                     freshness = int(extra.get(StarlakeParameters.FRESHNESS_PARAMETER.value, 0))
@@ -599,48 +680,24 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             if not found:
                                 missing_datasets.append(dataset)
                     else:
-                        # we check if one dataset event at least has been published since the previous dag checked and around the scheduled date +- freshness in seconds - it should be the closest one
-                        scheduled_date_to_check_min = previous_dag_checked - timedelta(seconds=freshness)
-                        scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
-                        scheduled_datetime = None
-                        dataset_event = None
-                        events = find_datasets_events_api(client=client, uri=dataset.uri, scheduled_date_to_check_min=scheduled_date_to_check_min, scheduled_date_to_check_max=scheduled_date_to_check_max, ts=ts, scheduled_date=scheduled_date)
+                        # a dependency that did not trigger the run and belongs
+                        # to no schedule: its producing run may have no data
+                        # interval (Airflow 3) and its event no logical date
+                        # worth reasoning about — the only ordering is its
+                        # publication. Retain the most recently published
+                        # event since the previous successful run's trigger, up
+                        # to this run's trigger (issue #150)
+                        events = find_dataset_events_published_api(client=client, uri=dataset.uri, timestamp_lte=upper_published, timestamp_gt=previous_published)
                         if events:
-                            dataset_events = events
-                            nb_events = len(events)
-                            print(f"Found {nb_events} dataset event(s) for {dataset.uri} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
-                            i = 1
-                            # we check the dataset events in reverse order
-                            while i <= nb_events and not found:
-                                event = dataset_events[-i]
-                                extra = event.extra or event.dataset.extra or dataset.extra or {}
-                                scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=extra))
-                                if scheduled_datetime:
-                                    if scheduled_datetime > previous_dag_checked:
-                                        if scheduled_date_to_check_min > scheduled_datetime:
-                                            # we stop because all previous dataset events would be also before the scheduled date to check
-                                            break
-                                        elif scheduled_datetime > scheduled_date_to_check_max:
-                                            i += 1
-                                        else:
-                                            found = True
-                                            print(f"Dataset event {event.id} for {dataset.uri} with scheduled datetime {scheduled_datetime} after {previous_dag_checked} and  around the scheduled date {scheduled_date} +- {freshness} in seconds found")
-                                            dataset_event = event
-                                            if scheduled_datetime <= scheduled_date:
-                                                # we stop because all previous dataset events would be also before the scheduled date but not closer than the current one
-                                                break
-                                    else:
-                                        # we stop because all previous dataset events would be also before the previous dag checked
-                                        break
-                                else:
-                                    i += 1
-                        if not found or not scheduled_datetime:
-                            missing_datasets.append(dataset)
-                            print(f"No dataset event for {dataset.uri} found since the previous dag checked {previous_dag_checked} and around the scheduled date {scheduled_date} +- {freshness} in seconds")
-                        else:
-                            print(f"Found dataset event {dataset_event.id} for {dataset.uri} after the previous dag checked {previous_dag_checked}  and  around the scheduled date {scheduled_date} +- {freshness} in seconds")
-                            if scheduled_datetime > max_scheduled_date:
+                            event = events[-1]
+                            event_extra = event.extra or (event.get("dataset") or {}).get("extra") or dataset.extra or {}
+                            scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=event_extra), strict=False)
+                            print(f"Found dataset event {event.id} for {dataset.uri} published at {event.timestamp} (scheduled date {scheduled_datetime}), within ({previous_published}, {upper_published}]")
+                            if scheduled_datetime and scheduled_datetime > max_scheduled_date:
                                 max_scheduled_date = scheduled_datetime
+                        else:
+                            missing_datasets.append(dataset)
+                            print(f"No dataset event for {dataset.uri} published within ({previous_published}, {upper_published}]")
                 # if all the required datasets have been found, we can continue the dag
                 checked = not missing_datasets
                 if checked:
@@ -663,17 +720,29 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     triggering_uris = {dataset.uri: dataset for dataset in triggering_datasets}
                     datasets_uris = {dataset.uri: dataset for dataset in datasets}
                     # we first retrieve the scheduled datetime of all the triggering datasets
-                    triggering_scheduled = {dataset.uri: get_scheduled_datetime(dataset) for dataset in triggering_datasets}
+                    # (non-strict: a foreign event's unreadable date must not fail the run)
+                    triggering_scheduled = {dataset.uri: get_scheduled_datetime(dataset, strict=False) for dataset in triggering_datasets}
                     # then we retrieve the triggering dataset with the greatest scheduled datetime
-                    greatest_triggering_dataset: tuple = max(triggering_scheduled.items(), key=lambda x: x[1] or datetime.min, default=(None, None))
-                    greatest_triggering_dataset_uri = greatest_triggering_dataset[0]
+                    # (an aware minimum for the events without one, issue #150)
+                    greatest_triggering_dataset: tuple = max(triggering_scheduled.items(), key=lambda x: x[1] or MIN_UTC, default=(None, None))
                     greatest_triggering_dataset_datetime = greatest_triggering_dataset[1]
-                    # we then check the other datasets
-                    checking_uris = list(set(datasets_uris.keys()) - set(greatest_triggering_dataset_uri))
+                    # every declared dataset is checked, the anchor included: the
+                    # triggering ones carry their event (one that declares no
+                    # schedule is retained by its presence), the others are
+                    # looked up; the anchor only lends its scheduled date to the
+                    # cron ranges (the former set(<anchor uri>) subtracted the
+                    # URI's characters, never the anchor itself)
+                    checking_uris = set(datasets_uris.keys())
                     checking_triggering_datasets = [dataset for dataset in triggering_datasets if dataset.uri in checking_uris]
-                    checking_missing_datasets = [dataset for dataset in datasets if dataset.uri in list(set(checking_uris) - set(triggering_uris.keys()))]
+                    checking_missing_datasets = [dataset for dataset in datasets if dataset.uri in checking_uris - set(triggering_uris.keys())]
                     checking_datasets = checking_triggering_datasets + checking_missing_datasets
-                    return check_datasets(greatest_triggering_dataset_datetime or ts, checking_datasets, ts, context)
+                    return check_datasets(
+                        greatest_triggering_dataset_datetime or ts,
+                        checking_datasets,
+                        ts,
+                        context,
+                        triggering_uris={dataset.uri for dataset in checking_triggering_datasets},
+                    )
 
             inlets: list = kwargs.get("inlets", [])
             inlets += datasets

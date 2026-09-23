@@ -37,6 +37,7 @@ import jinja2
 import pytest
 
 from ai.starlake.airflow.starlake_airflow_job import triggering_datasets_from_events
+from ai.starlake.common import StarlakeParameters
 
 
 def _event(cls_name: str, extra: dict, ts: datetime):
@@ -161,11 +162,20 @@ class TestStartTaskWithoutPreviousDataInterval:
     with ``invalid literal for int() with base 10: b'None'`` (str(None) reaching
     dateutil). The run must instead be treated as having no known interval and
     fall back to the DAG start date.
+
+    The triggering event here carries no ``sl_cron``: since issue #150 it is
+    retained by its presence, with no lookup. The fallback therefore shows in
+    two places: the pushed interval start (the previous run's
+    data_interval_end, else the DAG start date — unchanged by #150), and the
+    publication window of a non-triggering cron-less dependency, which opens at
+    the previous run's trigger time, else its start date, else that same
+    fallback.
     """
 
     URI = "starbake_orders"
+    OTHER_URI = "starbake_customers"
 
-    def _start_callable(self, monkeypatch, previous_runs, windows, options=None, built=None):
+    def _start_callable(self, monkeypatch, previous_runs, windows, options=None, built=None, extra_datasets=()):
         from ai.starlake.airflow import starlake_airflow_job as job_module
         from ai.starlake.airflow.bash.starlake_airflow_bash_job import StarlakeAirflowBashJob
         from ai.starlake.dataset import StarlakeDataset
@@ -184,6 +194,12 @@ class TestStartTaskWithoutPreviousDataInterval:
                 windows.append(window)
                 return []
 
+            def find_dataset_events_published(self, uri, timestamp_lte, timestamp_gt=None, timestamp_gte=None):
+                # the publication window's lower bound is what the previous
+                # run decides for a cron-less dependency (issue #150)
+                windows.append({"uri": uri, "timestamp_gt": timestamp_gt, "timestamp_gte": timestamp_gte})
+                return []
+
         monkeypatch.setattr(job_module, "StarlakeAirflowApiClient", FakeClient)
 
         job = StarlakeAirflowBashJob(
@@ -195,7 +211,7 @@ class TestStartTaskWithoutPreviousDataInterval:
         start = job.start_op(
             task_id="start",
             scheduled=False,
-            not_scheduled_datasets=[],
+            not_scheduled_datasets=[StarlakeDataset(name=name) for name in extra_datasets],
             least_frequent_datasets=[],
             most_frequent_datasets=[dataset],
         )
@@ -216,29 +232,64 @@ class TestStartTaskWithoutPreviousDataInterval:
         )
         return {"task_instance": ti, "dag": dag}
 
+    @staticmethod
+    def _pushed(context):
+        return {
+            call.kwargs["key"]: call.kwargs["value"]
+            for call in context["task_instance"].xcom_push.call_args_list
+        }
+
+    NO_INTERVAL = {"dag_id": "ing_starlake_transform", "data_interval_end": None, "start_date": None}
+    WITH_INTERVAL = {
+        "dag_id": "ing_starlake_transform",
+        "data_interval_end": TS_1.isoformat(),
+        "start_date": TS_1.isoformat(),
+    }
+
     def test_previous_asset_triggered_run_without_data_interval_does_not_crash(self, monkeypatch):
-        previous = {"dag_id": "ing_starlake_transform", "data_interval_end": None, "start_date": None}
         windows = []
-        should_continue = self._start_callable(monkeypatch, [SimpleNamespace(**previous)], windows)
+        should_continue = self._start_callable(monkeypatch, [SimpleNamespace(**self.NO_INTERVAL)], windows)
+        context = self._context(monkeypatch)
 
         # returns instead of raising on str(None) reaching the ISO parser...
-        assert should_continue(start_date=TS_2.isoformat(), **self._context(monkeypatch)) is False
+        assert should_continue(start_date=TS_2.isoformat(), **context) is True
         # ...and the run with no known interval is treated as no run at all:
-        # the checked window starts at the DAG start date
-        assert windows[0]["data_interval_end_gt"] == DAG_START_DATE
+        # the interval starts at the DAG start date
+        assert self._pushed(context)[StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value] == DAG_START_DATE
+        # the cron-less triggering event was retained by its presence
+        assert windows == []
 
     def test_previous_run_with_data_interval_is_still_honoured(self, monkeypatch):
-        previous = {
-            "dag_id": "ing_starlake_transform",
-            "data_interval_end": TS_1.isoformat(),
-            "start_date": TS_1.isoformat(),
-        }
         windows = []
-        should_continue = self._start_callable(monkeypatch, [SimpleNamespace(**previous)], windows)
+        should_continue = self._start_callable(monkeypatch, [SimpleNamespace(**self.WITH_INTERVAL)], windows)
+        context = self._context(monkeypatch)
+
+        assert should_continue(start_date=TS_2.isoformat(), **context) is True
+        # a known interval end still starts the interval — no fallback applied
+        assert self._pushed(context)[StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value] == TS_1
+        assert windows == []
+
+    def test_previous_run_without_data_interval_opens_the_publication_window_at_the_dag_start(self, monkeypatch):
+        windows = []
+        should_continue = self._start_callable(
+            monkeypatch, [SimpleNamespace(**self.NO_INTERVAL)], windows, extra_datasets=[self.OTHER_URI]
+        )
+
+        # the non-triggering cron-less dependency has no event: a legitimate wait
+        assert should_continue(start_date=TS_2.isoformat(), **self._context(monkeypatch)) is False
+        # the run exposes neither a trigger time nor a start date: the window
+        # opens at the DAG start date
+        assert windows == [{"uri": self.OTHER_URI, "timestamp_gt": DAG_START_DATE, "timestamp_gte": None}]
+
+    def test_previous_run_start_date_opens_the_publication_window(self, monkeypatch):
+        windows = []
+        should_continue = self._start_callable(
+            monkeypatch, [SimpleNamespace(**self.WITH_INTERVAL)], windows, extra_datasets=[self.OTHER_URI]
+        )
 
         assert should_continue(start_date=TS_2.isoformat(), **self._context(monkeypatch)) is False
-        # a known interval end still bounds the window — no fallback applied
-        assert windows[0]["data_interval_end_gt"] == TS_1
+        # the run exposes no trigger time: its start date opens the window
+        assert windows == [{"uri": self.OTHER_URI, "timestamp_gt": TS_1, "timestamp_gte": None}]
 
 
 class TestApiClientOptions:

@@ -6,15 +6,16 @@
   </defs>
 
   <!-- caller -->
-  <rect x="310" y="16" width="240" height="46" rx="8" fill="#eceff1" stroke="#546e7a"/>
-  <text x="430" y="35" text-anchor="middle" font-weight="bold">StarlakeAirflowApiClient</text>
-  <text x="430" y="52" text-anchor="middle" fill="#455a64">find_dataset_events · find_previous_dag_runs · primitives</text>
+  <rect x="270" y="8" width="320" height="64" rx="8" fill="#eceff1" stroke="#546e7a"/>
+  <text x="430" y="27" text-anchor="middle" font-weight="bold">StarlakeAirflowApiClient</text>
+  <text x="430" y="44" text-anchor="middle" fill="#455a64" font-size="12">find_dataset_events · find_dataset_events_published</text>
+  <text x="430" y="61" text-anchor="middle" fill="#455a64" font-size="12">find_previous_dag_runs · primitives</text>
 
   <!-- version decision -->
   <polygon points="430,92 540,127 430,162 320,127" fill="#fff8e1" stroke="#f9a825"/>
   <text x="430" y="123" text-anchor="middle">Airflow version ?</text>
   <text x="430" y="140" text-anchor="middle" fill="#795548">supports_assets()</text>
-  <line x1="430" y1="62" x2="430" y2="90" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="430" y1="72" x2="430" y2="90" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- airflow 3 branch -->
   <line x1="540" y1="127" x2="660" y2="127" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
@@ -46,12 +47,12 @@
 
   <!-- db error fallback arrow -->
   <path d="M 108 264 C 108 340, 250 335, 340 335" fill="none" stroke="#bf360c" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
-  <text x="160" y="330" fill="#bf360c">on query error</text>
+  <text x="175" y="357" fill="#bf360c">on query error</text>
 
   <!-- normalized output -->
-  <rect x="310" y="382" width="240" height="30" rx="8" fill="#eceff1" stroke="#546e7a"/>
+  <rect x="240" y="382" width="380" height="30" rx="8" fill="#eceff1" stroke="#546e7a"/>
   <text x="430" y="402" text-anchor="middle" fill="#37474f">normalized DotDicts — identical shape on every transport</text>
   <line x1="430" y1="366" x2="430" y2="380" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <path d="M 752 158 C 752 300, 600 397, 552 397" fill="none" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <path d="M 108 264 C 108 397, 260 397, 308 397" fill="none" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M 752 158 C 752 300, 670 397, 622 397" fill="none" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M 108 264 C 108 397, 190 397, 238 397" fill="none" stroke="#546e7a" stroke-width="1.5" marker-end="url(#arrow)"/>
 </svg>

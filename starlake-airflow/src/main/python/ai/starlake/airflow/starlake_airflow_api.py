@@ -637,6 +637,45 @@ class StarlakeAirflowApiClient(BaseHook):
                 events.append(normalized)
             return events
 
+    def _find_dataset_events_published_db(
+            self,
+            uri: str,
+            timestamp_lte: Any,
+            timestamp_gt: Any = None,
+            timestamp_gte: Any = None,
+    ) -> List[DotDict]:
+        """Single query: events for ``uri`` published in the window, bounded on
+        each event's own timestamp — no producing run involved."""
+        from sqlalchemy.orm import joinedload
+
+        from airflow.models.dataset import DatasetEvent, DatasetModel
+        from airflow.utils.session import create_session
+        with create_session() as session:
+            query = (
+                session.query(DatasetEvent)
+                .options(joinedload(DatasetEvent.dataset))
+                .join(DatasetModel, DatasetEvent.dataset_id == DatasetModel.id)
+                .filter(
+                    DatasetModel.uri == uri,
+                    DatasetEvent.timestamp <= _as_datetime(timestamp_lte),
+                )
+            )
+            if timestamp_gt is not None:
+                query = query.filter(DatasetEvent.timestamp > _as_datetime(timestamp_gt))
+            if timestamp_gte is not None:
+                query = query.filter(DatasetEvent.timestamp >= _as_datetime(timestamp_gte))
+            events: List[DotDict] = []
+            for event in query.order_by(DatasetEvent.timestamp.asc(), DatasetEvent.id.asc()).all():
+                normalized = self._event_to_dotdict(event)
+                dataset = getattr(event, "dataset", None)
+                normalized["dataset"] = DotDict({
+                    "id": dataset.id,
+                    "uri": dataset.uri,
+                    "extra": to_dotdict(dataset.extra) if dataset.extra else {},
+                }) if dataset is not None else DotDict({"extra": {}})
+                events.append(normalized)
+            return events
+
     def _find_previous_dag_runs_db(
             self,
             dag_id: str,
@@ -1050,6 +1089,88 @@ class StarlakeAirflowApiClient(BaseHook):
             event["data_interval_end"] = run.data_interval_end
             results.append(event)
         results.sort(key=lambda event: event["data_interval_end"] or "")
+        return results
+
+    def find_dataset_events_published(
+            self,
+            uri: str,
+            timestamp_lte: Any,
+            timestamp_gt: Any = None,
+            timestamp_gte: Any = None,
+    ) -> List[DotDict]:
+        """
+        Events for ``uri`` PUBLISHED in the given window — bounded on each
+        event's own timestamp (``timestamp_gt`` strict, ``timestamp_gte`` and
+        ``timestamp_lte`` inclusive), never on its producing run — sorted by
+        (timestamp, id) ascending, each with the ``dataset`` attached. A
+        dataset unknown to the instance yields no event.
+
+        Made for events that belong to no schedule: a run without a data
+        interval (Airflow 3 asset-triggered or manual runs) cannot be
+        correlated on it, while every event carries its publication time
+        (issue #150). On Airflow 2 the metadata database executes this as a
+        single query; otherwise it is composed from the paginated REST
+        primitives.
+        """
+        if self._supports_datasets and self.db_available:
+            try:
+                return self._find_dataset_events_published_db(
+                    uri,
+                    timestamp_lte,
+                    timestamp_gt=timestamp_gt,
+                    timestamp_gte=timestamp_gte,
+                )
+            except Exception as e:
+                log.warning("Metadata database query failed (%s); falling back to the REST API", e)
+        return self._find_dataset_events_published_rest(
+            uri,
+            timestamp_lte,
+            timestamp_gt=timestamp_gt,
+            timestamp_gte=timestamp_gte,
+        )
+
+    def _find_dataset_events_published_rest(
+            self,
+            uri: str,
+            timestamp_lte: Any,
+            timestamp_gt: Any = None,
+            timestamp_gte: Any = None,
+    ) -> List[DotDict]:
+        dataset = self.get_dataset_by_uri(uri)
+        if not dataset:
+            return []
+        lte = _as_datetime(timestamp_lte)
+        gt = _as_datetime(timestamp_gt) if timestamp_gt is not None else None
+        gte = _as_datetime(timestamp_gte) if timestamp_gte is not None else None
+        # /api/v2 accepts timestamp_gte and timestamp_lte on every 3.x, but
+        # timestamp_gt only since 3.1.0 — and FastAPI silently ignores an
+        # unknown query parameter, which would widen the window without any
+        # error. The strict bound is sent as its inclusive counterpart and
+        # every bound is re-applied below (/api/v1 has no timestamp filter at
+        # all: list_events applies them client-side).
+        params: Dict[str, Any] = {
+            "asset_id": dataset.id,
+            "timestamp_lte": self._iso(timestamp_lte),
+            "order_by": "timestamp",
+        }
+        lower = timestamp_gt if timestamp_gt is not None else timestamp_gte
+        if lower is not None:
+            params["timestamp_gte"] = self._iso(lower)
+        results: List[DotDict] = []
+        for event in self.list_events(**params):
+            if not event.get("timestamp"):
+                continue
+            published = _as_datetime(event.timestamp)
+            if published > lte or (gt is not None and published <= gt) or (gte is not None and published < gte):
+                continue
+            # /api/v2 names them asset_id and uri (nullable)
+            if event.get("dataset_id") is None:
+                event["dataset_id"] = event.get("asset_id")
+            if event.get("dataset_uri") is None:
+                event["dataset_uri"] = event.get("uri") or dataset.uri
+            event["dataset"] = dataset
+            results.append(event)
+        results.sort(key=lambda event: (_as_datetime(event.timestamp), event.get("id") or 0))
         return results
 
     def find_previous_dag_runs(

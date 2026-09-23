@@ -191,21 +191,26 @@ If no triggering datasets are found → Return True (manual trigger — always p
 
 ##### Step 2: Identify the anchor dataset
 
-From the triggering datasets, find the one with the **greatest `scheduled_date`** in its extra metadata. This becomes the anchor — the scheduled_date that all other datasets will be validated against.
+From the triggering datasets, find the one with the **greatest `scheduled_date`** in its extra metadata. This becomes the anchor — the scheduled_date that all other datasets will be validated against. When no triggering event carries a readable date, the run's start date (`ts`) is the anchor.
 
 ```python
-greatest_triggering_dataset = max(triggering_scheduled.items(), key=lambda x: x[1] or datetime.min)
+triggering_scheduled = {dataset.uri: get_scheduled_datetime(dataset, strict=False) for dataset in triggering_datasets}
+greatest_triggering_dataset = max(triggering_scheduled.items(), key=lambda x: x[1] or MIN_UTC)
 ```
+
+The dates are read **non-strictly** — an absent or unreadable `sl_scheduled_date` (a foreign producer's event) counts as no date instead of failing the run — and compared against an **aware** minimum, `MIN_UTC = datetime.min.replace(tzinfo=pytz.UTC)`: a naive `datetime.min` raised `TypeError` as soon as an event without a date triggered the run together with a Starlake event (issue #150).
 
 ##### Step 3: Build checking set
 
-The "checking datasets" = all datasets in the combined list **minus** the greatest triggering dataset. These are the ones that need validation. The list includes:
-- Triggering datasets that aren't the anchor (already have events)
-- Missing datasets (in the combined list but not in the triggering events)
+The "checking datasets" = **every** dataset in the combined list, **the anchor included**. The list includes:
+- The triggering datasets (they carry their event: one that declares no schedule is retained by its presence, see Phase 5)
+- Missing datasets (in the combined list but not in the triggering events), which are looked up
+
+The anchor only lends its scheduled date to the cron ranges: a Starlake cron anchor passes its own range by construction. (Up to 0.6.17 the code read `set(<declared uris>) - set(<anchor uri>)`, which subtracted the URI's *characters* — the anchor was already checked; the expression now says so explicitly.)
 
 ##### Step 4: Validate via `check_datasets()`
 
-Call `check_datasets(greatest_scheduled_date, checking_datasets, ts, context)` — this is the core validation engine.
+Call `check_datasets(greatest_scheduled_date, checking_datasets, ts, context, triggering_uris=...)` — this is the core validation engine. `triggering_uris` names the checking datasets that triggered the run.
 
 #### `check_datasets()` — Core Validation Engine
 
@@ -225,6 +230,12 @@ Two calls are made:
 
 If no previous successful run exists, `previous_dag_checked` falls back to `context["dag"].start_date`.
 
+The same phase fixes the bounds of the **publication window** used for the non-scheduled datasets that did not trigger the run (Phase 5, C) — both **trigger times**, i.e. `run_after` on Airflow 3 (an asset-triggered run's queue time, a manual run's trigger instant) and the logical date on Airflow 2 (a dataset-triggered run's queue time):
+- `P_prev` = the trigger time of the previous successful run (the run the `at_scheduled_date=False` call selected), else its `start_date`, else `previous_dag_checked`
+- `U` = this run's trigger time (`context["dag_run"]`), else `ts`
+
+Consecutive successful runs thus check contiguous, disjoint publication windows — Airflow's own consumed-events rule restricted to successful runs: an event the previous successful run consumed is never re-accepted, and an event published after this run's trigger has queued the next run instead. Neither bound moves when a run is cleared (a clear resets `DagRun.start_date`, never `run_after` / the logical date), so re-executing the start task reproduces its verdict. Accepted caveats: on Airflow 2, a manual previous run triggered with an explicit *past* logical date yields a permissive `P_prev`; and since the previous run is selected by its `data_interval_end` / `run_after` before the anchor, a producer triggered before the previous consumer run was created can make that run look "not before" the anchor — an older run is then selected and `P_prev` is more permissive.
+
 ##### Phase 2: Guard against rapid re-execution
 
 If `last_dag_checked == scheduled_date` (same scheduled slot) and the elapsed time since `last_dag_ts` is less than `min_timedelta_between_runs` → Return False. This prevents duplicate executions when multiple dataset events arrive for the same schedule slot.
@@ -241,6 +252,8 @@ Collect all cron expressions from the datasets and compute `most_frequent = most
 
 For **each** dataset in the checking list:
 
+**Event first — a triggering dataset that declares no schedule:** when the dataset is one of the run's triggering datasets and its event declares **no valid `sl_cron`**, it is **retained by its presence** — before any classification, with no lookup and whatever `data_cycle` says: its event belongs to no schedule, so no cron boundary (nor the consumer's business cycle) can frame it, and its presence among the triggering events is Airflow's own proof of publication since the previous asset/dataset-triggered run (issue #150). A readable `sl_scheduled_date` feeds `max_scheduled_date`; an absent or unreadable one does not prevent the retention. Triggering datasets that declare a cron keep the cron-range comparison of B, step 4.
+
 **A. Classify the dataset:**
 - **Optional** (`optional_dataset_enabled`): if the dataset refreshes faster than the data cycle, it is skipped entirely. A dataset is optional when its frequency (cron-based or freshness-based) exceeds the data_cycle_freshness.
 - **Beyond-data-cycle** (`beyond_data_cycle_enabled`): if the dataset's frequency + freshness exceeds the data cycle, the validation time window is extended by ±freshness seconds.
@@ -253,11 +266,13 @@ For **each** dataset in the checking list:
 5. If not found via triggering events: fetch the window's events via `find_datasets_events_api(...)` → `client.find_dataset_events(uri, ts, window)` (the window applies to the **producing run's** `data_interval_end`, so replaying arbitrarily old dates works). Walk events in reverse order, checking each event's `scheduled_datetime` against the window.
 6. If still not found → add to `missing_datasets`.
 
-**C. Non-scheduled datasets (no cron, use freshness):**
-1. Window = `(previous_dag_checked - freshness, scheduled_date + freshness)`
-2. Fetch the window's events via `client.find_dataset_events(...)`.
-3. Walk events in reverse order. A valid event must have `scheduled_datetime > previous_dag_checked` and fall within the window. Stop early if the event is before `previous_dag_checked` (all older events will be too).
-4. If not found → add to `missing_datasets`.
+B also covers the non-triggering datasets without a cron of their own when a `data_cycle` is set: the cycle schedules them (datasets produced by scheduled DAGs are out of the scope of issue #150 — issue #151).
+
+**C. Non-scheduled datasets that did not trigger the run (no cron, no data cycle):**
+1. Window = `(P_prev, U]` (Phase 1) on each event's own publication `timestamp` — never on the producing run: a non-scheduled producer may have no data interval (Airflow 3 manual and asset-triggered runs), while every event carries its publication time, with microsecond precision (unlike the `ts` extra, the producing task's start at second precision).
+2. Fetch the window's events via `find_dataset_events_published_api(...)` → `client.find_dataset_events_published(uri, timestamp_lte=U, timestamp_gt=P_prev)`.
+3. Retain the **most recently published** event. A readable `sl_scheduled_date` raises `max_scheduled_date` — `freshness` no longer caps it at `scheduled_date + freshness` — and an event without one counts as present (publication is the only meaningful ordering of a non-scheduled event).
+4. No event in the window → add to `missing_datasets`.
 
 ##### Phase 6: Push results to XCom
 
@@ -275,7 +290,8 @@ The `check_datasets()` function and its helpers resolve all metadata through `St
 | Function | Client method | Airflow 2 (database) | Airflow 3 (REST v2) |
 |----------|---------------|----------------------|---------------------|
 | `find_previous_dag_runs_api()` | `find_previous_dag_runs()` | 1 query with anti-join on skipped leaf task instances | dagRuns (`run_after` window) + skipped task instances, paginated |
-| `find_datasets_events_api()` | `find_dataset_events()` | 1 joined query `DatasetEvent ⋈ DagRun ⋈ DatasetModel`, window in the join | asset by `uri_pattern` → events (`timestamp_lte`) → runs (`run_after` window) → client-side join |
+| `find_datasets_events_api()` (scheduled datasets) | `find_dataset_events()` | 1 joined query `DatasetEvent ⋈ DagRun ⋈ DatasetModel`, window in the join | asset by `uri_pattern` → events (`timestamp_lte`) → runs (`run_after` window) → client-side join |
+| `find_dataset_events_published_api()` (non-scheduled, non-triggering datasets) | `find_dataset_events_published()` | 1 query `DatasetEvent ⋈ DatasetModel`, window on `DatasetEvent.timestamp` | asset by `uri_pattern` → events (`timestamp_gte`/`timestamp_lte`), every bound re-applied client-side |
 | `get_triggering_datasets()` | — | `context["triggering_dataset_events"]` | `context["triggering_asset_events"]` |
 
 Both transports return the same normalized `DotDict` shape. Full details, the parity analysis against the previous session-based implementation, and the per-version parameter translation tables are in [COMPATIBILITY.md](COMPATIBILITY.md).
