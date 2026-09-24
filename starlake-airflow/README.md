@@ -330,7 +330,7 @@ The library supports **Apache Airflow 2.5.0 → 3.x** from a single codebase. It
 
 Notes:
 
-- **`supports_inlet_events()`** — `True` for Airflow >= 2.10.0. Also enables inlet-event dataset-readiness validation via `ShortCircuitOperator` in `start_op()`.
+- **`supports_inlet_events()`** — `True` for Airflow >= 2.10.0: producers set the runtime `extra` through the native `outlet_events` accessor (older versions go through the forwarding wrapper above). The dataset-readiness check of `start_op()` (a `ShortCircuitOperator`) does not depend on it and runs on every supported version.
 - **`supports_assets()`** — `True` for Airflow >= 3.0.0, enabling asset-based scheduling (`Asset`/`AssetAny`/`AssetAll`).
 - The `scheduledDate` templating (`ts_as_datetime`/`sl_dates` macros) uses Jinja's `@pass_context` so it renders correctly during execution on every version, including Airflow 2.5–2.9 (issue #126).
 - **Airflow 3 asset-triggered runs** are fully supported since 0.6.13 (issue #139): the task-SDK event shape (`Asset` keys mapped to `AssetEventDagRunReference` lists) is recognized by the `start` task's dataset checks, and the command templates are undefined-safe — an asset-triggered run carries **no data interval** and Airflow 3 omits `data_interval_end` from the Jinja context, so every call site renders `(data_interval_end | default(dag_run.run_after, true)) | ts` (the value is only a fallback: the macros prefer the `sl_data_interval_*` XComs pushed by `start`). Since 0.6.14 (issue #145) the same equivalence is applied to the DagRun payloads returned by the API client: a run with no data interval reports its non-nullable `run_after` as `data_interval_end`, so the `start` task can read the previous successful run's schedule date whatever triggered it.

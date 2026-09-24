@@ -41,12 +41,12 @@ ai.starlake.airflow/
 
 ## Airflow Version Compatibility
 
-The module supports Airflow 2.4+ and Airflow 3.x from a single code base. All import fallbacks (`BaseHook`, `Dataset`/`Asset`, operators, sensors, `TaskGroup`, `get_current_context`, `TriggerRule`) and version helpers live in a single module, `compat.py`:
+The module supports Airflow 2.5+ and Airflow 3.x from a single code base. All import fallbacks (`BaseHook`, `Dataset`/`Asset`, operators, sensors, `TaskGroup`, `get_current_context`, `TriggerRule`) and version helpers live in a single module, `compat.py`:
 
 | Function | Condition | Impact |
 |----------|-----------|--------|
 | `supports_datasets()` | `>= 2.4.0` and `< 3.0.0` | Dataset-based APIs (metadata DB / REST v1) |
-| `supports_inlet_events()` | `>= 2.10.0` | Enables inlet-based dataset triggering in `start_op()` |
+| `supports_inlet_events()` | `>= 2.10.0` | Producers set the runtime `extra` of their outlet events through the native `outlet_events` accessor (`StarlakeDatasetMixin.pre_execute`); below 2.10 it is forwarded by the `register_dataset_change` wrapper (issue #125) |
 | `supports_assets()` | `>= 3.0.0` | Asset-based APIs (REST v2, JWT auth) |
 | `api_prefix()` | version-derived | `/api/v1` vs `/api/v2` |
 
@@ -174,7 +174,7 @@ This is the most complex method in the module. It determines whether a dataset/a
 
 ![start_op branching logic](images/start-op-branching.svg)
 
-When the main path is taken (Airflow >= 2.10.0, not cron-scheduled), all three dataset categories (`not_scheduled_datasets`, `least_frequent_datasets`, `most_frequent_datasets`) are combined into a single `datasets` list and added as `inlets` to the `ShortCircuitOperator`. The operator runs with `trigger_rule='all_done'` and `max_active_tis_per_dag=1`.
+When the main path is taken (not cron-scheduled, at least one dataset — on every supported Airflow version, 2.5 → 3.x), all three dataset categories (`not_scheduled_datasets`, `least_frequent_datasets`, `most_frequent_datasets`) are combined into a single `datasets` list and added as `inlets` to the `ShortCircuitOperator`. The operator runs with `trigger_rule='all_done'` and `max_active_tis_per_dag=1`.
 
 #### Main Path: `should_continue(start_date, **context)`
 
