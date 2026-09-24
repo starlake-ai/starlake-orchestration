@@ -5,7 +5,7 @@ This document explains, step by step, how `starlake-airflow` accesses Airflow me
 1. the **Airflow 2** behavior is compliant with the Airflow 2 old implementation (the previous Airflow-2-only, session-based version), and
 2. the **Airflow 3** implementation covers every feature implemented for Airflow 2.
 
-It covers the work of issues [#48](https://github.com/starlake-ai/starlake-orchestration/issues/48), [#49](https://github.com/starlake-ai/starlake-orchestration/issues/49), [#50](https://github.com/starlake-ai/starlake-orchestration/issues/50), [#52](https://github.com/starlake-ai/starlake-orchestration/issues/52) and [#53](https://github.com/starlake-ai/starlake-orchestration/issues/53).
+It covers the work of issues [#48](https://github.com/starlake-ai/starlake-orchestration/issues/48), [#49](https://github.com/starlake-ai/starlake-orchestration/issues/49), [#50](https://github.com/starlake-ai/starlake-orchestration/issues/50), [#52](https://github.com/starlake-ai/starlake-orchestration/issues/52) and [#53](https://github.com/starlake-ai/starlake-orchestration/issues/53), plus the one deliberate departure from the old implementation: the check of the datasets produced by **non-scheduled** DAGs ([#150](https://github.com/starlake-ai/starlake-orchestration/issues/150), Steps 1, 3b and 4).
 
 For general internals, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -48,10 +48,13 @@ The old branch decorated `pre_execute` with `@prepare_lineage`; the decorator do
 | | Old implementation | New — Airflow 2 | New — Airflow 3 |
 |---|---|---|---|
 | Template context key | `triggering_dataset_events` | `triggering_dataset_events` | `triggering_asset_events` |
-| Event type check | `isinstance(event, DatasetEvent)` | `type(event).__name__ == "DatasetEvent"` | `type(event).__name__ == "AssetEvent"` |
+| Mapping keys | URI strings | URI strings | `Asset`/`AssetAlias` objects, read through their `uri` (#139) |
+| Event type check | `isinstance(event, DatasetEvent)` | `type(event).__name__ == "DatasetEvent"` | `type(event).__name__` in `AssetEvent`, `AssetEventDagRunReference`, `AssetEventDagRunReferenceResult` — the task SDK's shape (#139) |
 | Result | most recent event per URI, `ts` injected into extra | identical | identical |
 
-The name-based check replaces `isinstance` because importing both event classes on both versions is not possible; the semantics are identical.
+The name-based check replaces `isinstance` because importing both event classes on both versions is not possible; the semantics are identical (one check accepts all four class names on both versions).
+
+Since #150 a triggering event whose dataset declares **no cron** is **retained by its presence** — no lookup, whatever `data_cycle` says — where the old implementation looked it up like any non-scheduled dataset (Step 3b). Its presence among the triggering events is Airflow's own proof of publication since the previous asset/dataset-triggered run. Identical on both versions.
 
 ### Step 2 — When did this DAG last run successfully? (`find_previous_dag_runs_api`)
 
@@ -97,9 +100,23 @@ This is the property that makes **replay/backfill correct**: the window applies 
 
 Same inputs, same outputs, same replay semantics; the join is computed client-side because the REST API cannot express it.
 
+Since #150 this lookup serves the **scheduled** datasets only (a cron of their own, or a `data_cycle`).
+
+### Step 3b — Which events of a non-scheduled dataset were published in the window? (`find_dataset_events_published_api`)
+
+A **deliberate departure** from the old implementation (#150). The old implementation ran the Step 3 joined query for every dataset, the non-scheduled ones included, around `previous_dag_checked ± freshness`. A non-scheduled producer (a manual, one-shot, bootstrap or replay load) runs without a data interval on Airflow 3 — asset-triggered runs and manual runs without a logical date get `logical_date=None, data_interval=None` — so a correlation on the producing run's `data_interval_end` rested on a field such a run does not have: the check failed, and the transform ended green having executed nothing.
+
+A non-scheduled dataset that did **not** trigger the run is now looked up by **publication time**: its most recently published event in `(P_prev, U]`, where `P_prev` is the previous successful run's trigger time (else its `start_date`, else `previous_dag_checked`) and `U` is this run's trigger time (else `ts`) — `run_after` on Airflow 3, the logical date on Airflow 2; neither moves when a run is cleared. The bound is each event's own `timestamp` (microsecond precision), never the `ts` extra. A thin wrapper over `client.find_dataset_events_published(uri, timestamp_lte=U, timestamp_gt=P_prev)`:
+
+- **Airflow 2 (database)** — `_find_dataset_events_published_db`: one query `DatasetEvent ⋈ DatasetModel` (dataset eager-loaded), filtered on the uri and the timestamp bounds, `ORDER BY timestamp, id`.
+- **REST v1 (fallback)** — `get_dataset_by_uri` → `list_events(dataset_id=...)`: v1 has no timestamp filter, so every event of the dataset is paged through and the window applied client-side.
+- **REST v2** — asset by `uri_pattern` → `GET /api/v2/assets/events?asset_id=...&timestamp_gte=...&timestamp_lte=...`: Airflow 3.0.x accepts only `timestamp_gte`/`timestamp_lte` (`_gt`/`_lt` exist since 3.1.0) and FastAPI silently ignores an unknown query parameter, so the strict lower bound is sent as `timestamp_gte`, and every bound is re-applied client-side (strict `>` for `timestamp_gt`). `asset_id` → `dataset_id` and `uri` (nullable) → `dataset_uri` are normalized.
+
+Every transport returns the events sorted by `(timestamp, id)`, the dataset attached; an unknown dataset yields none.
+
 ### Step 4 — Freshness decision (`check_datasets`)
 
-Unchanged from the old branch: walk the returned events in reverse, extract each event's scheduled datetime from `extra` (falling back to the dataset extra), and decide `found`/`missing` per dataset against the `previous_dag_checked ± freshness` window. Works identically on both versions because Steps 2–3 deliver the identical normalized inputs.
+For the **scheduled** datasets, unchanged from the old branch: walk the returned events in reverse, extract each event's scheduled datetime from `extra` (falling back to the dataset extra), and decide `found`/`missing` per dataset against the cron window. For the **non-scheduled** datasets (#150): a triggering one is retained by its presence (Step 1); a non-triggering one is found when Step 3b returns an event — its readable `sl_scheduled_date` raises the pushed interval end with no `freshness` cap, and an event without one counts as present. Works identically on both versions because Steps 2–3b deliver the identical normalized inputs.
 
 ---
 
@@ -120,9 +137,19 @@ The joined lookups are built on four primitives, each verified against the publi
 | Aspect | Database (2.x) | REST v1 | REST v2 |
 |---|---|---|---|
 | id filter | `dataset_id` (accepts `asset_id`, translated) | `dataset_id` (translated) | `asset_id` (translated) |
-| `timestamp_gte/lte` | SQL | **not supported by the API** → applied client-side after full pagination | native |
+| `timestamp_gte/lte` | SQL | **not supported by the API** → applied client-side after full pagination | native (`timestamp_gt/lt` only since 3.1.0 — never sent: 3.0.x would silently ignore them) |
 | Response key | — | `dataset_events` | `asset_events` |
 | Pagination | not needed | `total_entries` offset loop | `total_entries` offset loop |
+
+### `find_dataset_events_published(uri, timestamp_lte, timestamp_gt=None, timestamp_gte=None)` (#150)
+
+Not a primitive but the second joined lookup, next to `find_dataset_events`; bounded on the event's own `timestamp`.
+
+| Transport | Mechanics |
+|---|---|
+| Database (2.x) | one query `DatasetEvent ⋈ DatasetModel` on the uri and the timestamp bounds, `ORDER BY timestamp, id` |
+| REST v1 | `get_dataset_by_uri` → `list_events` (all events of the dataset, no timestamp filter) → window applied client-side |
+| REST v2 | `get_dataset_by_uri` → `list_events(asset_id, timestamp_gte=<gt or gte>, timestamp_lte)` → every bound re-applied client-side, v2 keys normalized |
 
 ### `list_dag_runs(dag_id, **params)`
 
@@ -153,7 +180,9 @@ All REST collection reads go through `_get_paged`: a `total_entries`-driven offs
 |---|---|---|---|
 | Previous-runs lookup | 1 SQL query, anti-join | same query via the client | ✅ identical (+ tighter subquery) |
 | Window filter column | `data_interval_end` | `data_interval_end` | ✅ identical |
-| Dataset-events lookup | 1 joined SQL query, window in the join, no limit | same query via the client | ✅ identical |
+| Dataset-events lookup (scheduled datasets) | 1 joined SQL query, window in the join, no limit | same query via the client | ✅ identical |
+| Triggering event whose dataset declares no cron | looked up like any non-scheduled dataset | retained by its presence, no lookup (#150) | ➖ deliberate departure |
+| Non-scheduled datasets that did not trigger the run | the joined query, window on the producing run's `data_interval_end` around `previous_dag_checked ± freshness` | 1 query on the event's own `timestamp` in `(P_prev, U]`, trigger times (#150) | ➖ deliberate departure |
 | Replay of arbitrarily old dates | ✅ (window in join) | ✅ (window in join) | ✅ identical |
 | Ordering | SQL (`data_interval_end`) | SQL, same clauses | ✅ identical |
 | Result objects | ORM rows, native datetimes | `DotDict`, ISO-8601 strings | ⚠️ equivalent — consumers parse via `ts_as_datetime` (they already did for REST) |
@@ -171,6 +200,7 @@ All REST collection reads go through `_get_paged`: a `total_entries`-driven offs
 | Triggering events | `triggering_asset_events` / `AssetEvent` | none |
 | Previous-runs lookup | REST composition, `run_after` window, paginated skipped-leaf exclusion | `run_after == data_interval_end` for **scheduled** runs; for asset-triggered runs `run_after` is the trigger time and `data_interval_end` may be null — the client-side final sort treats nulls last |
 | Dataset-events lookup | REST composition (asset by uri_pattern → events by timestamp → runs by run_after window → client-side join) | complete (paginated) but O(#producing DAGs + pages) HTTP calls where Airflow 2 does 1 SQL query |
+| Non-scheduled datasets lookup (#150) | REST composition (asset by uri_pattern → events by `timestamp_gte`/`timestamp_lte`, bounds re-applied client-side) | none — no producing run is involved, so a run without a data interval is no obstacle |
 | Replay of old dates | ✅ window on the producing run, native `timestamp_lte`, full pagination | none |
 | Authentication | JWT bearer (`/auth/token`), Google access token (ADC) on a managed instance | requires api-server reachability from workers; a Google-managed instance runs no auth manager, so `/auth/token` and the `airflow_api` connection have no object there |
 | Lineage inlets XCom | hook removed in Airflow 3 | conversion in the mixin is a no-op there — harmless |
@@ -180,7 +210,8 @@ All REST collection reads go through `_get_paged`: a `total_entries`-driven offs
 ## 6. Known behavioral differences (both directions)
 
 - **Timestamps are ISO strings**, not datetimes, in everything the client returns. All in-tree consumers parse them (`ts_as_datetime`, `_as_datetime`); new consumers must too.
-- **REST v1 fallback for events is heavy**: v1 has no timestamp filter, so the fallback paginates *all* events of the dataset before filtering client-side. This path only runs when the Airflow 2 database is unreachable — an unusual deployment.
+- **REST v1 fallback for events is heavy**: v1 has no timestamp filter, so the fallback paginates *all* events of the dataset before filtering client-side — for both joined lookups, `find_dataset_events` and `find_dataset_events_published`. This path only runs when the Airflow 2 database is unreachable — an unusual deployment.
+- **The strict lower bound of `find_dataset_events_published` is never sent to `/api/v2`**: Airflow 3.0.x accepts only `timestamp_gte`/`timestamp_lte` and FastAPI ignores an unknown query parameter, which would silently widen the window. `timestamp_gte` is sent instead and every bound is re-applied client-side, so the result is identical on every 3.x.
 - **`order_by` on v1 is single-field** and cannot sort by `data_interval_end`; the `execution_date` proxy is correct for schedule-generated runs. The joined lookups do not rely on server ordering — the final client-side sort is authoritative.
 - The dead legacy branch calling the removed SQLAlchemy `find_dataset_events` (an undefined name that would have raised `NameError`) was removed from `check_datasets`.
 
@@ -195,6 +226,7 @@ All REST collection reads go through `_get_paged`: a `total_entries`-driven offs
 | #53 | joined lookups (this document), REST pagination, `data_interval_end` semantics restored |
 | #54 | `sl_transform` runtime options fragment built with the version-appropriate triggering-events context key |
 | #55 | `AirflowPipeline.run()`/`delete()` routed through `StarlakeAirflowApiClient` (version-appropriate API and auth, explicit `base_url`/credential overrides) |
+| #150 | datasets produced by non-scheduled DAGs: a cron-less triggering event is retained by its presence; a cron-less dependency that did not trigger the run is found by publication time, `(previous successful run's trigger time, this run's trigger time]`, through the new `find_dataset_events_published` (three transports); the anchor key uses an aware minimum. Scheduled datasets unchanged (#151) |
 
 ## 8. Verification
 
@@ -213,5 +245,10 @@ Claim-to-test mapping, all in [tests/airflow/test_airflow_api_client.py](../test
 | **Replay of a past window** | `TestDatabaseTransport::test_find_dataset_events_replay_past_window` |
 | Anti-join on skipped leaves | `TestDatabaseTransport::test_find_previous_dag_runs_anti_join` |
 | REST composition end-to-end (v3) | `test_find_dataset_events_rest_composition_on_airflow_3` |
+| Publication-time lookup: SQL bounds, strictness, order, attached dataset (#150) | `TestDatabaseTransport::test_find_dataset_events_published_*` |
+| Publication-time lookup over REST: v2 never sends `timestamp_gt`, bounds re-applied client-side, keys normalized; v1 sends no timestamp filter; unknown dataset; transport selection (#150) | `test_find_dataset_events_published_*` |
+| Cron-less triggering event retained by its presence, whatever `data_cycle` says; sd-less or unreadable dates tolerated (#150) | [tests/airflow/test_airflow_dataset_check_event_first.py](../tests/airflow/test_airflow_dataset_check_event_first.py) `TestNonScheduledTriggeringEvent` |
+| Non-triggering cron-less dependency found by publication time in `(P_prev, U]`; replay-stable (#150) | same module, `TestNonTriggeringPublicationLookup` |
+| Scheduled datasets, the pushed interval start and the silent skip unchanged (#150) | same module, `TestScheduledDatasetsUnchanged`, `TestPreviousDagCheckedUnchanged`, `TestNoGuardRail` |
 | Optional connection on 2.x | `test_client_tolerates_missing_connection_on_airflow_2` |
 | End-to-end via `dag.test()` on Airflow 2.10.5 (live metadata DB) | [tests/airflow/test_airflow_runtime.py](../tests/airflow/test_airflow_runtime.py) — 7/7 passing |
