@@ -152,6 +152,8 @@ Identity transform: `to_event(dataset)` → returns `dataset` unchanged. Snowfla
 
 Custom DAG class that wraps the validation logic into the root task's `StoredProcedureCall`. Constructor parameters include all dataset lists, scheduling config, and stream/audit validation setup. The `_to_low_level_task()` method converts to a standard Snowflake `Task` for deployment.
 
+`condition` (the stream trigger condition) is a property with a setter: `snowflake-core` >= 1.13 assigns `DAG.condition` in `DAG.__init__`, which a read-only property rejects (issue #160). The constructor sets the computed condition after `super().__init__()`, so the root task deploys it with both SDK generations.
+
 ### `SnowflakePipeline` (extends `AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], StarlakeDataset]`)
 
 - **Constructor**: creates `SnowflakeDag` with schedule, datasets, streams, and validation config. DAG dependency wiring uses `upstream.add_successors(downstream)`.
