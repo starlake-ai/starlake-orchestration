@@ -90,13 +90,17 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                     # sl_options carried by the triggering materializations, merged
                     # fail-loud (a conflicting key across materializations raises and
                     # fails the sensor tick — conflicting run variables must stop the
-                    # run, not silently pick one), then relayed to every op of the
-                    # triggered run through its config (see DagsterLogicalDatetimeConfig)
-                    merged_sl_options = StarlakeDagsterUtils.collect_sl_options(
-                        [event.asset_materialization for event in materialized_events.values()]
+                    # run, not silently pick one) unless a producer declared the key
+                    # a set of values (union, issue #158), then relayed with their
+                    # merge declarations to every op of the triggered run through
+                    # its config (see DagsterLogicalDatetimeConfig)
+                    merged_sl_options, merged_sl_options_merge = StarlakeDagsterUtils.collect_sl_options_with_merge(
+                        [event.asset_materialization for event in materialized_events.values()],
+                        superseded=StarlakeDagsterUtils.superseded_materializations(context, asset_events),
                     )
                     import json
                     sl_options = json.dumps(merged_sl_options) if merged_sl_options else None
+                    sl_options_merge = json.dumps(merged_sl_options_merge) if merged_sl_options and merged_sl_options_merge else None
 
                     # and convert them to datasets
                     materialized_datasets = {key: dg_pipeline.get_dataset_and_partition(event) for key, event in materialized_events.items()}
@@ -127,7 +131,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                             # yields runs (issue #80).
                             context.advance_cursor(asset_events)
                             return RunRequest(
-                                run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options) if sl_options else None,
+                                run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options, sl_options_merge=sl_options_merge) if sl_options else None,
                             )
 
                     # then we retrieve the materialized dataset with the most recent scheduled datetime
@@ -151,7 +155,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                         # mirroring the freshness-checked path below.
                         context.advance_cursor(asset_events)
                         return RunRequest(
-                            run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options) if sl_options else None,
+                            run_config=dg_pipeline._ops_config(logical_datetime=None, sl_options=sl_options, sl_options_merge=sl_options_merge) if sl_options else None,
                         )
 
                     # we check if all datasets are consistent with the most recent materialized dataset
@@ -166,7 +170,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                         previous_logical_datetime=previous_partition.strftime(sl_timestamp_format)
                         context.advance_cursor(asset_events)
                         return RunRequest(
-                            run_config=dg_pipeline._ops_config(logical_datetime=logical_datetime, previous_logical_datetime=previous_logical_datetime, sl_options=sl_options),
+                            run_config=dg_pipeline._ops_config(logical_datetime=logical_datetime, previous_logical_datetime=previous_logical_datetime, sl_options=sl_options, sl_options_merge=sl_options_merge),
                             partition_key=logical_datetime,
                             tags={
                                 PARTITION_NAME_TAG: logical_datetime,
@@ -530,12 +534,14 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             config=partition_config,
         )
 
-    def _ops_config(self, logical_datetime: Optional[str], dry_run: bool = False, previous_logical_datetime: Optional[str] = None, sl_options: Optional[str] = None) -> dict:
+    def _ops_config(self, logical_datetime: Optional[str], dry_run: bool = False, previous_logical_datetime: Optional[str] = None, sl_options: Optional[str] = None, sl_options_merge: Optional[str] = None) -> dict:
         def walk(node: NodeDefinition, config: dict = dict()) -> dict:
             if isinstance(node, OpDefinition):
                 op_config = {'logical_datetime': logical_datetime, 'dry_run': dry_run, 'previous_logical_datetime': previous_logical_datetime}
                 if sl_options:
                     op_config['sl_options'] = sl_options
+                if sl_options_merge:
+                    op_config['sl_options_merge'] = sl_options_merge
                 config[node.name] = {'config': op_config}
                 return config
             elif isinstance(node, GraphDefinition):

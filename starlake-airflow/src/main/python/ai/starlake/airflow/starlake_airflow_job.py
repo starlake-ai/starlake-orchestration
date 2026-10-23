@@ -40,6 +40,9 @@ from ai.starlake.sentinel import (
     substitute_scope,
 )
 
+# issue #158 — merge of the sl_options carried by coalesced events (core, import-light)
+from ai.starlake.sl_options import merge_sl_options
+
 from ai.starlake.airflow.compat import (
     AirflowSkipException,
     BaseOperator,
@@ -140,30 +143,31 @@ def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Option
     last-wins by starlake — hence the precedence: static options < 'all' < task-specific.
     Merging is fail-loud: the same key carried with different values by coalesced
     events raises (conflicting run variables must stop the run, not silently pick
-    one). dag_run.conf[StarlakeParameters.OPTIONS_PARAMETER] overrides events — the
+    one), unless a producer declared the key a set of values in the event extra
+    (StarlakeParameters.OPTIONS_MERGE_PARAMETER, policy 'union'), which merges the
+    values by union — see ai.starlake.sl_options (issue #158).
+    dag_run.conf[StarlakeParameters.OPTIONS_PARAMETER] overrides events — the
     manual-recovery escape hatch. Returns 'key=value[,key=value...]', or
     'sl_options_applied=0' when nothing applies (never empty, so the fragment is
     always a valid --options token)."""
-    sections: dict = {}
+    carriers = []
     for uri, events in (triggering_dataset_events or {}).items():
         for event in events or []:
             extra = getattr(event, "extra", None) or {}
-            event_sections = extra.get(StarlakeParameters.OPTIONS_PARAMETER.value) or {}
-            if not isinstance(event_sections, dict):
-                continue
-            for section, opts in event_sections.items():
-                if not isinstance(opts, dict):
-                    continue
-                merged = sections.setdefault(section, {})
-                for key, value in opts.items():
-                    if key in merged and str(merged[key]) != str(value):
-                        from airflow.exceptions import AirflowException
-                        raise AirflowException(
-                            f"Conflicting values for {StarlakeParameters.OPTIONS_PARAMETER.value}['{section}']['{key}'] across triggering dataset events ({uri}): "
-                            f"'{merged[key]}' != '{value}'. Coalesced events carry different run variables — re-trigger the runs one by one, "
-                            f"passing dag_run.conf['{StarlakeParameters.OPTIONS_PARAMETER.value}']."
-                        )
-                    merged[key] = value
+            carriers.append((
+                getattr(uri, "uri", uri),
+                extra.get(StarlakeParameters.OPTIONS_PARAMETER.value),
+                extra.get(StarlakeParameters.OPTIONS_MERGE_PARAMETER.value),
+            ))
+    try:
+        sections, _ = merge_sl_options(
+            carriers,
+            origin="triggering dataset events",
+            recovery=f"Coalesced events carry different run variables — re-trigger the runs one by one, "
+                     f"passing dag_run.conf['{StarlakeParameters.OPTIONS_PARAMETER.value}'].",
+        )
+    except ValueError as e:
+        raise AirflowException(str(e)) from e
     conf = getattr(dag_run, "conf", None) or {}
     conf_sections = conf.get(StarlakeParameters.OPTIONS_PARAMETER.value) or {}
     if isinstance(conf_sections, dict):
@@ -1423,7 +1427,7 @@ exit 0
         by the triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in
         the event extra): the 'all' section applies to every transformation, the
         section keyed by the transformation name only to this one. See
-        sl_options_from_events for the merge/precedence/fail-loud semantics.
+        sl_options_from_events for the merge/precedence/fail-loud/union semantics.
         (The template context key is `triggering_dataset_events` since Airflow 2.5,
         renamed `triggering_asset_events` in Airflow 3.)
 

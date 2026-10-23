@@ -36,10 +36,13 @@ ai.starlake/
 ├── dataset/           Dataset identity, event abstraction, triggering strategies
 │   └── starlake_dataset.py          StarlakeDataset, StarlakeDatasetType,
 │                                    DatasetTriggeringStrategy, AbstractEvent
-└── common/            Utility functions, enums, cron helpers
-    └── __init__.py                  StarlakeCronPeriod, StarlakeParameters,
-                                     MissingEnvironmentVariable, sanitize_id, is_valid_cron,
-                                     sort_crons_by_frequency, sl_schedule, ...
+├── common/            Utility functions, enums, cron helpers
+│   └── __init__.py                  StarlakeCronPeriod, StarlakeParameters,
+│                                    MissingEnvironmentVariable, sanitize_id, is_valid_cron,
+│                                    sort_crons_by_frequency, sl_schedule, ...
+├── sentinel.py        Pre-load not-ready sentinel helpers (issue #122)
+└── sl_options.py      merge_sl_options — merge of the run variables carried by
+                       several dataset events (issue #158)
 ```
 
 ## Inheritance Hierarchy
@@ -327,7 +330,7 @@ Registry that discovers `AbstractOrchestration` subclasses via `importlib` and i
 | `StarlakeExecutionMode` | `DRY_RUN`, `RUN`, `BACKFILL` | Pipeline execution mode |
 | `TaskType` | `START`, `PRELOAD`, `IMPORT`/`STAGE`, `LOAD`, `TRANSFORM`, `EMPTY`, `END` | Task classification (`IMPORT` deprecated, use `STAGE`) |
 | `StarlakeCronPeriod` | `DAY`, `WEEK`, `MONTH`, `YEAR` | Cron frequency bucketing |
-| `StarlakeParameters` | `SCHEDULED_DATE_PARAMETER`, `URI_PARAMETER`, `SINK_PARAMETER`, `CRON_PARAMETER`, `FRESHNESS_PARAMETER`, `DATA_INTERVAL_START_PARAMETER`, `DATA_INTERVAL_END_PARAMETER`, `DRY_RUN_PARAMETER` | Standard `sl_`-prefixed parameter names |
+| `StarlakeParameters` | `SCHEDULED_DATE_PARAMETER`, `URI_PARAMETER`, `SINK_PARAMETER`, `CRON_PARAMETER`, `FRESHNESS_PARAMETER`, `DATA_INTERVAL_START_PARAMETER`, `DATA_INTERVAL_END_PARAMETER`, `DRY_RUN_PARAMETER`, `OPTIONS_PARAMETER`, `OPTIONS_MERGE_PARAMETER` | Standard `sl_`-prefixed parameter names |
 | `StarlakeDependencyType` | `TASK`, `TABLE` | Dependency node type |
 | `StarlakeDatasetType` | `LOAD`, `TRANSFORM` | Dataset origin type |
 | `DatasetTriggeringStrategy` | `ALL`, `ANY` | When to trigger downstream |
@@ -350,6 +353,37 @@ Registry that discovers `AbstractOrchestration` subclasses via `importlib` and i
 | `scheduled_dates_range(cron, scheduled_date)` | Returns `(start, end)` of cron interval |
 | `cron_start_time(timezone)` | Returns current time in timezone |
 | `asQueryParameters(parameters)` | Converts dict to URL query string |
+
+### Merge of coalesced run variables (`ai.starlake.sl_options`, issue #158)
+
+A producer passes run variables to the pipelines it triggers in its dataset events, under `sl_options` (`StarlakeParameters.OPTIONS_PARAMETER`), as sections: `{"all": {key: value}, "<domain.task>": {key: value}}`. One triggered run can receive several events: Airflow coalesces the asset events emitted since the previous asset-triggered run (a consumer that was running, paused or failed gets the events of several producer runs at once), and a Dagster sensor tick reads the materializations of several upstream assets. `merge_sl_options(carriers, origin, recovery)` merges them for both orchestrators (Airflow's `sl_options_from_events`, Dagster's `StarlakeDagsterUtils.collect_sl_options`), which turn its `ValueError` into their own error.
+
+By default the merge is **fail-loud**: equal values merge, different values for the same key raise, since conflicting run variables must stop the run, not silently pick one. A producer can declare, under `sl_options_merge` (`StarlakeParameters.OPTIONS_MERGE_PARAMETER`, same sections), that a key holds a **set** of values:
+
+```python
+extra = {
+    "sl_options": {"all": {"orders_file_dates": "2026-11-01|2026-11-02"}},
+    "sl_options_merge": {"all": {"orders_file_dates": {"policy": "union", "separator": "|"}}},
+}
+```
+
+| Rule | Result |
+|------|--------|
+| key declared `{"policy": "union", "separator": s}` | the sorted, de-duplicated union of the elements of every event, split on `s` (default `\|`, also when `null`), trimmed, empty elements dropped — a list value gives its items as elements; the order of the events does not matter. Two events `"A\|B"` and `"B\|C"` give `"A\|B\|C"` |
+| key declared union by some events, carried without a declaration by others | union as well: the declaration describes the value's type |
+| a single event carrying a key declared union | normalized the same way (sorted, de-duplicated) |
+| two events declaring different policies or separators for a key | raises, naming the key |
+| an invalid declaration: a `sl_options_merge` payload or section that is not a dict, a declaration that is not a dict, an unknown field (e.g. a misspelt `seperator`) or policy, an empty separator or one containing whitespace or any of `, $ \` \\ "` (they break the `--options` transport: comma-separated pairs, space-separated Cloud Run arguments, double-quoted shell value) | raises, naming the key or the section |
+| key declared `{"policy": "strict"}`, or not declared | equal values merge, different values raise |
+| a run variable passed in the run itself (`dag_run.conf["sl_options"]` on Airflow, `sl_options` in the run config on Dagster) | overrides the merged value — the manual-recovery escape hatch |
+
+Declarations are per section: a key declared in `all` is not declared in `<domain.task>`. The elements sort as strings, so ISO dates sort chronologically. A run relays the declarations of the keys it carries only.
+
+`merge_sl_options` also takes `superseded` events — events replaced by a later event of the same source. They contribute their declarations, and their values to the keys declared union only. Dagster passes there the earlier unconsumed materializations of each triggering asset, since its sensor reads the latest one per asset: a union gathers every producer run, while any other key keeps the latest run's value, as before.
+
+**Rollout.** The declarations are read by starlake-airflow >= 0.6.19 and starlake-dagster >= 0.5.10, which need starlake-orchestration >= 0.5.7 (publish it first). An older consumer ignores them: it keeps failing loud on coalesced values, as before.
+
+**For consumers.** With a union, one run may rebuild values published by several producer runs, so the consumer must be idempotent per value (e.g. `OVERWRITE_BY_PARTITION` on a `WHERE file_date IN (...)` filter) and must protect itself against values that a later producer run rejected, for example with a guard on the producer's expectation results.
 
 ## Key Architectural Patterns
 

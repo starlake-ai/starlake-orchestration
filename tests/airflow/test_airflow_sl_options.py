@@ -23,10 +23,15 @@ import pytest
 from ai.starlake.common import StarlakeParameters
 
 OPTIONS = StarlakeParameters.OPTIONS_PARAMETER.value
+OPTIONS_MERGE = StarlakeParameters.OPTIONS_MERGE_PARAMETER.value
+UNION = {"policy": "union", "separator": "|"}
 
 
-def _event(sections: dict):
-    return types.SimpleNamespace(extra={OPTIONS: sections})
+def _event(sections: dict, merge: dict = None):
+    extra = {OPTIONS: sections}
+    if merge is not None:
+        extra[OPTIONS_MERGE] = merge
+    return types.SimpleNamespace(extra=extra)
 
 
 def _dag_run(conf: dict = None):
@@ -81,6 +86,88 @@ class TestSlOptionsFromEvents:
         events = {"uri1": [_event({"all": {"fd": "2026-07-08"}})]}
         run = _dag_run({OPTIONS: {"all": {"fd": "2026-07-10"}}})
         assert sl_options_from_events(events, run, None) == "fd=2026-07-10"
+
+
+# ------------------------------------------------------------------
+# sl_options_from_events — keys declared union by their producer (issue #158)
+# ------------------------------------------------------------------
+
+class TestSlOptionsUnionMerge:
+
+    def _union_event(self, value: str, declaration: dict = UNION):
+        return _event({"all": {"fd": value}}, {"all": {"fd": declaration}})
+
+    def test_coalesced_union_values_merge(self):
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri1": [self._union_event("A|B"), self._union_event("B|C")]}
+        assert sl_options_from_events(events, _dag_run(), "d.t") == "fd=A|B|C"
+
+    def test_the_order_of_events_does_not_change_the_result(self):
+        from ai.starlake.airflow import sl_options_from_events
+        first = {"uri1": [self._union_event("2026-11-01|2026-11-02"), self._union_event("2026-11-02|2026-11-03")]}
+        second = {"uri1": [self._union_event("2026-11-02|2026-11-03"), self._union_event("2026-11-01|2026-11-02")]}
+        expected = "fd=2026-11-01|2026-11-02|2026-11-03"
+        assert sl_options_from_events(first, _dag_run(), None) == expected
+        assert sl_options_from_events(second, _dag_run(), None) == expected
+
+    def test_union_across_dataset_uris(self):
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri1": [self._union_event("A|B")], "uri2": [_event({"all": {"fd": "C"}})]}
+        assert sl_options_from_events(events, _dag_run(), None) == "fd=A|B|C"
+
+    def test_the_same_events_without_declaration_still_fail_loud(self):
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        events = {"uri1": [_event({"all": {"fd": "A|B"}}), _event({"all": {"fd": "B|C"}})]}
+        with pytest.raises(AirflowException, match="Conflicting values"):
+            sl_options_from_events(events, _dag_run(), None)
+
+    def test_different_separators_fail_loud_naming_the_key(self):
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        events = {"uri1": [self._union_event("A|B"), self._union_event("B;C", {"policy": "union", "separator": ";"})]}
+        with pytest.raises(AirflowException, match=r"Conflicting merge declarations for sl_options_merge\['all'\]\['fd'\]"):
+            sl_options_from_events(events, _dag_run(), None)
+
+    def test_different_policies_fail_loud_naming_the_key(self):
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        events = {"uri1": [self._union_event("A|B"), self._union_event("A|B", {"policy": "strict"})]}
+        with pytest.raises(AirflowException, match=r"Conflicting merge declarations for sl_options_merge\['all'\]\['fd'\]"):
+            sl_options_from_events(events, _dag_run(), None)
+
+    def test_dag_run_conf_overrides_the_union(self):
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri1": [self._union_event("A|B"), self._union_event("B|C")]}
+        run = _dag_run({OPTIONS: {"all": {"fd": "D"}}})
+        assert sl_options_from_events(events, run, None) == "fd=D"
+
+    def test_a_single_event_is_normalized(self):
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri1": [self._union_event("B||A|B")]}
+        assert sl_options_from_events(events, _dag_run(), None) == "fd=A|B"
+
+    def test_conflict_names_the_uri_of_an_asset_key(self):
+        """Airflow 3 keys the triggering events by Asset objects: the error
+        names their URI."""
+        import dataclasses
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+
+        @dataclasses.dataclass(frozen=True)
+        class _Asset:
+            uri: str
+
+        events = {_Asset("gs://bucket/orders"): [_event({"all": {"fd": "A"}}), _event({"all": {"fd": "B"}})]}
+        with pytest.raises(AirflowException, match=r"\(gs://bucket/orders, gs://bucket/orders\)"):
+            sl_options_from_events(events, _dag_run(), None)
+
+    def test_producer_extra_carries_the_declaration(self, airflow_job):
+        extra = {OPTIONS: {"all": {"fd": "{{ ti.xcom_pull(task_ids='claim') }}"}}, OPTIONS_MERGE: {"all": {"fd": UNION}}}
+        task = airflow_job.sl_load(task_id=None, domain="d", table="t", extra=extra)
+        assert task.extra[OPTIONS_MERGE] == {"all": {"fd": UNION}}
+        # the outlet events are published with this extra (pre_execute re-syncs it after rendering)
+        assert task.outlets and all(outlet.extra[OPTIONS_MERGE] == {"all": {"fd": UNION}} for outlet in task.outlets)
 
 
 # ------------------------------------------------------------------

@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 
 import os
 
-version = os.environ.get("PROJECT_VERSION", "0.6.18")
+version = os.environ.get("PROJECT_VERSION", "0.6.19")
 
 setup(name='starlake-airflow',
       version=version,
@@ -21,7 +21,7 @@ setup(name='starlake-airflow',
       license='Apache 2.0',
 #      url='https://github.com/starlake-ai/starlake/tree/master/src/main/python/starlake-airflow',
       packages=find_packages(include=['ai', 'ai.*']),
-      install_requires=['starlake-orchestration~=0.5'],
+      install_requires=['starlake-orchestration~=0.5,>=0.5.7'],
       extras_require={
         # Floor of the full data-aware round-trip: datasets landed in 2.4,
         # triggering_dataset_events (consumer side) in 2.5. The producer side
