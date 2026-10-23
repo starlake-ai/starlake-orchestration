@@ -113,7 +113,9 @@
                 <plugin>
                     <groupId>org.sonatype.central</groupId>
                     <artifactId>central-publishing-maven-plugin</artifactId>
-                    <version>0.9.0</version>
+                    <!-- >= 0.12.0: with Maven 3.10, older versions bundle the staging
+                         maven-metadata-local.xml and Central rejects the deployment -->
+                    <version>0.12.0</version>
                     <extensions>true</extensions>
                     <configuration>
                         <publishingServerId>central</publishingServerId>

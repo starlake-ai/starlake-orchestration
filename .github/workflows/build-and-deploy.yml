@@ -51,6 +51,9 @@ jobs:
       )
     runs-on: ubuntu-latest
     strategy:
+      # a failing module must not cancel another one mid-publish (on Central,
+      # not yet on PyPI): each module deploys on its own
+      fail-fast: false
       matrix:
         module:
           - name: root
@@ -104,13 +107,26 @@ jobs:
         if: ${{ matrix.module.changed == 'true' }}
         run: |
           if [[ "${{ matrix.module.name }}" == "root" ]]; then
-            echo "Root module changed, deploying the root pom."
-            PROFILE=release
+            # The root pom is the parent of every module. A change that keeps its
+            # version (e.g. pluginManagement) needs no new release: the modules build
+            # with the repository's root pom and inherit their published metadata
+            # from the version already on Central. A new root version must be on
+            # Central before a module names it as parent: bump the root alone, then
+            # the modules' <parent>.
+            ROOT_VERSION=$(sed -n '/<artifactId>orchestration<\/artifactId>/{n;s/.*<version>\(.*\)<\/version>.*/\1/p;q;}' pom.xml)
+            if curl -sfI "https://repo1.maven.org/maven2/ai/starlake/orchestration/${ROOT_VERSION}/orchestration-${ROOT_VERSION}.pom" > /dev/null; then
+              echo "::notice::Root pom ${ROOT_VERSION} is already on Maven Central, nothing to deploy."
+            else
+              # the root pom is the reactor itself: no module is named "root"
+              # (-pl root fails), deploy it alone like build-and-deploy-root.yml
+              echo "Root module changed, deploying the root pom ${ROOT_VERSION}."
+              mvn -B deploy -nsu --non-recursive -P release
+            fi
           else
             PROFILE=all
+            echo "Activating Maven profile: $PROFILE for module ${{ matrix.module.name }}"
+            mvn -B deploy -nsu -pl ${{ matrix.module.name }} -P $PROFILE
           fi
-          echo "Activating Maven profile: $PROFILE for module ${{ matrix.module.name }}"
-          mvn -B deploy -nsu -pl ${{ matrix.module.name }} -P $PROFILE
         env:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
           OSSRH_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
