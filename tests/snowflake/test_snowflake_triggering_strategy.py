@@ -154,6 +154,20 @@ class TestSnowflakeTriggeringStructure(SnowflakeTestMixin):
         assert "SYSTEM$STREAM_HAS_DATA('STARBAKE_ORDERS_STREAM')" in condition
         assert "SYSTEM$STREAM_HAS_DATA('STARBAKE_STOCK_STREAM')" in condition
 
+    def test_condition_reaches_the_root_task(self):
+        """Issue #160: snowflake-core >= 1.13 assigns DAG.condition in
+        DAG.__init__ (None by default); the computed stream condition must
+        still be the one the deployed root task carries."""
+        pipeline = self._make_pipeline(_make_stream_dependencies([
+            ("starbake.orders", None, "STARBAKE_ORDERS_STREAM"),
+        ]))
+        dag = pipeline.dag
+        assert dag.condition == "SYSTEM$STREAM_HAS_DATA('STARBAKE_ORDERS_STREAM')"
+        assert dag._to_low_level_task().condition == dag.condition
+        # the contract the SDK relies on, whatever snowflake-core is installed
+        dag.condition = "SYSTEM$STREAM_HAS_DATA('OTHER_STREAM')"
+        assert dag._to_low_level_task().condition == "SYSTEM$STREAM_HAS_DATA('OTHER_STREAM')"
+
     def test_strategy_has_no_structural_effect(self):
         """PIN (issue #79 — ALL-only by orchestrator design, 2026-07-14):
         dataset_triggering_strategy is ignored by the Snowflake module —
