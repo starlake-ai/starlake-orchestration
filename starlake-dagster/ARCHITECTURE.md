@@ -71,7 +71,7 @@ The sensor function runs on each evaluation cycle:
 4. **Identify anchor**: find the materialized dataset with the **greatest scheduled date** (`max(materialized_schedules)`)
 5. **Build checking set**: remaining datasets = not-materialized + older-materialized (excluding the anchor)
 6. **Validate freshness** via `check_datasets_freshness()` (detailed below)
-7. **Merge triggering options**: `StarlakeDagsterUtils.collect_sl_options()` merges the `sl_options` sections carried by the triggering materializations (fail-loud — see [Runtime options propagation](#runtime-options-propagation-sl_options))
+7. **Merge triggering options**: `StarlakeDagsterUtils.collect_sl_options_with_merge()` merges the `sl_options` sections carried by the triggering materializations (fail-loud, or by union for the keys declared so — see [Runtime options propagation](#runtime-options-propagation-sl_options))
 8. **Result**:
    - All consistent → `RunRequest(run_config=_ops_config(logical_datetime, previous_logical_datetime, sl_options), partition_key=logical_datetime, tags={...})` + `context.advance_cursor()`
    - Missing/inconsistent → `SkipReason`
@@ -125,9 +125,11 @@ When building an `AssetMaterialization`, two sources are merged into a `Metadata
 - **static sections** passed by the caller through the `extra` kwarg of `sl_job()` (declared on the job, analogous to the Airflow mixin's `extra` template field)
 - **run-level sections** from `config.sl_options`, overriding the static ones — so a run *relays* the options it was itself triggered with (multi-hop propagation across pipeline chains)
 
+The merge declarations of the keys (`StarlakeParameters.OPTIONS_MERGE_PARAMETER`, `sl_options_merge`: `{"all": {key: {"policy": "union", "separator": "|"}}}`, issue #158) are published the same way, from `extra` and from `config.sl_options_merge`, under a `sl_options_merge` metadata entry — so a relayed set of values keeps merging by union downstream.
+
 **2. Relay — the pipeline sensor**
 
-`multi_asset_sensor_with_skip_reason` calls `StarlakeDagsterUtils.collect_sl_options()` on the triggering materializations. Merging is **fail-loud**: the same key carried with different values by two materializations raises, failing the sensor tick — conflicting run variables must stop the run, not silently pick one (the recovery escape hatch is launching the runs one by one, passing `sl_options` in the run config manually). The merged sections are JSON-encoded and injected into every op of the `RunRequest` via `_ops_config(..., sl_options=...)` (`DagsterLogicalDatetimeConfig.sl_options`).
+`multi_asset_sensor_with_skip_reason` calls `StarlakeDagsterUtils.collect_sl_options_with_merge()` on the triggering materializations — the latest one of each monitored asset, plus, when one of them carries merge declarations, the earlier unconsumed ones (`superseded_materializations()`, at most `SUPERSEDED_MATERIALIZATIONS_LIMIT` per asset) so that a producer that ran several times since the consumer's last run contributes every run to a union, while any other key keeps the latest run's value — which merges them with the core `merge_sl_options` (rules in [starlake-orchestration/ARCHITECTURE.md](../starlake-orchestration/ARCHITECTURE.md#merge-of-coalesced-run-variables-aistarlakesl_options-issue-158)). Merging is **fail-loud**: the same key carried with different values by two materializations raises, failing the sensor tick — conflicting run variables must stop the run, not silently pick one (the recovery escape hatch is launching the runs one by one, passing `sl_options` in the run config manually) — unless a producer declared the key `union`: its values then merge into their sorted, de-duplicated union. The merged sections and their declarations are JSON-encoded and injected into every op of the `RunRequest` via `_ops_config(..., sl_options=..., sl_options_merge=...)` (`DagsterLogicalDatetimeConfig.sl_options` / `sl_options_merge`). With a union, one run may rebuild the values of several producer runs: the consumer must be idempotent per value and guard against values a later producer run rejected.
 
 **3. Consume — `StarlakeDagsterUtils.get_sl_options()`**
 
@@ -177,7 +179,7 @@ After graph construction, if the pipeline has a cron schedule, a `PartitionedCon
 
 #### `DagsterLogicalDatetimeConfig` (extends `dagster.Config`)
 
-Run configuration schema injected into every `@op`: `logical_datetime` (str), `previous_logical_datetime` (optional str), `dry_run` (bool, default False), `sl_options` (optional str — JSON-encoded runtime options sections, populated by the pipeline sensor's `RunRequest` or manually at launch; see [Runtime options propagation](#runtime-options-propagation-sl_options)).
+Run configuration schema injected into every `@op`: `logical_datetime` (str), `previous_logical_datetime` (optional str), `dry_run` (bool, default False), `sl_options` (optional str — JSON-encoded runtime options sections, populated by the pipeline sensor's `RunRequest` or manually at launch), `sl_options_merge` (optional str — JSON-encoded merge declarations of those options, relayed with them; see [Runtime options propagation](#runtime-options-propagation-sl_options)).
 
 #### `StarlakeDagsterUtils`
 
@@ -185,7 +187,9 @@ Static utilities — replaces Airflow's Jinja2 macros with explicit runtime call
 - `get_logical_datetime(context, config)` — resolves from: partition key → config → run launch time → now
 - `get_materialization(context, config, dataset)` — builds `AssetMaterialization` with full metadata (including the merged `sl_options` sections) and partition tags
 - `get_transform_options(context, config, params)` — computes `sl_data_interval_start` / `sl_data_interval_end`
-- `collect_sl_options(materializations)` — fail-loud merge of the `sl_options` sections carried by triggering materializations (used by the pipeline sensor)
+- `collect_sl_options(materializations)` — fail-loud merge of the `sl_options` sections carried by triggering materializations, by union for the keys declared so
+- `collect_sl_options_with_merge(materializations, superseded=())` — the same, also returning the merge declarations of the keys (used by the pipeline sensor, which relays them); the `superseded` materializations add their values to the keys declared union only
+- `superseded_materializations(context, latest_records)` — the earlier unconsumed materializations of each triggering asset, read only when a latest one carries merge declarations
 - `get_sl_options(context, config, name)` — resolves the runtime options applying to a node (`all` section + node-keyed section) from `config.sl_options` or the run tag
 - `quote_datetime()` / `unquote_datetime()` — partition key encoding
 
@@ -228,7 +232,7 @@ With `pre_load_sensor=true` (option, or the `sensor=True` kwarg on `sl_pre_load`
 #### `DagsterPipeline` (extends `AbstractPipeline[JobDefinition, OpDefinition, GraphDefinition, AssetKey]`, `DagsterDataset`)
 
 - `__exit__()` — graph construction + `JobDefinition` creation (see Graph Construction above)
-- `_ops_config()` — recursively walks graph to build config dict with `logical_datetime` (and, when relayed by the sensor, `sl_options`) for every op
+- `_ops_config()` — recursively walks graph to build config dict with `logical_datetime` (and, when relayed by the sensor, `sl_options` and `sl_options_merge`) for every op
 - `sl_transform_options()` — returns `None` (handled at runtime in `sl_job()` via `StarlakeDagsterUtils`)
 - `run()` — uses `DagsterInstance.ephemeral()` + `job.execute_in_process()`. In dry_run, also validates dataset freshness.
 

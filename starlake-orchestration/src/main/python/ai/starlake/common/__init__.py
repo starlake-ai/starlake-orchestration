@@ -72,6 +72,10 @@ class StarlakeParameters(str, Enum):
     # applies to every task of the triggered pipeline, a task-specific section
     # only to that task (precedence: static options < "all" < task-specific).
     OPTIONS_PARAMETER = f"{__SL_PREFIX}options"
+    # How a key of OPTIONS_PARAMETER merges when coalesced events carry it, same
+    # sections: {"all": {key: {"policy": "union", "separator": "|"}}} — see
+    # ai.starlake.sl_options (issue #158).
+    OPTIONS_MERGE_PARAMETER = f"{__SL_PREFIX}options_merge"
 
     def __str__(self):
         return self.value

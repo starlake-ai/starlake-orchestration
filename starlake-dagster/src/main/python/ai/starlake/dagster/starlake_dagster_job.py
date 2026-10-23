@@ -14,13 +14,16 @@
 # limitations under the License.
 #
 
-from typing import Callable, List, NamedTuple, Optional, TypeVar, Union
+from typing import Callable, List, NamedTuple, Optional, Tuple, TypeVar, Union
 
 from ai.starlake.job import StarlakePreLoadStrategy, IStarlakeJob, StarlakeSparkConfig, StarlakeOptions, StarlakeOrchestrator, TaskType
 
 from ai.starlake.common import is_valid_cron, sl_cron_start_end_dates, sl_timestamp_format, StarlakeParameters
 
 from ai.starlake.dataset import StarlakeDataset, AbstractEvent
+
+# issue #158 — merge of the sl_options carried by several materializations (core, import-light)
+from ai.starlake.sl_options import merge_sl_options
 
 from dagster import AssetKey, Failure, Output, Out, op, AssetMaterialization, OpExecutionContext
 
@@ -349,6 +352,11 @@ class DagsterLogicalDatetimeConfig(Config):
     # (precedence: static options < "all" < task-specific). Populated by the
     # pipeline sensor's RunRequest, or manually at launch (recovery escape hatch).
     sl_options: Optional[str] = None
+    # How the keys of sl_options merge (StarlakeParameters.OPTIONS_MERGE_PARAMETER),
+    # JSON-encoded with the same sections: {"all": {key: {"policy": "union",
+    # "separator": "|"}}} — relayed with sl_options on the run's materializations
+    # so a downstream sensor merges them the same way (issue #158).
+    sl_options_merge: Optional[str] = None
 
 class StarlakeDagsterUtils:
 
@@ -464,29 +472,47 @@ class StarlakeDagsterUtils:
         })
         # sl_options carried downstream: static sections passed by the caller via
         # the `extra` kwarg, overridden by the run-level sections (config.sl_options)
-        # so a run relays the options it was itself triggered with.
-        extra = kwargs.get("extra", None) or {}
-        event_options: dict = {}
-        if isinstance(extra, dict):
-            static_options = extra.get(StarlakeParameters.OPTIONS_PARAMETER.value, None)
-            if isinstance(static_options, dict):
-                for section, opts in static_options.items():
+        # so a run relays the options it was itself triggered with. Their merge
+        # declarations (sl_options_merge, issue #158) travel the same way.
+        import json
+
+        def overlay(sections: dict, payload) -> None:
+            if isinstance(payload, dict):
+                for section, opts in payload.items():
                     if isinstance(opts, dict):
-                        event_options.setdefault(section, {}).update(opts)
-        if config.sl_options:
-            import json
+                        sections.setdefault(section, {}).update(opts)
+
+        def run_sections(raw: Optional[str]):
+            if not raw:
+                return None
             try:
-                run_options = json.loads(config.sl_options)
+                return json.loads(raw)
             except (TypeError, ValueError):
-                run_options = None
-            if isinstance(run_options, dict):
-                for section, opts in run_options.items():
-                    if isinstance(opts, dict):
-                        event_options.setdefault(section, {}).update(opts)
+                return None
+
+        extra = kwargs.get("extra", None) or {}
+        if not isinstance(extra, dict):
+            extra = {}
+        event_options: dict = {}
+        overlay(event_options, extra.get(StarlakeParameters.OPTIONS_PARAMETER.value, None))
+        overlay(event_options, run_sections(config.sl_options))
         if event_options:
             metadata.update({
                 StarlakeParameters.OPTIONS_PARAMETER.value: MetadataValue.json(event_options),
             })
+            declarations: dict = {}
+            overlay(declarations, extra.get(StarlakeParameters.OPTIONS_MERGE_PARAMETER.value, None))
+            overlay(declarations, run_sections(config.sl_options_merge))
+            # a declaration describes a value: only those of the carried keys travel
+            event_merge = {
+                section: {key: declaration for key, declaration in keys.items() if key in event_options.get(section, {})}
+                for section, keys in declarations.items()
+            }
+            event_merge = {section: keys for section, keys in event_merge.items() if keys}
+            if event_merge:
+                metadata.update({
+                    StarlakeParameters.OPTIONS_MERGE_PARAMETER.value: MetadataValue.json(event_merge),
+                })
         tags = kwargs.get("tags", {})
         partition = cls.quote_datetime(partition_key)
         tags.update({
@@ -536,45 +562,116 @@ class StarlakeDagsterUtils:
         """Merge the sl_options sections carried by asset materializations
         (StarlakeParameters.OPTIONS_PARAMETER in their metadata).
 
-        Merging is fail-loud: the same key carried with different values by two
-        materializations raises (conflicting run variables must stop the run,
-        not silently pick one).
-
-        Args:
-            materializations: An iterable of AssetMaterialization (None entries
-                are skipped).
+        See collect_sl_options_with_merge.
 
         Returns:
             dict: The merged sections {"all": {...}, "<domain.task>": {...}}.
         """
+        return cls.collect_sl_options_with_merge(materializations)[0]
+
+    @classmethod
+    def collect_sl_options_with_merge(cls, materializations, superseded=()) -> Tuple[dict, dict]:
+        """Merge the sl_options sections carried by asset materializations
+        (StarlakeParameters.OPTIONS_PARAMETER in their metadata).
+
+        Merging is fail-loud: the same key carried with different values by two
+        materializations raises (conflicting run variables must stop the run,
+        not silently pick one), unless a producer declared the key a set of
+        values (StarlakeParameters.OPTIONS_MERGE_PARAMETER, policy 'union'),
+        which merges the values by union — see ai.starlake.sl_options (issue #158).
+
+        Args:
+            materializations: An iterable of AssetMaterialization (None entries
+                are skipped) — the latest one of each triggering asset.
+            superseded: The earlier unconsumed materializations of those
+                assets (see superseded_materializations): they add their
+                values to the keys declared union only — for any other key,
+                the latest materialization of an asset replaces its earlier ones.
+
+        Returns:
+            Tuple[dict, dict]: The merged sections {"all": {...}, "<domain.task>": {...}},
+            and the merge declarations of their keys, same sections.
+        """
         import json
-        sections: dict = {}
-        for mat in materializations or []:
-            if not mat:
-                continue
-            metadata = getattr(mat, "metadata", None) or {}
-            value = metadata.get(StarlakeParameters.OPTIONS_PARAMETER.value, None)
+
+        def sections(metadata: dict, parameter: str):
+            value = metadata.get(parameter, None)
             raw = getattr(value, "value", value)  # MetadataValue.json -> dict
             if isinstance(raw, str):
                 try:
                     raw = json.loads(raw)
                 except (TypeError, ValueError):
+                    # left as is: ignored as sl_options, rejected as sl_options_merge
+                    pass
+            return raw
+
+        def carriers(mats) -> list:
+            result = []
+            for mat in mats or []:
+                if not mat:
                     continue
-            if not isinstance(raw, dict):
+                metadata = getattr(mat, "metadata", None) or {}
+                result.append((
+                    getattr(mat, "asset_key", None),
+                    sections(metadata, StarlakeParameters.OPTIONS_PARAMETER.value),
+                    sections(metadata, StarlakeParameters.OPTIONS_MERGE_PARAMETER.value),
+                ))
+            return result
+
+        return merge_sl_options(
+            carriers(materializations),
+            origin="triggering materializations",
+            recovery=f"Conflicting run variables must be run one by one, passing "
+                     f"{StarlakeParameters.OPTIONS_PARAMETER.value} in the run config.",
+            superseded=carriers(superseded),
+        )
+
+    # Upper bound of the earlier materializations read per asset by
+    # superseded_materializations (a consumer this far behind is past saving).
+    SUPERSEDED_MATERIALIZATIONS_LIMIT = 10000
+
+    @classmethod
+    def superseded_materializations(cls, context, latest_records: dict) -> List[AssetMaterialization]:
+        """The unconsumed materializations of each triggering asset that are
+        older than its latest one.
+
+        The pipeline sensor reads the latest materialization of each asset;
+        when a producer ran several times since the consumer's last run, the
+        earlier runs' values of a key declared union must join the union
+        (issue #158). They are only read when a latest materialization carries
+        merge declarations, so the sensors of pipelines that declare nothing
+        do not query them.
+
+        Args:
+            context: The MultiAssetSensorEvaluationContext of the tick.
+            latest_records: The latest unconsumed EventLogRecord (or None) per
+                monitored AssetKey, as returned by
+                context.latest_materialization_records_by_key().
+
+        Returns:
+            List[AssetMaterialization]: The earlier materializations, oldest first.
+        """
+        merge_parameter = StarlakeParameters.OPTIONS_MERGE_PARAMETER.value
+        if not any(
+            record and merge_parameter in (getattr(record.asset_materialization, "metadata", None) or {})
+            for record in latest_records.values()
+        ):
+            return []
+        superseded: List[AssetMaterialization] = []
+        for asset_key, latest in latest_records.items():
+            if not latest:
                 continue
-            for section, opts in raw.items():
-                if not isinstance(opts, dict):
-                    continue
-                merged = sections.setdefault(section, {})
-                for key, v in opts.items():
-                    if key in merged and str(merged[key]) != str(v):
-                        raise ValueError(
-                            f"Conflicting values for {StarlakeParameters.OPTIONS_PARAMETER.value}['{section}']['{key}'] across triggering materializations "
-                            f"({getattr(mat, 'asset_key', None)}): '{merged[key]}' != '{v}'. Conflicting run variables must be run one by one, "
-                            f"passing {StarlakeParameters.OPTIONS_PARAMETER.value} in the run config."
-                        )
-                    merged[key] = v
-        return sections
+            records = list(context.materialization_records_for_key(asset_key, limit=cls.SUPERSEDED_MATERIALIZATIONS_LIMIT))
+            if len(records) >= cls.SUPERSEDED_MATERIALIZATIONS_LIMIT:
+                context.log.warning(
+                    f"{asset_key.to_user_string()}: more than {cls.SUPERSEDED_MATERIALIZATIONS_LIMIT} unconsumed materializations, "
+                    f"only the {cls.SUPERSEDED_MATERIALIZATIONS_LIMIT} oldest and the latest join the {merge_parameter} unions."
+                )
+            superseded.extend(
+                record.asset_materialization for record in records
+                if record.storage_id < latest.storage_id and record.asset_materialization
+            )
+        return superseded
 
     @classmethod
     def get_sl_options(cls, context: Optional[OpExecutionContext], config: DagsterLogicalDatetimeConfig, name: Optional[str] = None) -> dict:
