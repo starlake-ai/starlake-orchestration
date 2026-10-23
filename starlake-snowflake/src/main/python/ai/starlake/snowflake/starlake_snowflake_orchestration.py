@@ -351,6 +351,12 @@ class SnowflakeDag(DAG):
     def condition(self) -> Optional[str]:
         return self._condition
 
+    @condition.setter
+    def condition(self, value: Optional[str]) -> None:
+        # snowflake-core >= 1.13 assigns DAG.condition in DAG.__init__ (issue #160);
+        # __init__ sets the computed condition after super().__init__()
+        self._condition = value
+
     @property
     def datasets(self) -> dict[str, str]:
         return self._datasets
