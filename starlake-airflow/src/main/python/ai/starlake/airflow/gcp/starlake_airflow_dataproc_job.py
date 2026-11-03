@@ -489,11 +489,26 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
         # story 6.5 (issue #93) — set on the deferrable pre-load waiting task
         # only; None otherwise.
         self.pre_load_wait = pre_load_wait
-        # story 6.12 (issue #122) — not-ready sentinel (preload only); the
-        # pristine job template keeps re-executions of the same operator
-        # object from submitting a previous run's scope
+        # story 6.12 (issue #122) — not-ready sentinel (preload only); every
+        # rendering starts from the pristine job template, which keeps
+        # re-executions of the same operator object from submitting a
+        # previous run's scope
         self.sentinel_path = sentinel_path
         self._sl_sentinel_job_template = copy.deepcopy(job) if sentinel_path else None
+        if sentinel_path:
+            # issue #162 — the polled path is rendered like the job that
+            # carries it as --notReadySentinel: with a templated prefix, the
+            # CLI would write the marker at the rendered path and the probe
+            # read the raw one (never found → false READY)
+            self.template_fields = tuple(self.template_fields) + ("sentinel_path",)
+
+    def render_template_fields(self, context, jinja_env=None) -> None:
+        # issue #162 — sentinel mode: Airflow renders the job from the
+        # pristine template, once per attempt, and execute substitutes the
+        # scope into what it rendered
+        if self._sl_sentinel_job_template is not None:
+            self.job = copy.deepcopy(self._sl_sentinel_job_template)
+        return super().render_template_fields(context, jinja_env)
 
     def _sl_sentinel_hook_handlers(self):
         """GCSHook-based sentinel handlers honoring this operator's
@@ -505,11 +520,11 @@ class DataprocJobOperator(StarlakeDatasetMixin, DataprocSubmitJobOperator):
 
     def execute(self, context):
         # story 6.12 — runtime scope substitution into the submitted job (the
-        # --notReadySentinel arg travels in spark_job.args); per-attempt and
-        # idempotent (the token is gone after the first application)
+        # --notReadySentinel arg travels in spark_job.args). Issue #162 — it
+        # is applied to the job Airflow rendered, never to the raw template
         if self.preload and self.sentinel_path:
             self.job = StarlakeAirflowJob._sl_sentinel_substitute_payload(
-                self._sl_sentinel_job_template, context
+                self.job, context
             )
         # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer,
         # verdict applied on resume in execute_complete. Bypass the xcom

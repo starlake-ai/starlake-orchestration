@@ -174,6 +174,22 @@ def _dag():
     return DAG(dag_id="test_sentinel_dag", start_date=datetime(2024, 1, 1), schedule=None)
 
 
+#: issue #162 — a templated value Airflow renders in the operator's payload
+REJECT_MAX_RECORDS_JINJA = "{{ params.sl_reject_max_records | default(10000) }}"
+
+
+def _render_and_execute(task, field, context):
+    """Render the task's template fields like Airflow does before execute,
+    then execute it; returns (rendered payload, execute's return value).
+    StarlakeDatasetMixin.render_template_fields reads the DAG from the
+    context, as Airflow provides it."""
+    import copy
+    context.setdefault("dag", task.dag)
+    task.render_template_fields(context)
+    rendered = copy.deepcopy(getattr(task, field))
+    return rendered, task.execute(context)
+
+
 # ---------------------------------------------------------------------------
 # 1. Bash one-shot — construction contract
 # ---------------------------------------------------------------------------
@@ -467,6 +483,87 @@ class TestPayloadSubstitution:
         assert SENTINEL_SCOPE_TOKEN in json.dumps(self.PAYLOAD)
 
 
+class TestTemplatedSentinelPrefix:
+    """Issue #162 — a templated sentinel prefix is rendered in the payload
+    (a template field, so the CLI writes the marker at the rendered path)
+    AND in the polled path, so the probe reads it there."""
+
+    PREFIX = "gs://b/{{ params.env | default('prod') }}/d"
+
+    def _sensor(self, store, captured, sentinel=True):
+        from ai.starlake.airflow.starlake_airflow_job import StarlakeCloudPreloadSensor
+        path = f"{self.PREFIX}/{SENTINEL_SCOPE_TOKEN}.notready"
+
+        def submit_and_wait(context, payload):
+            captured.append(payload)
+            return True
+
+        def handlers():
+            return (lambda p: p in store), (lambda p: store.discard(p))
+
+        with _dag():
+            return StarlakeCloudPreloadSensor(
+                task_id="preload_sensor",
+                dataset=None,
+                source=None,
+                submit_and_wait=submit_and_wait,
+                payload={"args": ["preload", "--notReadySentinel", path]},
+                sentinel_path=path if sentinel else None,
+                sentinel_handlers=handlers if sentinel else None,
+                poke_interval=1,
+                timeout=10,
+            )
+
+    def test_marker_is_polled_where_the_cli_writes_it(self):
+        expected = "gs://b/dev/d/my_dag__wait_for__scheduled__2026-07-18T00:00:00+00:00.notready"
+        store = {expected}
+        captured = []
+        sensor = self._sensor(store, captured)
+        context = dict(_fake_context(), params={"env": "dev"}, dag=sensor.dag)
+        sensor.render_template_fields(context)
+        verdict = sensor.poke(context)
+        assert captured[0]["args"][-1] == expected  # where the CLI writes it
+        assert verdict is None                      # found there: NOT READY, poke again
+        assert store == set()                       # and consumed
+
+    def test_off_mode_template_fields_unchanged(self):
+        sensor = self._sensor(set(), [], sentinel=False)
+        assert "_sentinel_path" not in sensor.template_fields
+
+
+class TestCloudOperatorsSourceContract:
+    """Issue #162 — CI installs no google/amazon provider, so the operator
+    tests further down are skipped there. Read from disk, not imported, this
+    scan is the only layer pinning in CI that each cloud operator renders its
+    payload from the pristine template, substitutes the scope into the
+    RENDERED payload, and renders the sentinel path of every task polling it."""
+
+    @pytest.mark.parametrize("module, field, template, pollers", [
+        ("gcp/starlake_airflow_cloud_run_job.py", "overrides", "_sl_sentinel_overrides_template", 2),
+        ("aws/starlake_airflow_fargate_job.py", "overrides", "_sl_sentinel_overrides_template", 2),
+        ("gcp/starlake_airflow_dataproc_job.py", "job", "_sl_sentinel_job_template", 1),
+    ])
+    def test_operator_renders_the_template_and_submits_the_rendered_payload(self, module, field, template, pollers):
+        import os
+        import re
+        import ai.starlake.airflow as pkg
+        with open(os.path.join(os.path.dirname(pkg.__file__), module)) as f:
+            source = f.read()
+        assert re.search(
+            rf"def render_template_fields\(.*?\n\s+if self\.{template} is not None:\n"
+            rf"\s+self\.{field} = copy\.deepcopy\(self\.{template}\)\n"
+            rf"\s+return super\(\)\.render_template_fields\(context, jinja_env\)",
+            source, re.S,
+        )
+        assert re.search(
+            rf"self\.{field} = StarlakeAirflowJob\._sl_sentinel_substitute_payload\(\s*self\.{field}, context\s*\)",
+            source,
+        )
+        assert not re.search(rf"_sl_sentinel_substitute_payload\(\s*self\.{template}", source)
+        # the operator plus, on cloud_run and fargate, the async completion sensor
+        assert source.count('self.template_fields = tuple(self.template_fields) + ("sentinel_path",)') == pollers
+
+
 class TestSentinelReadyHelper:
 
     def test_ready_and_consume(self, tmp_path):
@@ -673,6 +770,7 @@ class TestCloudRunSentinel:
         assert blank.overrides == baseline.overrides
         assert baseline.sentinel_path is None
         assert "notReadySentinel" not in json.dumps(baseline.overrides)
+        assert "sentinel_path" not in baseline.template_fields
 
     def test_off_mode_gcloud_async_byte_identical(self):
         options = dict(CLOUD_RUN_OPTIONS, cloud_run_async="true", use_gcloud="true")
@@ -852,6 +950,137 @@ class TestCloudRunSentinel:
         assert task.execute(_fake_context()) is False
         assert store == set()
 
+    def test_async_operator_submits_the_rendered_env(self, monkeypatch):
+        """Issue #162 — every Cloud Run operator sends the env Airflow rendered
+        in overrides; the sentinel preload sent the raw Jinja of a templated
+        sl_env_var, which the container could not read as a number."""
+        from ai.starlake.airflow import StarlakeAirflowJob
+        from ai.starlake.airflow.gcp import starlake_airflow_cloud_run_job as cloud_run
+        options = dict(
+            self.GS_OPTIONS, cloud_run_async="true", use_gcloud="false",
+            sl_env_var=json.dumps({"SL_REJECT_MAX_RECORDS": REJECT_MAX_RECORDS_JINJA}),
+        )
+        with _dag():
+            group = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
+        task = {t.task_id.split(".")[-1]: t for t in group}["check_starbake_incoming_files"]
+        submitted = {}
+
+        class FakeCloudRunHook:
+            def __init__(self, **kwargs):
+                pass
+
+            def execute_job(self, region, project_id, job_name, overrides):
+                submitted["overrides"] = overrides
+                return SimpleNamespace(operation=SimpleNamespace(
+                    name="operations/1", metadata=SimpleNamespace(value=b""),
+                ))
+
+        monkeypatch.setattr(cloud_run, "CloudRunHook", FakeCloudRunHook)
+        monkeypatch.setattr(cloud_run, "Execution", SimpleNamespace(
+            deserialize=lambda value: SimpleNamespace(name="executions/1", log_uri="uri"),
+        ))
+        context = dict(_fake_context(), params={"sl_reject_max_records": 2500})
+        rendered, result = _render_and_execute(task, "overrides", context)
+        assert result == "operations/1"
+        assert submitted["overrides"] == StarlakeAirflowJob._sl_sentinel_substitute_payload(rendered, context)
+        env = {item["name"]: item["value"] for item in submitted["overrides"]["container_overrides"][0]["env"]}
+        assert env["SL_REJECT_MAX_RECORDS"] == "2500"
+
+    def _capture_submissions(self, monkeypatch, task, store=frozenset()):
+        """Stub the native submission (sync and deferrable paths) and the
+        sentinel handlers; returns the list of submitted overrides."""
+        from airflow.providers.google.cloud.operators.cloud_run import CloudRunExecuteJobOperator
+        submitted = []
+
+        def fake_execute(self, context):
+            submitted.append(self.overrides)
+            return "job"
+
+        store = set(store)
+        monkeypatch.setattr(CloudRunExecuteJobOperator, "execute", fake_execute)
+        monkeypatch.setattr(
+            type(task), "_sl_sentinel_hook_handlers",
+            lambda self: ((lambda p: p in store), (lambda p: store.discard(p))),
+        )
+        return submitted, store
+
+    @pytest.mark.parametrize("mode_options", [
+        {"cloud_run_async": "false"},
+        {"pre_load_sensor": "true", "pre_load_poke_interval": "30", "pre_load_timeout": "120"},
+    ], ids=["sync", "deferrable"])
+    def test_sync_and_deferrable_operators_submit_the_rendered_env(self, monkeypatch, mode_options):
+        from ai.starlake.airflow import StarlakeAirflowJob
+        options = dict(
+            self.GS_OPTIONS, use_gcloud="false",
+            sl_env_var=json.dumps({"SL_REJECT_MAX_RECORDS": REJECT_MAX_RECORDS_JINJA}),
+            **mode_options,
+        )
+        with _dag():
+            task = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
+        submitted, _ = self._capture_submissions(monkeypatch, task)
+        context = dict(_fake_context(), params={"sl_reject_max_records": 2500})
+        rendered, _ = _render_and_execute(task, "overrides", context)
+        assert submitted == [StarlakeAirflowJob._sl_sentinel_substitute_payload(rendered, context)]
+        env = {item["name"]: item["value"] for item in submitted[0]["container_overrides"][0]["env"]}
+        assert env["SL_REJECT_MAX_RECORDS"] == "2500"
+
+    def test_a_rerun_of_the_same_operator_submits_its_own_run(self, monkeypatch):
+        """Each rendering starts from the pristine template: running the same
+        operator object again (dag.test() twice in-process) submits the
+        second run's scope and values, never the first run's."""
+        options = dict(
+            self.GS_OPTIONS, cloud_run_async="false", use_gcloud="false",
+            sl_env_var=json.dumps({"SL_REJECT_MAX_RECORDS": REJECT_MAX_RECORDS_JINJA}),
+        )
+        with _dag():
+            task = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
+        submitted, _ = self._capture_submissions(monkeypatch, task)
+        runs = (("manual__1", 1), ("manual__2", 2))
+        for run_id, max_records in runs:
+            context = dict(_fake_context(run_id=run_id), params={"sl_reject_max_records": max_records})
+            _render_and_execute(task, "overrides", context)
+        for (run_id, max_records), overrides in zip(runs, submitted):
+            container = overrides["container_overrides"][0]
+            env = {item["name"]: item["value"] for item in container["env"]}
+            assert env["SL_REJECT_MAX_RECORDS"] == str(max_records)
+            args = container["args"]
+            assert args[args.index("--notReadySentinel") + 1] == (
+                f"gs://bucket/sentinels/starbake/{sanitize_scope(f'my_dag__wait_for__{run_id}')}.notready"
+            )
+
+    TEMPLATED_PREFIX = "gs://bucket/{{ params.env | default('prod') }}/sentinels"
+
+    def test_templated_prefix_is_written_and_polled_at_the_same_path(self, monkeypatch):
+        options = dict(
+            CLOUD_RUN_OPTIONS, cloud_run_async="false", use_gcloud="false",
+            **{SENTINEL_OPTION: self.TEMPLATED_PREFIX},
+        )
+        with _dag():
+            task = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
+        expected = "gs://bucket/dev/sentinels/starbake/my_dag__wait_for__scheduled__2026-07-18T00:00:00+00:00.notready"
+        submitted, store = self._capture_submissions(monkeypatch, task, store={expected})
+        _, result = _render_and_execute(task, "overrides", dict(_fake_context(), params={"env": "dev"}))
+        args = submitted[0]["container_overrides"][0]["args"]
+        assert args[args.index("--notReadySentinel") + 1] == expected  # where the CLI writes it
+        assert result is False  # found there: NOT READY
+        assert store == set()   # and consumed
+
+    def test_async_completion_sensor_polls_the_rendered_path(self):
+        options = dict(
+            CLOUD_RUN_OPTIONS, cloud_run_async="true", use_gcloud="false",
+            **{SENTINEL_OPTION: self.TEMPLATED_PREFIX},
+        )
+        with _dag():
+            group = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
+        tasks = {t.task_id.split(".")[-1]: t for t in group}
+        context = dict(_fake_context(), params={"env": "dev"})
+        for task in tasks.values():
+            task.render_template_fields(dict(context, dag=task.dag))
+        expected = f"gs://bucket/dev/sentinels/starbake/{SENTINEL_SCOPE_TOKEN}.notready"
+        assert tasks["check_starbake_incoming_files_check_completion"].sentinel_path == expected
+        args = tasks["check_starbake_incoming_files"].overrides["container_overrides"][0]["args"]
+        assert args[args.index("--notReadySentinel") + 1] == expected
+
 
 # ---------------------------------------------------------------------------
 # 8. Provider-guarded — dataproc
@@ -905,6 +1134,56 @@ class TestDataprocSentinel:
         # definition-time payload still carries the token — substitution is
         # execute-time (token-leak covered by the substitution test below)
         assert SENTINEL_SCOPE_TOKEN in json.dumps(task.job["spark_job"]["args"])
+
+    def test_sync_operator_submits_the_rendered_job(self, monkeypatch):
+        """Issue #162 — the job the sentinel preload submits is rendered like
+        the job field Airflow rendered in place."""
+        from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
+        from ai.starlake.airflow import StarlakeAirflowJob
+        from ai.starlake.job import TaskType
+        sentinel = f"gs://bucket/sentinels/starbake/{SENTINEL_SCOPE_TOKEN}.notready"
+        options = dict(DATAPROC_OPTIONS, **{SENTINEL_OPTION: "gs://bucket/sentinels"})
+        with _dag():
+            task = self._cluster(options).submit_starlake_job(
+                task_id="preload_task",
+                arguments=["preload", "--domain", "starbake", "--strategy", "imported",
+                           "--options", f"rejectMaxRecords={REJECT_MAX_RECORDS_JINJA}",
+                           "--notReadySentinel", sentinel],
+                task_type=TaskType.PRELOAD,
+                sentinel_path=sentinel,
+            )
+        seen = {}
+
+        def fake_execute(self, context):
+            seen["job"] = self.job
+            return "job-1"
+
+        monkeypatch.setattr(DataprocSubmitJobOperator, "execute", fake_execute)
+        monkeypatch.setattr(
+            type(task), "_sl_sentinel_hook_handlers",
+            lambda self: ((lambda p: False), (lambda p: None)),
+        )
+        context = dict(_fake_context(), params={"sl_reject_max_records": 2500})
+        rendered, result = _render_and_execute(task, "job", context)
+        assert result is True
+        assert seen["job"] == StarlakeAirflowJob._sl_sentinel_substitute_payload(rendered, context)
+        assert "rejectMaxRecords=2500" in seen["job"]["spark_job"]["args"]
+
+    def test_templated_prefix_is_rendered_where_it_is_polled(self):
+        from ai.starlake.job import TaskType
+        sentinel = f"gs://bucket/{{{{ params.env | default('prod') }}}}/sentinels/starbake/{SENTINEL_SCOPE_TOKEN}.notready"
+        options = dict(DATAPROC_OPTIONS, **{SENTINEL_OPTION: "gs://bucket/sentinels"})
+        with _dag():
+            task = self._cluster(options).submit_starlake_job(
+                task_id="preload_task",
+                arguments=["preload", "--domain", "starbake", "--notReadySentinel", sentinel],
+                task_type=TaskType.PRELOAD,
+                sentinel_path=sentinel,
+            )
+        task.render_template_fields(dict(_fake_context(), params={"env": "dev"}, dag=task.dag))
+        expected = f"gs://bucket/dev/sentinels/starbake/{SENTINEL_SCOPE_TOKEN}.notready"
+        assert task.sentinel_path == expected
+        assert task.job["spark_job"]["args"][-1] == expected
 
     def test_s3_prefix_rejected_on_dataproc(self):
         from ai.starlake.job import TaskType
@@ -982,6 +1261,61 @@ class TestFargateSentinel:
         )
         assert task.execute(_fake_context()) is True
         assert SENTINEL_SCOPE_TOKEN not in json.dumps(seen["overrides"])
+
+    def test_sync_operator_submits_the_rendered_overrides(self, monkeypatch):
+        """Issue #162 — the sentinel preload sends the env Airflow rendered in
+        overrides, not the raw Jinja of a templated sl_env_var."""
+        from airflow.providers.amazon.aws.operators.ecs import EcsRunTaskOperator
+        from ai.starlake.airflow import StarlakeAirflowJob
+        options = dict(
+            self.S3_OPTIONS, fargate_async="false",
+            sl_env_var=json.dumps({"SL_REJECT_MAX_RECORDS": REJECT_MAX_RECORDS_JINJA}),
+        )
+        with _dag():
+            task = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
+        assert REJECT_MAX_RECORDS_JINJA in json.dumps(task.overrides)
+        seen = {}
+
+        def fake_execute(self, context):
+            seen["overrides"] = self.overrides
+            return None
+
+        monkeypatch.setattr(EcsRunTaskOperator, "execute", fake_execute)
+        monkeypatch.setattr(
+            type(task), "_sl_sentinel_hook_handlers",
+            lambda self: ((lambda p: False), (lambda p: None)),
+        )
+        context = dict(_fake_context(), params={"sl_reject_max_records": 2500})
+        rendered, result = _render_and_execute(task, "overrides", context)
+        assert result is True
+        assert seen["overrides"] == StarlakeAirflowJob._sl_sentinel_substitute_payload(rendered, context)
+        environment = {
+            item["name"]: item["value"]
+            for container in seen["overrides"]["containerOverrides"]
+            for item in container.get("environment", [])
+        }
+        assert environment["SL_REJECT_MAX_RECORDS"] == "2500"
+
+    def test_templated_prefix_is_rendered_wherever_it_is_polled(self):
+        options = dict(
+            FARGATE_OPTIONS, fargate_async="true",
+            **{SENTINEL_OPTION: "s3://bucket/{{ params.env | default('prod') }}/sentinels"},
+        )
+        with _dag():
+            group = self._job(options).sl_pre_load(domain="starbake", tables={"customers"})
+        tasks = {t.task_id.split(".")[-1]: t for t in group}
+        submission = tasks["check_starbake_incoming_files"]
+        completion = tasks["check_starbake_incoming_files_check_completion"]
+        # the task ARN is an XComArg resolved at runtime — not under test here
+        completion.task = "arn:task"
+        context = dict(_fake_context(), params={"env": "dev"})
+        for task in (submission, completion):
+            task.render_template_fields(dict(context, dag=task.dag))
+        expected = f"s3://bucket/dev/sentinels/starbake/{SENTINEL_SCOPE_TOKEN}.notready"
+        assert submission.sentinel_path == expected
+        assert completion.sentinel_path == expected
+        command = submission.overrides["containerOverrides"][0]["command"]
+        assert command[command.index("--notReadySentinel") + 1] == expected
 
     def test_sync_operator_failure_raises_with_sentinel(self, monkeypatch):
         from airflow.providers.amazon.aws.operators.ecs import EcsRunTaskOperator
