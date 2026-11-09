@@ -678,12 +678,26 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
         # only; None otherwise.
         self.pre_load_wait = pre_load_wait
         # story 6.12 (issue #122) — not-ready sentinel (preload only). The
-        # pristine payload TEMPLATE is captured at ctor time: substitution
-        # always starts from it, so a second run of the same operator object
-        # (dag.test() twice in-process) can never submit the previous run's
-        # scope while polling its own path.
+        # pristine payload TEMPLATE is captured at ctor time: every rendering
+        # starts from it (render_template_fields), so a second run of the same
+        # operator object (dag.test() twice in-process) can never submit the
+        # previous run's scope while polling its own path.
         self.sentinel_path = sentinel_path
         self._sl_sentinel_overrides_template = copy.deepcopy(self.overrides) if sentinel_path else None
+        if sentinel_path:
+            # issue #162 — the polled path is rendered like the overrides
+            # that carry it as --notReadySentinel: with a templated prefix,
+            # the CLI would write the marker at the rendered path and the
+            # probe read the raw one (never found → false READY)
+            self.template_fields = tuple(self.template_fields) + ("sentinel_path",)
+
+    def render_template_fields(self, context: Context, jinja_env=None) -> None:
+        # issue #162 — sentinel mode: Airflow renders the overrides from the
+        # pristine template, once per attempt, and execute substitutes the
+        # scope into what it rendered (templated sl_env_var values included)
+        if self._sl_sentinel_overrides_template is not None:
+            self.overrides = copy.deepcopy(self._sl_sentinel_overrides_template)
+        return super().render_template_fields(context, jinja_env)
 
     def _sl_sentinel_hook_handlers(self):
         """GCSHook-based sentinel handlers honoring this operator's
@@ -696,12 +710,13 @@ class CloudRunJobOperator(StarlakeDatasetMixin, CloudRunExecuteJobOperator):
     def execute(self, context: Context):
         logger = logging.getLogger(__name__)
         # story 6.12 — runtime scope substitution into the submitted payload
-        # (the --notReadySentinel arg travels in overrides); per-attempt and
-        # idempotent (the token is gone after the first application); a
-        # token-leak test pins that the token never reaches a submission
+        # (the --notReadySentinel arg travels in overrides); a token-leak test
+        # pins that the token never reaches a submission. Issue #162 — it is
+        # applied to the overrides Airflow rendered, never to the raw
+        # template: the container gets the rendered env
         if self.preload and self.sentinel_path:
             self.overrides = StarlakeAirflowJob._sl_sentinel_substitute_payload(
-                self._sl_sentinel_overrides_template, context
+                self.overrides, context
             )
         # story 6.5 (issue #93) — deferrable pre-load waiting: submit + defer via
         # the native CloudRunExecuteJobOperator (self.deferrable=True), the
@@ -836,6 +851,10 @@ class CloudRunJobCompletionSensor(StarlakeDatasetMixin, BaseSensorOperator):
         self.preload = preload
         # story 6.12 (issue #122) — not-ready sentinel (preload only)
         self.sentinel_path = sentinel_path
+        if sentinel_path:
+            # issue #162 — rendered like the submission's --notReadySentinel
+            # arg, or a templated prefix is polled at its raw path
+            self.template_fields = tuple(self.template_fields) + ("sentinel_path",)
 
     def poke(self, context: Context):
         hook = CloudRunHook(

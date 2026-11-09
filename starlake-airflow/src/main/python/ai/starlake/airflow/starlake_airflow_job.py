@@ -1701,6 +1701,12 @@ class StarlakeCloudPreloadSensor(StarlakeDatasetMixin, BaseSensorOperator):
         self._sentinel_path = sentinel_path
         self._sentinel_handlers = sentinel_handlers
         self.template_fields = tuple(getattr(self, "template_fields", ()) or ()) + ("sl_payload",)
+        if sentinel_path:
+            # issue #162 — the polled path is rendered like the payload that
+            # carries it as --notReadySentinel: with a templated prefix, the
+            # CLI would write the marker at the rendered path and the probe
+            # read the raw one (never found → false READY)
+            self.template_fields += ("_sentinel_path",)
 
     def poke(self, context) -> Optional[PokeReturnValue]:
         payload = self.sl_payload
