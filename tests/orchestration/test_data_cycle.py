@@ -75,3 +75,95 @@ class TestDataCycleNormalization:
         crash the start task at the first triggered run."""
         with pytest.raises(ValueError, match="Invalid data cycle"):
             _job({"data_cycle_enabled": "true", "data_cycle": "not-a-cron"})
+
+
+class TestDataCycleDeclared:
+    """Issue #167 — only a cycle declared by the data_cycle option states the
+    period of the data; the default one, assigned from the pipeline's computed
+    cron, carries the hour of one dependency's cron."""
+
+    def test_declared_by_the_option(self):
+        assert _job({"data_cycle_enabled": "true", "data_cycle": "monthly"}).data_cycle_declared
+
+    def test_not_declared_without_the_option(self):
+        assert not _job({"data_cycle_enabled": "true"}).data_cycle_declared
+
+    def test_not_declared_when_disabled(self):
+        assert not _job({"data_cycle": "monthly"}).data_cycle_declared
+
+    def test_the_default_cycle_of_the_pipeline_is_not_declared(self, stub_schedule):
+        from tests.orchestration.conftest import StubOrchestration
+        job = _job({"data_cycle_enabled": "true"})
+        orchestration = StubOrchestration(job=job)
+        with orchestration:
+            with orchestration.sl_create_pipeline(schedule=stub_schedule):
+                pass
+        assert job.data_cycle == stub_schedule.cron
+        assert not job.data_cycle_declared
+        assert not job.data_cycle_mode("0 0 * * *")
+
+
+class TestFiresInEveryPeriod:
+    @pytest.mark.parametrize(
+        ("cron", "data_cycle", "expected"),
+        [
+            ("0 6 1-3 * *", "0 0 1 * *", True),   # three attempts of one monthly delivery
+            ("0 6 * * 1-5", "0 0 * * 0", True),   # five attempts of one weekly delivery
+            ("0 6 * * 1-5", "0 0 * * *", False),  # weekends: five daily deliveries
+            ("0 6 2 1 *", "0 0 1 * *", False),    # yearly
+            ("0 6 29 * *", "0 0 1 * *", False),   # no 29 February in common years
+            ("0 6 2 * *", "0 0 1 * *", True),     # once per period
+            ("0 6 * * *", "0 0 * * *", True),
+            ("0 6 1,2 1 *", "0 0 1 * *", False),  # twice in January, never after
+            # a tick on the period's end closes the period that ends there: a
+            # dependency firing only on the data-cycle ticks keeps its window
+            ("0 0 1 * *", "0 0 1 * *", False),
+            ("0 0 * * *", "0 0 * * *", False),
+            ("0 6 1-3 * *", "0 6 1-3 * *", False),  # the data cycle itself
+            ("0 0 1,15 * *", "0 0 1 * *", True),    # the 15th lies inside every period
+            ("0 6 1-3 * *", "0 0 1 * * * 2030", False),  # no period in the reference span
+            (None, "0 0 1 * *", False),
+            ("0 6 * * *", None, False),
+            ("not a cron", "0 0 1 * *", False),
+        ],
+    )
+    def test_mode_table(self, cron, data_cycle, expected):
+        from ai.starlake.common import fires_in_every_period
+        assert fires_in_every_period(cron, data_cycle) is expected
+
+    def test_never_reads_the_wall_clock(self, monkeypatch):
+        import ai.starlake.common as common
+
+        def wall_clock(*args, **kwargs):
+            raise AssertionError("get_cron_frequency measures the gaps from now")
+
+        monkeypatch.setattr(common, "get_cron_frequency", wall_clock)
+        common.fires_in_every_period.cache_clear()
+        assert common.fires_in_every_period("0 6 1-3 * *", "0 0 1 * *")
+        assert not common.fires_in_every_period("0 6 2 1 *", "0 0 1 * *")
+
+
+class TestDataCycleMode:
+    def test_declared_cycle_and_a_dependency_firing_in_every_period(self):
+        job = _job({"data_cycle_enabled": "true", "data_cycle": "monthly"})
+        assert job.data_cycle_mode("0 6 1-3 * *")
+        assert not job.data_cycle_mode("0 6 2 1 *")
+        assert not job.data_cycle_mode(None)
+
+    def test_without_data_cycle(self):
+        assert not _job({"data_cycle": "monthly"}).data_cycle_mode("0 6 1-3 * *")
+        assert not _job({}).data_cycle_mode("0 6 1-3 * *")
+
+
+class TestDataCycleWindow:
+    def test_from_the_start_of_the_period_that_holds_the_anchor(self):
+        from datetime import datetime, timezone
+        from ai.starlake.common import data_cycle_window
+        anchor = datetime(2026, 12, 2, 6, tzinfo=timezone.utc)
+        assert data_cycle_window("0 0 1 * *", anchor) == (datetime(2026, 12, 1, tzinfo=timezone.utc), anchor)
+
+    def test_an_anchor_on_a_tick_closes_the_period_that_ends_there(self):
+        from datetime import datetime, timezone
+        from ai.starlake.common import data_cycle_window
+        anchor = datetime(2026, 12, 1, tzinfo=timezone.utc)
+        assert data_cycle_window("0 0 1 * *", anchor) == (datetime(2026, 11, 1, tzinfo=timezone.utc), anchor)

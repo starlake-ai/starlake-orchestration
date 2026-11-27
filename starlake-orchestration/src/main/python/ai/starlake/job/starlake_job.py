@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from ai.starlake.common import MissingEnvironmentVariable, StarlakeCronPeriod, is_valid_cron, sl_schedule_format
+from ai.starlake.common import MissingEnvironmentVariable, StarlakeCronPeriod, fires_in_every_period, is_valid_cron, sl_schedule_format
 
 from ai.starlake.job.starlake_pre_load_strategy import StarlakePreLoadStrategy
 from ai.starlake.job.starlake_options import StarlakeOptions
@@ -215,6 +215,10 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
         # ValueError at parse time) and forces None when the feature is off.
         self.__data_cycle = None
         self.data_cycle = str(__class__.get_context_var(var_name='data_cycle', default_value="none", options=self.options))
+        # issue #167 — a cycle declared by the option, as opposed to the default
+        # one that the pipeline assigns later from its computed cron
+        # (set_cron_expr): only a declared cycle states the period of the data
+        self.__data_cycle_declared = self.data_cycle is not None
         self.__beyond_data_cycle_enabled = str(__class__.get_context_var(var_name='beyond_data_cycle_enabled', default_value="true", options=self.options)).strip().lower() == "true"
         self.__min_timedelta_between_runs = int(__class__.get_context_var(var_name='min_timedelta_between_runs', default_value=15*60, options=self.options))
         self.__run_dependencies_first = __class__.get_context_var(var_name='run_dependencies_first', default_value='False', options=self.options).lower() == 'true'
@@ -276,6 +280,22 @@ class IStarlakeJob(Generic[T, E], StarlakeOptions, AbstractEvent[E]):
                 raise ValueError(f"Invalid data cycle value: {data_cycle}")
         else:
             self.__data_cycle = None
+
+    @property
+    def data_cycle_declared(self) -> bool:
+        """Whether the data cycle was declared by the data_cycle option (with
+        data_cycle_enabled), rather than defaulted to the pipeline's computed
+        cron (issue #167)."""
+        return self.__data_cycle_declared
+
+    def data_cycle_mode(self, cron: Optional[str]) -> bool:
+        """Whether the dependency scheduled by `cron` is checked in data-cycle
+        mode (issue #167): the data cycle is declared and the dependency fires
+        in every period of it. Its events are then admitted within
+        data_cycle_window(data_cycle, anchor), and neither
+        optional_dataset_enabled nor beyond_data_cycle_enabled applies to it.
+        Any other dependency keeps its own schedule window (dataset mode)."""
+        return self.data_cycle_declared and fires_in_every_period(cron, self.data_cycle)
 
     @property
     def beyond_data_cycle_enabled(self) -> bool:

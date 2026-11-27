@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 
+import functools
+
 import re
 
 from croniter import croniter
@@ -258,3 +260,100 @@ def scheduled_dates_range(cron: str, scheduled_date: datetime) -> Tuple[datetime
         scheduled_date_to_check_max = previous
     scheduled_date_to_check_min = croniter(cron, scheduled_date_to_check_max).get_prev(datetime)
     return (scheduled_date_to_check_min, scheduled_date_to_check_max)
+
+# The reference span over which fires_in_every_period walks the periods of a
+# data cycle: from 1 January 2001 (UTC), within the 28 years of a full cycle of
+# weekdays and leap years, cut after DATA_CYCLE_REFERENCE_MAX_PERIODS periods
+# (about five years of a daily cycle, 83 days of an hourly one).
+DATA_CYCLE_REFERENCE_START = datetime(2001, 1, 1, tzinfo=pytz.UTC)
+DATA_CYCLE_REFERENCE_END = datetime(2029, 1, 1, tzinfo=pytz.UTC)
+DATA_CYCLE_REFERENCE_MAX_PERIODS = 2000
+
+@functools.lru_cache(maxsize=256)
+def fires_in_every_period(cron: Optional[str], data_cycle: Optional[str]) -> bool:
+    """Whether `cron` fires at least once inside every period (tick, next tick]
+    of the `data_cycle` cron (issue #167): "0 6 1-3 * *" in a monthly cycle (three
+    attempts of one monthly delivery), "0 6 * * *" in a daily one, but neither
+    "0 6 * * 1-5" in a daily cycle (weekends) nor "0 6 29 * *" in a monthly one
+    (February).
+
+    A tick on the period's end does not count: it closes the period that ends
+    there, so an event dated on a data-cycle tick belongs to that period, and a
+    dependency that fires only on the data-cycle ticks ("0 0 1 * *" in a monthly
+    cycle, or the data cycle itself) would never have an event in the window of
+    an anchor that follows the tick. Such a dependency keeps its own schedule
+    window (dataset mode).
+
+    The periods of the reference span are walked one by one, so the result
+    never depends on the wall clock: comparing the gaps between ticks would,
+    and would fail either way (the largest gap of "0 6 1-3 * *", 29 days, is
+    longer than February; the smallest gap of "0 6 1,2 1 *" is one day, although
+    it misses eleven months)."""
+    if not cron or not data_cycle or not is_valid_cron(cron) or not is_valid_cron(data_cycle):
+        return False
+    cycle = croniter(data_cycle, DATA_CYCLE_REFERENCE_START)
+    period_start = cycle.get_next(datetime)
+    periods = 0
+    for _ in range(DATA_CYCLE_REFERENCE_MAX_PERIODS):
+        period_end = cycle.get_next(datetime)
+        if period_end > DATA_CYCLE_REFERENCE_END:
+            break
+        if croniter(cron, period_start).get_next(datetime) >= period_end:
+            return False
+        periods += 1
+        period_start = period_end
+    # a cycle without a single period in the reference span (a cron restricted
+    # to other years) proves nothing
+    return periods > 0
+
+def data_cycle_window(data_cycle: str, anchor: datetime) -> Tuple[datetime, datetime]:
+    """The window (min, max] in which a dependency checked in data-cycle mode
+    has its events admitted (issue #167): from the start of the data-cycle
+    period that holds the anchor (the run's scheduled date) up to the anchor.
+    The period start is the latest data-cycle tick strictly before the anchor,
+    so an anchor exactly on a tick belongs to the period that ends there, like
+    the (previous tick, current tick] windows of scheduled_dates_range."""
+    return (croniter(data_cycle, anchor).get_prev(datetime), anchor)
+
+# The unit labels of scala.concurrent.duration.Duration, with which Starlake
+# core reads a freshness duration, in nanoseconds: the first label of each unit
+# has no plural form, the others also accept a trailing "s".
+_DURATION_UNIT_NANOS: Dict[str, int] = {}
+for _nanos, _labels in (
+    (86_400_000_000_000, "d day"),
+    (3_600_000_000_000, "h hr hour"),
+    (60_000_000_000, "m min minute"),
+    (1_000_000_000, "s sec second"),
+    (1_000_000, "ms milli millisecond"),
+    (1_000, "µs micro microsecond"),
+    (1, "ns nano nanosecond"),
+):
+    _first, *_others = _labels.split()
+    _DURATION_UNIT_NANOS[_first] = _nanos
+    for _label in _others:
+        _DURATION_UNIT_NANOS[_label] = _DURATION_UNIT_NANOS[_label + "s"] = _nanos
+
+_DURATION_NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+_DURATION_MAX_NANOS = 2**63 - 1
+
+def freshness_seconds(error: Optional[str]) -> int:
+    """The seconds of a freshness `error` duration (e.g. "2 days"), computed
+    as Starlake core's Freshness.acceptability() does (issue #166):
+    Duration(error).toSeconds, never below 0, and 0 when no duration is
+    declared. Same grammar as scala.concurrent.duration.Duration: whitespace
+    ignored, a number followed by a unit label, rounded to the nanosecond, then
+    truncated to the second.
+
+    :raise ValueError: if the duration does not follow that grammar.
+    """
+    if not error:
+        return 0
+    text = "".join(str(error).split())
+    unit = re.search(r"[^\W\d_]*$", text).group(0)
+    number = text[:len(text) - len(unit)]
+    nanos_per_unit = _DURATION_UNIT_NANOS.get(unit)
+    nanos = round(float(number) * nanos_per_unit) if nanos_per_unit and _DURATION_NUMBER.fullmatch(number) else None
+    # Duration counts nanoseconds in a Long
+    if nanos is None or abs(nanos) > _DURATION_MAX_NANOS:
+        raise ValueError(f"Invalid freshness duration: {error!r} (expected a number followed by a unit, e.g. '2 days')")
+    return max(nanos // 1_000_000_000, 0)

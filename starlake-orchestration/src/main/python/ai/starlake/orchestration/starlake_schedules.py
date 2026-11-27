@@ -16,20 +16,36 @@
 
 from __future__ import annotations
 
-from ai.starlake.common import is_valid_cron
+from ai.starlake.common import freshness_seconds, is_valid_cron
+
+import logging
 
 from typing import List, Optional
 
 class StarlakeTable():
-    def __init__(self, name: str, final_name: Optional[str] = None, **kwargs):
+    def __init__(self, name: str, final_name: Optional[str] = None, freshness: Optional[str] = None, **kwargs):
         """Initializes a new StarlakeTable instance.
 
         Args:
             name (str): The required table name.
             final_name (str): The optional final table name.
+            freshness (str): The optional freshness `error` duration of the
+                table, or of its domain when the table declares no freshness
+                (e.g. "2 days"), or a number of seconds. Stored in seconds: the
+                load event of the table publishes it (issue #166). An invalid
+                duration publishes 0, as before, with a warning: it must not
+                keep the whole DAG file from loading.
         """
         self.name = name
         self.final_name = name if final_name is None else final_name
+        if isinstance(freshness, (int, float)) and not isinstance(freshness, bool):
+            self.freshness: int = max(int(freshness), 0)
+        else:
+            try:
+                self.freshness = freshness_seconds(freshness)
+            except ValueError as e:
+                logging.getLogger(__name__).warning(f"{e} for table {name}: its load event publishes freshness 0")
+                self.freshness = 0
 
 class StarlakeDomain():
     def __init__(self, name: str, final_name: str, tables: List[StarlakeTable], **kwargs):

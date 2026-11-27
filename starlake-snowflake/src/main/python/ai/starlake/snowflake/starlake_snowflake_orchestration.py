@@ -71,9 +71,10 @@ class SnowflakeDag(DAG):
         data_cycle: Optional[str] = None,
         optional_dataset_enabled: bool = False,
         beyond_data_cycle_enabled: bool = False,
-        ai_zip: str = None
+        ai_zip: str = None,
+        data_cycle_mode: Optional[Callable[[Optional[str]], bool]] = None
     ) -> None:
-        from ai.starlake.common import is_valid_cron, get_cron_frequency, scheduled_dates_range
+        from ai.starlake.common import is_valid_cron, get_cron_frequency, scheduled_dates_range, data_cycle_window
         from ai.starlake.helper import datetime_format, SnowflakeDAGHelper
 
 
@@ -125,6 +126,17 @@ class SnowflakeDag(DAG):
                     streams.add(f"SYSTEM$STREAM_HAS_DATA('{dataset.stream}')")
                 elif not schedule:
                     datasets.update({dataset.sink: (dataset.cron, dataset.freshness)})
+
+        # issue #167 — the datasets checked in data-cycle mode, decided here, at
+        # DAG build time, by the job's rule (data_cycle_mode: the data cycle is
+        # declared and the dataset's own cron fires in every period of it). The
+        # crons are known now: the root task only receives the resulting sinks,
+        # serialized with its closure, and never walks the periods at run time
+        data_cycle_mode_datasets = set()
+        if data_cycle_mode and data_cycle and data_cycle.lower() != "none":
+            data_cycle_mode_datasets = {dataset for dataset, (original_cron, _) in datasets.items() if data_cycle_mode(original_cron)}
+            if data_cycle_mode_datasets:
+                info(f"Datasets checked in data-cycle mode ({data_cycle}): {','.join(sorted(data_cycle_mode_datasets))}", dry_run=False)
 
         if streams:
             condition = ' OR '.join(streams)
@@ -210,8 +222,23 @@ class SnowflakeDag(DAG):
                         if not dry_run:
                             skipped = True
 
+            def scheduled_since(previous_scheduled_time: datetime, windows: dict) -> bool:
+                """Whether a dataset has an event in its window scheduled after
+                the scheduled date of the previous successful run (the end of
+                the period of the computed cron that holds its scheduled time,
+                as step 2 computes it). Compared in the audit query, like the
+                windows themselves."""
+                previous_scheduled_date = get_start_end_dates(computed_cron_expr, previous_scheduled_time)[1] if computed_cron_expr else previous_scheduled_time
+                return any(
+                    find_dataset_event(session, dataset, max(window_min, previous_scheduled_date), window_max, scheduled_date, False)
+                    for dataset, (window_min, window_max) in windows.items()
+                    if previous_scheduled_date < window_max
+                )
+
             if not skipped:
                 missing_datasets = []
+                # the windows in which the datasets were found
+                found_windows: dict = {}
 
                 data_cycle_freshness: Optional[timedelta] = None
                 if data_cycle and data_cycle.lower() != "none":
@@ -229,8 +256,16 @@ class SnowflakeDag(DAG):
                     scheduled = cron and is_valid_cron(cron)
                     optional = False
                     beyond_data_cycle_allowed = False
+                    # issue #167 — data-cycle mode: with a declared data cycle,
+                    # a dataset that fires in every period of it delivers its
+                    # data over the period; its events are admitted from the
+                    # start of the period that holds the scheduled date, never
+                    # earlier, so neither optional nor beyond_data_cycle apply
+                    # to it. Any other dataset keeps its own schedule window
+                    # (dataset mode)
+                    in_data_cycle_mode = dataset in data_cycle_mode_datasets
 
-                    if data_cycle_freshness:
+                    if data_cycle_freshness and not in_data_cycle_mode:
                         original_scheduled = original_cron and is_valid_cron(original_cron)
                         if optional_dataset_enabled:
                             # we check if the dataset is optional by comparing its freshness with that of the data cycle
@@ -242,22 +277,29 @@ class SnowflakeDag(DAG):
                             beyond_data_cycle_allowed = (original_scheduled and abs(data_cycle_freshness.total_seconds()) < abs(get_cron_frequency(original_cron).total_seconds() + freshness)) or (not original_scheduled and abs(data_cycle_freshness.total_seconds()) < freshness)
 
                     if optional:
-                        info(f"Dataset {dataset.uri} is optional, we skip it", dry_run=dry_run)
+                        info(f"Dataset {dataset} is optional, we skip it", dry_run=dry_run)
                         continue
                     elif scheduled:
-                        if not cron in most_frequent or cron.startswith('0 0') or get_cron_frequency(cron).days == 0:
-                            dates_range = scheduled_dates_range(cron, scheduled_date)
+                        if in_data_cycle_mode:
+                            # the window ends at the scheduled date, which caps
+                            # the audit lookup; freshness widens it on neither side
+                            (scheduled_date_to_check_min, scheduled_date_to_check_max) = data_cycle_window(data_cycle, scheduled_date)
+                            info(f"Dataset {dataset} fires in every period of the data cycle {data_cycle}: its events are admitted within ({scheduled_date_to_check_min.strftime(datetime_format)}, {scheduled_date_to_check_max.strftime(datetime_format)}]", dry_run=dry_run)
                         else:
-                            dates_range = scheduled_dates_range(cron, croniter(cron, scheduled_date.replace(hour=0, minute=0, second=0, microsecond=0)).get_next(datetime))
-                        scheduled_date_to_check_min = dates_range[0]
-                        scheduled_date_to_check_max = max(scheduled_date, dates_range[1]) # we check the dataset events around the scheduled date
-                        if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
-                            scheduled_date_to_check_min = previous_dag_checked
-                        if beyond_data_cycle_allowed:
-                            scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
-                            scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
+                            if not cron in most_frequent or cron.startswith('0 0') or get_cron_frequency(cron).days == 0:
+                                dates_range = scheduled_dates_range(cron, scheduled_date)
+                            else:
+                                dates_range = scheduled_dates_range(cron, croniter(cron, scheduled_date.replace(hour=0, minute=0, second=0, microsecond=0)).get_next(datetime))
+                            scheduled_date_to_check_min = dates_range[0]
+                            scheduled_date_to_check_max = max(scheduled_date, dates_range[1]) # we check the dataset events around the scheduled date
+                            if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
+                                scheduled_date_to_check_min = previous_dag_checked
+                            if beyond_data_cycle_allowed:
+                                scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
+                                scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
                         if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, False):
                             info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
+                            found_windows[dataset] = (scheduled_date_to_check_min, scheduled_date_to_check_max)
                         else:
                             warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
                             missing_datasets.append(dataset)
@@ -267,6 +309,7 @@ class SnowflakeDag(DAG):
                         scheduled_date_to_check_max = scheduled_date + timedelta(seconds=freshness)
                         if find_dataset_event(session, dataset, scheduled_date_to_check_min, scheduled_date_to_check_max, scheduled_date, False):
                             info(f"Dataset {dataset} has been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
+                            found_windows[dataset] = (scheduled_date_to_check_min, scheduled_date_to_check_max)
                         else:
                             warning(f"Dataset {dataset} has not been found in the audit table between {scheduled_date_to_check_min.strftime(datetime_format)} and {scheduled_date_to_check_max.strftime(datetime_format)}", dry_run=dry_run)
                             missing_datasets.append(dataset)
@@ -274,6 +317,17 @@ class SnowflakeDag(DAG):
                 if missing_datasets:
                     warning(f"The following datasets are missing: {', '.join(missing_datasets)}, the current DAG execution will be skipped", dry_run=dry_run)
                     skipped = True
+                elif data_cycle_mode_datasets and previous_dag_run and not manual and not backfill and not scheduled_since(previous_dag_checked, found_windows):
+                    # issue #167 — the root task polls instead of consuming
+                    # events: in the cycle window, the events that ran the DAG
+                    # earlier in the period satisfy every later tick of it. Run
+                    # again only when a dataset has an event scheduled after the
+                    # previous successful run's scheduled date, as an
+                    # orchestrator triggered by events would; a manual run or a
+                    # backfill is not guarded
+                    warning(f"No dataset has an event scheduled after the scheduled date of the previous successful run, the current DAG execution will be skipped", dry_run=dry_run)
+                    if not dry_run:
+                        skipped = True
                 elif datasets:
                     info(f"All datasets are present: {', '.join(datasets.keys())}, the current DAG will continue its execution", dry_run=dry_run)
                 else:
@@ -321,6 +375,7 @@ class SnowflakeDag(DAG):
         self._definition = definition
         self._condition = condition
         self._datasets = datasets
+        self._data_cycle_mode_datasets = data_cycle_mode_datasets
         self._streams = streams
         self._not_scheduled_streams = not_scheduled_streams
         self._timezone = timezone
@@ -360,6 +415,12 @@ class SnowflakeDag(DAG):
     @property
     def datasets(self) -> dict[str, str]:
         return self._datasets
+
+    @property
+    def data_cycle_mode_datasets(self) -> set[str]:
+        """The datasets that the root task checks in data-cycle mode (issue
+        #167), a subset of `datasets`: empty unless the data cycle is declared."""
+        return self._data_cycle_mode_datasets
 
     @property
     def streams(self) -> set[str]:
@@ -436,6 +497,8 @@ class SnowflakePipeline(AbstractPipeline[SnowflakeDag, DAGTask, List[DAGTask], S
             optional_dataset_enabled=job.optional_dataset_enabled,
             beyond_data_cycle_enabled=job.beyond_data_cycle_enabled,
             ai_zip=job.ai_zip,
+            # evaluated at DAG build time only, never serialized with the root task
+            data_cycle_mode=job.data_cycle_mode,
         )
 
     def __enter__(self):

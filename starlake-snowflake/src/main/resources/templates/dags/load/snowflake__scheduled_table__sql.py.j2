@@ -41,7 +41,9 @@ schedules= [{% for schedule in context.schedules %}
                 tables=[{% for table in domain.tables %}
                     StarlakeTable(
                         name='{{ table.final_name }}', 
-                        final_name='{{ table.final_name }}'
+                        final_name='{{ table.final_name }}'{# issue #166 — the freshness published by the load event: the table's, or its domain's when the table declares none (Starlake core's rule) #}{% if schedule.rawDomains is not none %}{% for raw_domain in schedule.rawDomains %}{% if raw_domain.name == domain.name %}{% for raw_table in raw_domain.tables %}{% if raw_table.name == table.name %}{% if raw_table.metadata is not none and raw_table.metadata.freshness is not none %}{% if raw_table.metadata.freshness.error is not none %}, 
+                        freshness='{{ raw_table.metadata.freshness.error }}'{% endif %}{% elif raw_domain.metadata is not none and raw_domain.metadata.freshness is not none and raw_domain.metadata.freshness.error is not none %}, 
+                        freshness='{{ raw_domain.metadata.freshness.error }}'{% endif %}{% endif %}{% endfor %}{% endif %}{% endfor %}{% endif %}
                     ){% if not loop.last  %},{% endif %}{% endfor %}
                 ]
             ){% if not loop.last  %},{% endif %}{% endfor %}
