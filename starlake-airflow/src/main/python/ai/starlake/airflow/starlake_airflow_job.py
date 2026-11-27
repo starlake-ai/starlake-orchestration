@@ -26,7 +26,7 @@ from ai.starlake.airflow.starlake_airflow_options import StarlakeAirflowOptions
 
 from ai.starlake.airflow.starlake_airflow_api import DotDict, StarlakeAirflowApiClient
 
-from ai.starlake.common import MissingEnvironmentVariable, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range, sl_schedule_format
+from ai.starlake.common import MissingEnvironmentVariable, data_cycle_window, get_cron_frequency, is_valid_cron, StarlakeParameters, sl_timestamp_format, most_frequent_crons, scheduled_dates_range, sl_schedule_format
 
 from ai.starlake.job.starlake_job import StarlakeOrchestrator
 
@@ -62,6 +62,7 @@ from airflow.exceptions import AirflowException
 from airflow.models import DagRun, TaskInstance
 
 from ai.starlake.airflow.compat import Context
+
 
 import logging
 
@@ -133,7 +134,75 @@ def triggering_datasets_from_events(triggering_dataset_events) -> List[Dataset]:
                     dataset_uris.update({uri: ds})
     return list(dataset_uris.values())
 
-def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Optional[str] = None) -> str:
+# XCom key under which the start task relays the run variables of the events it
+# accepted for the declared datasets that did NOT trigger the run: the tasks only
+# receive the triggering events, so sl_options_from_events pulls this XCom and
+# merges it with them.
+SL_FOUND_OPTIONS_XCOM_KEY = "sl_found_options"
+
+def _carries_options(options: Any) -> bool:
+    """Whether a sl_options payload carries at least one key in a section:
+    merge_sl_options ignores anything else."""
+    return isinstance(options, dict) and any(isinstance(entries, dict) and entries for entries in options.values())
+
+def _carries_declarations(merge: Any) -> bool:
+    """Whether a sl_options_merge payload must take part in the merge: it
+    declares at least one key, or it is malformed (not a dict of dicts), which
+    merge_sl_options rejects, as it does for a triggering event."""
+    if merge is None:
+        return False
+    if not isinstance(merge, dict):
+        return True
+    return any(not isinstance(entries, dict) or entries for entries in merge.values())
+
+def found_event_options(uri: str, event: Any) -> Optional[dict]:
+    """The run variables carried by an event that the start task accepted for a
+    declared dataset that did not trigger the run, as the XCom entry relayed to
+    the tasks: {"uri": ..., "event_id": ..., "sl_options": {...},
+    "sl_options_merge": {...}}. None when there is nothing to relay: no
+    sl_options key in any section and no merge declaration, so that a run whose
+    accepted events carry no run variables pushes the same XComs as before. The
+    entry is converted to plain JSON values: the lookups return DotDict events,
+    and the XCom backends of both Airflow majors expect plain dicts and lists."""
+    extra = getattr(event, "extra", None) or {}
+    if not isinstance(extra, dict):
+        return None
+    options = extra.get(StarlakeParameters.OPTIONS_PARAMETER.value)
+    merge = extra.get(StarlakeParameters.OPTIONS_MERGE_PARAMETER.value)
+    if not _carries_options(options) and not _carries_declarations(merge):
+        return None
+    import json
+    return json.loads(json.dumps({
+        "uri": uri,
+        "event_id": getattr(event, "id", None),
+        StarlakeParameters.OPTIONS_PARAMETER.value: options,
+        StarlakeParameters.OPTIONS_MERGE_PARAMETER.value: merge,
+    }))
+
+def _found_options_carriers(task_instance) -> list:
+    """The (source, sections, declarations) carriers of the events the start task
+    accepted for the datasets that did not trigger the run, pulled from its
+    SL_FOUND_OPTIONS_XCOM_KEY XCom. Empty without a task instance, or when the
+    start task pushed nothing: a manual or scheduled run, a run whose datasets
+    all triggered it, or accepted events that carry no run variables."""
+    if task_instance is None:
+        return []
+    found = task_instance.xcom_pull(task_ids="start", key=SL_FOUND_OPTIONS_XCOM_KEY)
+    carriers = []
+    for entry in found or []:
+        if not isinstance(entry, dict):
+            continue
+        uri = entry.get("uri")
+        event_id = entry.get("event_id")
+        source = f"{uri} (event {event_id} accepted by the start task)" if event_id is not None else f"{uri} (accepted by the start task)"
+        carriers.append((
+            source,
+            entry.get(StarlakeParameters.OPTIONS_PARAMETER.value),
+            entry.get(StarlakeParameters.OPTIONS_MERGE_PARAMETER.value),
+        ))
+    return carriers
+
+def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Optional[str] = None, task_instance=None) -> str:
     """Jinja macro rendering the runtime starlake --options fragment carried by the
     triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in the event
     extra, as a dict of sections: {"all": {key: value}, "<domain.task>": {key: value}}).
@@ -141,13 +210,25 @@ def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Option
     section keyed by the transformation name only to that one. The fragment is
     appended last to the command's --options, whose duplicate keys are resolved
     last-wins by starlake — hence the precedence: static options < 'all' < task-specific.
+    With a task_instance (the template passes `ti`), the events that the start
+    task accepted for the declared datasets that did not trigger the run (its
+    SL_FOUND_OPTIONS_XCOM_KEY XCom) carry their run variables too: under the ANY
+    triggering strategy, the run triggered by the last dataset to arrive passes
+    the start task thanks to the earlier events it finds, and its tasks need the
+    variables of those events as well.
     Merging is fail-loud: the same key carried with different values by coalesced
-    events raises (conflicting run variables must stop the run, not silently pick
-    one), unless a producer declared the key a set of values in the event extra
+    events, or by a triggering event and an accepted one, raises (conflicting run
+    variables must stop the run, not silently pick one), unless a producer
+    declared the key a set of values in the event extra
     (StarlakeParameters.OPTIONS_MERGE_PARAMETER, policy 'union'), which merges the
-    values by union — see ai.starlake.sl_options (issue #158).
+    values by union — see ai.starlake.sl_options (issue #158). A conflict among
+    the coalesced triggering events alone keeps its message (re-trigger the runs
+    one by one); a conflict that involves an accepted event asks for a manual run
+    instead, since nothing was coalesced and clearing the run would accept the
+    same event again.
     dag_run.conf[StarlakeParameters.OPTIONS_PARAMETER] overrides events — the
-    manual-recovery escape hatch. Returns 'key=value[,key=value...]', or
+    manual-recovery escape hatch (a manual run skips the start task's check, so
+    it relays no accepted event). Returns 'key=value[,key=value...]', or
     'sl_options_applied=0' when nothing applies (never empty, so the fragment is
     always a valid --options token)."""
     carriers = []
@@ -159,14 +240,33 @@ def sl_options_from_events(triggering_dataset_events, dag_run=None, name: Option
                 extra.get(StarlakeParameters.OPTIONS_PARAMETER.value),
                 extra.get(StarlakeParameters.OPTIONS_MERGE_PARAMETER.value),
             ))
+    triggering_origin = "triggering dataset events"
+    triggering_recovery = (
+        f"Coalesced events carry different run variables — re-trigger the runs one by one, "
+        f"passing dag_run.conf['{StarlakeParameters.OPTIONS_PARAMETER.value}']."
+    )
+    found_carriers = _found_options_carriers(task_instance)
     try:
-        sections, _ = merge_sl_options(
-            carriers,
-            origin="triggering dataset events",
-            recovery=f"Coalesced events carry different run variables — re-trigger the runs one by one, "
-                     f"passing dag_run.conf['{StarlakeParameters.OPTIONS_PARAMETER.value}'].",
-        )
+        if found_carriers:
+            sections, _ = merge_sl_options(
+                carriers + found_carriers,
+                origin=f"{triggering_origin} and the events accepted by the start task",
+                # nothing was coalesced, and clearing the run would accept
+                # the same event again
+                recovery=f"The triggering events and the events accepted by the start task carry different run "
+                         f"variables — run the DAG manually, passing dag_run.conf"
+                         f"['{StarlakeParameters.OPTIONS_PARAMETER.value}'] (a manual run skips the check).",
+            )
+        else:
+            sections, _ = merge_sl_options(carriers, origin=triggering_origin, recovery=triggering_recovery)
     except ValueError as e:
+        if found_carriers:
+            # the coalesced triggering events may conflict on their own: they
+            # keep their own origin and recovery
+            try:
+                merge_sl_options(carriers, origin=triggering_origin, recovery=triggering_recovery)
+            except ValueError as triggering_error:
+                raise AirflowException(str(triggering_error)) from triggering_error
         raise AirflowException(str(e)) from e
     conf = getattr(dag_run, "conf", None) or {}
     conf_sections = conf.get(StarlakeParameters.OPTIONS_PARAMETER.value) or {}
@@ -519,6 +619,21 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                 # We also track if we found at least one dataset event if checked via API
                 found_at_least_one = False
 
+                # the run variables of the events accepted for the declared
+                # datasets that did not trigger the run: the tasks only receive
+                # the triggering events, so these are relayed to them through
+                # an XCom that sl_options_from_events merges in
+                found_options: List[dict] = []
+
+                def accept_options(uri: str, event: Any) -> None:
+                    if uri in triggering_uris:
+                        # the options of a triggering dataset already reach
+                        # the tasks through the triggering events
+                        return
+                    entry = found_event_options(uri, event)
+                    if entry is not None:
+                        found_options.append(entry)
+
                 # Iterate over all datasets that this job depends on
                 missing_datasets = []
                 max_scheduled_date = scheduled_date
@@ -618,7 +733,15 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     freshness = int(extra.get(StarlakeParameters.FRESHNESS_PARAMETER.value, 0))
                     optional = False
                     beyond_data_cycle_allowed = False
-                    if data_cycle_freshness:
+                    # issue #167 — data-cycle mode: with a declared data cycle,
+                    # a dependency that fires in every period of it delivers
+                    # its data over the period; its events are admitted from
+                    # the start of the period that holds the anchor, never
+                    # earlier, so neither optional nor beyond_data_cycle apply
+                    # to it. Any other dependency keeps its own schedule window
+                    # (dataset mode)
+                    data_cycle_mode = self.data_cycle_mode(original_cron)
+                    if data_cycle_freshness and not data_cycle_mode:
                         original_scheduled = original_cron and is_valid_cron(original_cron)
                         if self.optional_dataset_enabled:
                             # we check if the dataset is optional by comparing its freshness with that of the data cycle
@@ -633,17 +756,24 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                         print(f"Dataset {dataset.uri} is optional, we skip it")
                         continue
                     elif scheduled:
-                        if not cron in most_frequent or cron.startswith('0 0') or get_cron_frequency(cron).days == 0:
-                            dates_range = scheduled_dates_range(cron, scheduled_date)
+                        if data_cycle_mode:
+                            # the window ends at the anchor, which no triggering
+                            # event exceeds and which caps the lookup on the
+                            # producing runs; freshness widens it on neither side
+                            scheduled_date_to_check_min, scheduled_date_to_check_max = data_cycle_window(self.data_cycle, scheduled_date)
+                            print(f"Dataset {dataset.uri} fires in every period of the data cycle {self.data_cycle}: its events are admitted within ({scheduled_date_to_check_min}, {scheduled_date_to_check_max}]")
                         else:
-                            dates_range = scheduled_dates_range(cron, croniter(cron, scheduled_date.replace(hour=0, minute=0, second=0, microsecond=0)).get_next(datetime))
-                        scheduled_date_to_check_min = dates_range[0]
-                        scheduled_date_to_check_max = dates_range[1]
-                        if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
-                            scheduled_date_to_check_min = previous_dag_checked
-                        if beyond_data_cycle_allowed:
-                            scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
-                            scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
+                            if not cron in most_frequent or cron.startswith('0 0') or get_cron_frequency(cron).days == 0:
+                                dates_range = scheduled_dates_range(cron, scheduled_date)
+                            else:
+                                dates_range = scheduled_dates_range(cron, croniter(cron, scheduled_date.replace(hour=0, minute=0, second=0, microsecond=0)).get_next(datetime))
+                            scheduled_date_to_check_min = dates_range[0]
+                            scheduled_date_to_check_max = dates_range[1]
+                            if not original_cron and previous_dag_checked > scheduled_date_to_check_min:
+                                scheduled_date_to_check_min = previous_dag_checked
+                            if beyond_data_cycle_allowed:
+                                scheduled_date_to_check_min = scheduled_date_to_check_min - timedelta(seconds=freshness)
+                                scheduled_date_to_check_max = scheduled_date_to_check_max + timedelta(seconds=freshness)
                         scheduled_datetime = get_scheduled_datetime(dataset)
                         if scheduled_datetime:
                             # we check if the scheduled datetime is between the scheduled date to check min and max
@@ -676,6 +806,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                                             found = True
                                             print(f"Dataset event {event.id} for {dataset.uri} with scheduled datetime {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max} found")
                                             dataset_event = event
+                                            accept_options(dataset.uri, event)
                                             if scheduled_datetime > max_scheduled_date:
                                                 max_scheduled_date = scheduled_datetime
                                             break
@@ -697,6 +828,7 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                             event_extra = event.extra or (event.get("dataset") or {}).get("extra") or dataset.extra or {}
                             scheduled_datetime = get_scheduled_datetime(Dataset(uri=dataset.uri, extra=event_extra), strict=False)
                             print(f"Found dataset event {event.id} for {dataset.uri} published at {event.timestamp} (scheduled date {scheduled_datetime}), within ({previous_published}, {upper_published}]")
+                            accept_options(dataset.uri, event)
                             if scheduled_datetime and scheduled_datetime > max_scheduled_date:
                                 max_scheduled_date = scheduled_datetime
                         else:
@@ -710,6 +842,12 @@ class StarlakeAirflowJob(IStarlakeJob[BaseOperator, Dataset], StarlakeAirflowOpt
                     context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_START_PARAMETER.value, value=previous_dag_checked)
                     print(f"Starlake end date will be set to {max_scheduled_date}")
                     context['task_instance'].xcom_push(key=StarlakeParameters.DATA_INTERVAL_END_PARAMETER.value, value=max_scheduled_date)
+                    if found_options:
+                        # pushed only when there is something to relay: a run
+                        # whose accepted events carry no run variables pushes
+                        # the same XComs as before
+                        print(f"Run variables of the events accepted for the datasets that did not trigger the run: {found_options}")
+                        context['task_instance'].xcom_push(key=SL_FOUND_OPTIONS_XCOM_KEY, value=found_options)
                 return checked
 
             def should_continue(start_date: str = None, **context) -> bool:
@@ -1425,9 +1563,11 @@ exit 0
 
         The transform options are extended at runtime with the sl_options carried
         by the triggering dataset events (StarlakeParameters.OPTIONS_PARAMETER in
-        the event extra): the 'all' section applies to every transformation, the
-        section keyed by the transformation name only to this one. See
-        sl_options_from_events for the merge/precedence/fail-loud/union semantics.
+        the event extra) and by the events the start task accepted for the
+        declared datasets that did not trigger the run (pulled through `ti`): the
+        'all' section applies to every transformation, the section keyed by the
+        transformation name only to this one. See sl_options_from_events for the
+        merge/precedence/fail-loud/union semantics.
         (The template context key is `triggering_dataset_events` since Airflow 2.5,
         renamed `triggering_asset_events` in Airflow 3.)
 
@@ -1444,7 +1584,7 @@ exit 0
         kwargs.update({'doc': kwargs.get('doc', f'Run {transform_name} transform.')})
         kwargs.update({'pool': kwargs.get('pool', self.pool)})
         events_context_key = "triggering_asset_events" if supports_assets() else "triggering_dataset_events"
-        runtime_options = "{{sl_options_from_events(" + events_context_key + ", dag_run, '" + transform_name + "')}}"
+        runtime_options = "{{sl_options_from_events(" + events_context_key + ", dag_run, '" + transform_name + "', ti)}}"
         transform_options = ",".join(filter(None, [transform_options, runtime_options]))
         return super().sl_transform(task_id=task_id, transform_name=transform_name, transform_options=transform_options, spark_config=spark_config, dataset=dataset,  **kwargs)
 

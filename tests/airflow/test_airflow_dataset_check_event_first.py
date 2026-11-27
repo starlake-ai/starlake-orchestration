@@ -162,16 +162,20 @@ class FakeLookups:
         return [(name, kwargs) for name, kwargs in self.calls if name != "find_previous_dag_runs"]
 
 
-def declared(name: str, cron: Optional[str] = None):
+def declared(name: str, cron: Optional[str] = None, freshness: int = 0):
     from ai.starlake.dataset import StarlakeDataset
-    return StarlakeDataset(name=name, cron=cron)
+    return StarlakeDataset(name=name, cron=cron, freshness=freshness)
 
 
-def start_callable(not_scheduled=(), most_frequent=(), least_frequent=(), options=None):
-    """The start task's python_callable, built through the job's start_op seam."""
+def start_callable(not_scheduled=(), most_frequent=(), least_frequent=(), options=None, default_data_cycle=None):
+    """The start task's python_callable, built through the job's start_op seam.
+    `default_data_cycle` is assigned the way the pipeline assigns its computed
+    cron when no data cycle is declared (set_cron_expr)."""
     from ai.starlake.airflow.bash.starlake_airflow_bash_job import StarlakeAirflowBashJob
 
     job = StarlakeAirflowBashJob(filename="test_airflow.py", module_name=MODULE_NAME, options=options or {})
+    if default_data_cycle and not job.data_cycle:
+        job.data_cycle = default_data_cycle
     start = job.start_op(
         task_id="start",
         scheduled=False,
@@ -758,3 +762,371 @@ class TestNoGuardRail:
         assert should_continue(start_date=STARTED_AT.isoformat(), **context) is False
         assert lookups.event_lookups() == []
         assert pushed(context) == {}
+
+
+# ---------------------------------------------------------------------------
+# The run variables of the events accepted for the datasets that did not
+# trigger the run are relayed to the tasks
+# ---------------------------------------------------------------------------
+
+OPTIONS = StarlakeParameters.OPTIONS_PARAMETER.value
+OPTIONS_MERGE = StarlakeParameters.OPTIONS_MERGE_PARAMETER.value
+UNION = {"policy": "union", "separator": "|"}
+DAILY = "0 6 * * *"
+TRANSFORM = "my_domain.my_transform"
+ACCEPTED_RECOVERY = (
+    "The triggering events and the events accepted by the start task carry different run variables "
+    "— run the DAG manually, passing dag_run.conf['sl_options'] (a manual run skips the check)."
+)
+
+
+def found_options_key() -> str:
+    from ai.starlake.airflow.starlake_airflow_job import SL_FOUND_OPTIONS_XCOM_KEY
+    return SL_FOUND_OPTIONS_XCOM_KEY
+
+
+def with_options(event: DotDict, sections: Any = None, merge: Any = None) -> DotDict:
+    """The event as the client returns it (nested DotDicts), carrying the run
+    variables its producer published."""
+    from ai.starlake.airflow.starlake_airflow_api import to_dotdict
+    if sections is not None:
+        event["extra"][OPTIONS] = to_dotdict(sections)
+    if merge is not None:
+        event["extra"][OPTIONS_MERGE] = to_dotdict(merge)
+    return event
+
+
+def pulling(relayed: Dict[str, Any]) -> SimpleNamespace:
+    """The task instance of a transform task, pulling what the start task
+    pushed."""
+    return SimpleNamespace(
+        xcom_pull=lambda task_ids=None, key=None, **kwargs: relayed.get(key) if task_ids == "start" else None
+    )
+
+
+def triggering_events(context) -> dict:
+    """The triggering events the transform task renders with: the same
+    mapping as the start task's."""
+    return context["task_instance"].get_template_context()["triggering_asset_events"]
+
+
+def xcom_round_trip(value: Any) -> Any:
+    """The value as a task pulls it back from the installed XCom backend:
+    BaseXCom.serialize_value then deserialize_value (JSON bytes on Airflow 2;
+    a serde structure on Airflow 3, JSON-encoded on its way to the API server).
+    Only the keyword arguments the installed signature accepts are passed: a
+    value the backend cannot serialize fails the test."""
+    import inspect
+    import json
+    try:
+        from airflow.sdk.bases.xcom import BaseXCom  # Airflow 3
+    except ImportError:
+        try:
+            from airflow.models.xcom import BaseXCom  # Airflow 2
+        except ImportError:
+            pytest.skip("no BaseXCom in the installed Airflow")
+    accepted = inspect.signature(BaseXCom.serialize_value).parameters
+    context = dict(key=found_options_key(), task_id="start", dag_id="my_transform", run_id="run", map_index=-1)
+    serialized = BaseXCom.serialize_value(value, **{name: arg for name, arg in context.items() if name in accepted})
+    if not isinstance(serialized, (str, bytes)):
+        serialized = json.loads(json.dumps(serialized))
+    return BaseXCom.deserialize_value(SimpleNamespace(value=serialized))
+
+
+class TestFoundEventsOptionsRelayed:
+    """The tasks of a triggered run only receive the triggering events. Under
+    the ANY strategy, the run triggered by the last dataset to arrive passes
+    the start task thanks to the earlier events it accepts for the other
+    datasets: the start task relays their run variables (sl_options and
+    sl_options_merge) through an XCom, pushed only when there is something to
+    relay, and sl_options_from_events merges them with the triggering events."""
+
+    SLOT = datetime(2026, 7, 25, 6, 0, tzinfo=UTC)
+
+    def _published_check(self, monkeypatch, b_events, a_extra=None, not_scheduled=None, published=None):
+        published = dict(published or {})
+        published.setdefault(URI_B, b_events)
+        FakeLookups(published=published, forbid_interval_lookup={URI_A, URI_B, URI_C}).install(monkeypatch)
+        should_continue = start_callable(not_scheduled=not_scheduled or [declared(SINK_A), declared(SINK_B)])
+        context = asset_triggered_context(
+            transform_dag(), {URI_A: a_extra or starlake_extra(URI_A, SINK_A, scheduled_date=PRODUCED_AT)}
+        )
+        verdict = should_continue(start_date=STARTED_AT.isoformat(), **context)
+        return verdict, context
+
+    def _scheduled_check(self, monkeypatch, c_events):
+        """A (daily) triggered the run on its slot; C (daily) did not and is
+        looked up in its window (24 July 06:00, 25 July 06:00]."""
+        FakeLookups(joined={URI_C: c_events}).install(monkeypatch)
+        should_continue = start_callable(most_frequent=[declared(SINK_A, cron=DAILY), declared(SINK_C, cron=DAILY)])
+        context = asset_triggered_context(
+            transform_dag(), {URI_A: starlake_extra(URI_A, SINK_A, cron=DAILY, scheduled_date=self.SLOT)}
+        )
+        verdict = should_continue(start_date=STARTED_AT.isoformat(), **context)
+        return verdict, context
+
+    def _the_last_load_triggers(self, monkeypatch, a_options, b_options):
+        """The reproduction through the publication lookup: the transformation
+        reads A and B, both cron-less; A was loaded the day before, B's load
+        triggered the run."""
+        b_extra = starlake_extra(URI_B, SINK_B, scheduled_date=PRODUCED_AT)
+        b_extra[OPTIONS] = b_options
+        a_event = with_options(
+            published_event(1, URI_A, TRIGGERED_AT - timedelta(days=1), scheduled_date=PRODUCED_AT - timedelta(days=1)),
+            a_options,
+        )
+        FakeLookups(published={URI_A: [a_event]}, forbid_interval_lookup={URI_A, URI_B}).install(monkeypatch)
+        should_continue = start_callable(not_scheduled=[declared(SINK_A), declared(SINK_B)])
+        context = asset_triggered_context(transform_dag(), {URI_B: b_extra})
+        verdict = should_continue(start_date=STARTED_AT.isoformat(), **context)
+        return verdict, context
+
+    # -- what the start task pushes --------------------------------------------
+
+    def test_options_of_a_dependency_found_by_publication_are_pushed(self, monkeypatch):
+        a_extra = starlake_extra(URI_A, SINK_A, scheduled_date=PRODUCED_AT)
+        a_extra[OPTIONS] = {"all": {"a_file_date": "2026-07-25"}}
+        b_event = with_options(
+            published_event(1, URI_B, TRIGGERED_AT - timedelta(days=1)), {"all": {"b_file_date": "2026-07-24"}}
+        )
+        verdict, context = self._published_check(monkeypatch, [b_event], a_extra=a_extra)
+
+        assert verdict is True
+        relayed = pushed(context)[found_options_key()]
+        # the triggering dataset's options reach the tasks through the
+        # triggering events: only the accepted event of B is relayed
+        assert relayed == [{"uri": URI_B, "event_id": 1, OPTIONS: {"all": {"b_file_date": "2026-07-24"}}, OPTIONS_MERGE: None}]
+        # plain JSON values, whatever the client returned
+        assert type(relayed[0]) is dict and type(relayed[0][OPTIONS]) is dict and type(relayed[0][OPTIONS]["all"]) is dict
+
+    def test_options_of_a_scheduled_dependency_found_in_its_window_are_pushed(self, monkeypatch):
+        c_event = with_options(joined_event(7, URI_C, self.SLOT), {"all": {"c_file_dates": "2026-07-24|2026-07-25"}}, {"all": {"c_file_dates": UNION}})
+        verdict, context = self._scheduled_check(monkeypatch, [c_event])
+
+        assert verdict is True
+        assert pushed(context)[found_options_key()] == [{
+            "uri": URI_C,
+            "event_id": 7,
+            OPTIONS: {"all": {"c_file_dates": "2026-07-24|2026-07-25"}},
+            OPTIONS_MERGE: {"all": {"c_file_dates": UNION}},
+        }]
+
+    def test_only_the_accepted_event_of_a_scheduled_lookup_is_relayed(self, monkeypatch):
+        """The lookup returns C's events by producing run, the latest last: the
+        latest one (26 July) is outside C's window and carries other run
+        variables; the start task walks back to the one of 25 July and relays
+        that one only."""
+        c_events = [
+            with_options(joined_event(7, URI_C, self.SLOT), {"all": {"c_file_date": "2026-07-25"}}),
+            with_options(joined_event(8, URI_C, self.SLOT + timedelta(days=1)), {"all": {"c_file_date": "2026-07-26"}}),
+        ]
+        verdict, context = self._scheduled_check(monkeypatch, c_events)
+
+        assert verdict is True
+        assert pushed(context)[found_options_key()] == [
+            {"uri": URI_C, "event_id": 7, OPTIONS: {"all": {"c_file_date": "2026-07-25"}}, OPTIONS_MERGE: None}
+        ]
+
+    def test_only_the_latest_event_of_a_publication_lookup_is_relayed(self, monkeypatch):
+        """Two events of B published in the window: the start task retains the
+        most recently published one, and relays its run variables only."""
+        b_events = [
+            with_options(published_event(1, URI_B, TRIGGERED_AT - timedelta(minutes=3)), {"all": {"b_file_date": "2026-07-23"}}),
+            with_options(published_event(2, URI_B, TRIGGERED_AT - timedelta(minutes=1)), {"all": {"b_file_date": "2026-07-24"}}),
+        ]
+        verdict, context = self._published_check(monkeypatch, b_events)
+
+        assert verdict is True
+        assert pushed(context)[found_options_key()] == [
+            {"uri": URI_B, "event_id": 2, OPTIONS: {"all": {"b_file_date": "2026-07-24"}}, OPTIONS_MERGE: None}
+        ]
+
+    def test_accepted_events_without_run_variables_push_nothing_more(self, monkeypatch):
+        verdict, context = self._published_check(monkeypatch, [published_event(1, URI_B, TRIGGERED_AT - timedelta(minutes=1))])
+
+        assert verdict is True
+        assert pushed(context) == {DATA_INTERVAL_START: DAG_START_DATE, DATA_INTERVAL_END: PRODUCED_AT}
+
+    def test_an_accepted_event_with_empty_run_variables_pushes_nothing_more(self, monkeypatch):
+        """Sections without any key and no declaration: nothing takes part in
+        the merge, so nothing is relayed."""
+        b_event = with_options(published_event(1, URI_B, TRIGGERED_AT - timedelta(minutes=1)), {"all": {}}, {"all": {}})
+        verdict, context = self._published_check(monkeypatch, [b_event])
+
+        assert verdict is True
+        assert pushed(context) == {DATA_INTERVAL_START: DAG_START_DATE, DATA_INTERVAL_END: PRODUCED_AT}
+
+    @pytest.mark.parametrize(
+        "sections, merge, relayed",
+        [
+            pytest.param(None, None, False, id="nothing"),
+            pytest.param({}, None, False, id="no-section"),
+            pytest.param({"all": {}, "my_domain.my_transform": {}}, {}, False, id="empty-sections"),
+            pytest.param({"all": {}}, {"all": {}}, False, id="empty-declarations"),
+            pytest.param("not-a-dict", None, False, id="options-ignored-by-the-merge"),
+            pytest.param({"all": {"k": "v"}}, None, True, id="all-section"),
+            pytest.param({"all": {}, "my_domain.my_transform": {"k": "v"}}, None, True, id="task-section"),
+            pytest.param(None, {"all": {"k": UNION}}, True, id="declaration-only"),
+            # malformed declarations are relayed: the merge rejects them, as it
+            # does for a triggering event
+            pytest.param(None, "not-a-dict", True, id="malformed-declarations"),
+            pytest.param(None, {"all": "not-a-dict"}, True, id="malformed-declaration-section"),
+        ],
+    )
+    def test_found_event_options_relays_only_what_takes_part_in_the_merge(self, sections, merge, relayed):
+        from ai.starlake.airflow.starlake_airflow_job import found_event_options
+        extra = {}
+        if sections is not None:
+            extra[OPTIONS] = sections
+        if merge is not None:
+            extra[OPTIONS_MERGE] = merge
+        entry = found_event_options(URI_B, SimpleNamespace(id=3, extra=extra))
+
+        assert (entry is not None) is relayed
+        if relayed:
+            assert entry == {"uri": URI_B, "event_id": 3, OPTIONS: sections, OPTIONS_MERGE: merge}
+
+    def test_nothing_is_relayed_when_the_check_fails(self, monkeypatch):
+        """B is found with run variables, C is missing: the run is skipped and
+        pushes nothing."""
+        b_event = with_options(published_event(1, URI_B, TRIGGERED_AT - timedelta(minutes=1)), {"all": {"b_file_date": "2026-07-24"}})
+        verdict, context = self._published_check(
+            monkeypatch,
+            [b_event],
+            not_scheduled=[declared(SINK_A), declared(SINK_B), declared(SINK_C)],
+            published={URI_C: []},
+        )
+
+        assert verdict is False
+        assert pushed(context) == {}
+
+    def test_a_triggering_dataset_accepted_through_the_lookup_is_not_relayed(self, monkeypatch):
+        """A's triggering event is outside its window and the lookup accepts
+        another event of A: A contributes only its triggering events' run
+        variables, as before."""
+        a_event = with_options(joined_event(7, URI_A, self.SLOT), {"all": {"a_file_date": "2026-07-25"}})
+        FakeLookups(joined={URI_A: [a_event]}).install(monkeypatch)
+        should_continue = start_callable(most_frequent=[declared(SINK_A, cron=DAILY)])
+        context = asset_triggered_context(
+            transform_dag(),
+            {URI_A: starlake_extra(URI_A, SINK_A, cron=DAILY, scheduled_date=datetime(2026, 7, 25, 7, 30, tzinfo=UTC))},
+        )
+
+        assert should_continue(start_date=STARTED_AT.isoformat(), **context) is True
+        assert found_options_key() not in pushed(context)
+
+    # -- what the transform tasks render ----------------------------------------
+
+    def test_the_run_triggered_by_the_last_dataset_renders_the_variables_of_both(self, monkeypatch):
+        """The reproduction through the publication lookup: the start task
+        accepts A's event, and the rendered fragment carries the variables of
+        both loads, where it used to carry B's only."""
+        from ai.starlake.airflow import sl_options_from_events
+        verdict, context = self._the_last_load_triggers(
+            monkeypatch, {"all": {"a_file_date": "2026-07-24"}}, {"all": {"b_file_date": "2026-07-25"}}
+        )
+
+        assert verdict is True
+        dag_run = SimpleNamespace(conf={})
+        rendered = sl_options_from_events(triggering_events(context), dag_run, TRANSFORM, pulling(pushed(context)))
+        assert set(rendered.split(",")) == {"a_file_date=2026-07-24", "b_file_date=2026-07-25"}
+        # the triggering events alone (the former behaviour) lack A's variable
+        assert sl_options_from_events(triggering_events(context), dag_run, TRANSFORM) == "b_file_date=2026-07-25"
+
+    def test_the_reproduction_of_issue_168_renders_both_variables(self, monkeypatch):
+        """Issue #168: daily loads at 06:00 (A) and 07:00 (B), no data cycle.
+        A's load of 2 December triggered a run of its own, skipped since B's
+        event of 1 December 07:00 lies outside B's window. B's load of 07:00
+        triggers this run: A's event of 2 December 06:00 is accepted in A's
+        window (1 December 06:00, 2 December 06:00], and the tasks render the
+        variables of both loads."""
+        from ai.starlake.airflow import sl_options_from_events
+        a_event = with_options(
+            joined_event(7, URI_A, datetime(2026, 12, 2, 6, tzinfo=UTC)), {"all": {"balances_file_date": "2026-12-02"}}
+        )
+        lookups = FakeLookups(joined={URI_A: [a_event]}).install(monkeypatch)
+        should_continue = start_callable(most_frequent=[declared(SINK_A, cron="0 6 * * *"), declared(SINK_B, cron="0 7 * * *")])
+        b_extra = starlake_extra(URI_B, SINK_B, cron="0 7 * * *", scheduled_date=datetime(2026, 12, 2, 7, tzinfo=UTC))
+        b_extra[OPTIONS] = {"all": {"contracts_file_date": "2026-12-02"}}
+        context = asset_triggered_context(transform_dag(), {URI_B: b_extra})
+
+        assert should_continue(start_date=datetime(2026, 12, 2, 7, 5, tzinfo=UTC).isoformat(), **context) is True
+        assert [lookup[1]["uri"] for lookup in lookups.event_lookups()] == [URI_A]
+        rendered = sl_options_from_events(
+            triggering_events(context), SimpleNamespace(conf={}), "finance.daily_position", pulling(pushed(context))
+        )
+        assert set(rendered.split(",")) == {"balances_file_date=2026-12-02", "contracts_file_date=2026-12-02"}
+
+    def test_an_event_accepted_in_a_freshness_widened_window_relays_its_options(self, monkeypatch):
+        """Another way the scheduled lookup accepts an earlier event: both loads
+        are daily, the consumer's data cycle is enabled with its default value
+        (the pipeline's computed cron, the daily schedule), and A declares a
+        freshness of 12 hours. B's load of 25 July triggers the run; A's last
+        load, of 24 July, lies outside A's window (24 July 06:00, 25 July 06:00]
+        but inside the window widened by its freshness (beyond_data_cycle_enabled,
+        true by default), so the start task accepts it. Its run variables reach
+        the tasks."""
+        from ai.starlake.airflow import sl_options_from_events
+        a_loaded = self.SLOT - timedelta(days=1)
+        a_event = with_options(joined_event(7, URI_A, a_loaded), {"all": {"a_file_date": "2026-07-24"}})
+        lookups = FakeLookups(joined={URI_A: [a_event]}).install(monkeypatch)
+        should_continue = start_callable(
+            most_frequent=[declared(SINK_A, cron=DAILY, freshness=12 * 3600), declared(SINK_B, cron=DAILY)],
+            options={"data_cycle_enabled": "true"},
+            default_data_cycle=DAILY,
+        )
+        b_extra = starlake_extra(URI_B, SINK_B, cron=DAILY, scheduled_date=self.SLOT)
+        b_extra[OPTIONS] = {"all": {"b_file_date": "2026-07-25"}}
+        context = asset_triggered_context(transform_dag(), {URI_B: b_extra})
+
+        assert should_continue(start_date=STARTED_AT.isoformat(), **context) is True
+        # A's window starts 12 hours earlier; its upper bound is capped at the anchor
+        assert lookups.event_lookups() == [(
+            "find_dataset_events",
+            {
+                "uri": URI_A,
+                "timestamp_lte": STARTED_AT,
+                "data_interval_end_gte": a_loaded - timedelta(hours=12),
+                "data_interval_end_lte": self.SLOT,
+            },
+        )]
+        assert pushed(context)[found_options_key()] == [
+            {"uri": URI_A, "event_id": 7, OPTIONS: {"all": {"a_file_date": "2026-07-24"}}, OPTIONS_MERGE: None}
+        ]
+        rendered = sl_options_from_events(triggering_events(context), SimpleNamespace(conf={}), TRANSFORM, pulling(pushed(context)))
+        assert set(rendered.split(",")) == {"a_file_date=2026-07-24", "b_file_date=2026-07-25"}
+
+    def test_the_relayed_value_survives_the_xcom_backend(self, monkeypatch):
+        """The pushed value goes through the installed XCom backend before the
+        transform task pulls it: it comes back equal, and renders the same
+        fragment."""
+        from ai.starlake.airflow import sl_options_from_events
+        verdict, context = self._the_last_load_triggers(
+            monkeypatch,
+            {"all": {"a_file_dates": "2026-07-23|2026-07-24"}, TRANSFORM: {"a_mode": "full"}},
+            {"all": {"b_file_date": "2026-07-25"}},
+        )
+
+        assert verdict is True
+        relayed = pushed(context)[found_options_key()]
+        restored = xcom_round_trip(relayed)
+        assert restored == relayed
+        rendered = sl_options_from_events(
+            triggering_events(context), SimpleNamespace(conf={}), TRANSFORM, pulling({found_options_key(): restored})
+        )
+        assert set(rendered.split(",")) == {"a_file_dates=2026-07-23|2026-07-24", "a_mode=full", "b_file_date=2026-07-25"}
+
+    def test_a_conflict_between_the_triggering_and_the_accepted_event_fails_the_task(self, monkeypatch):
+        """Both loads publish the same key with different values: the
+        rendering fails loud instead of silently keeping one, and asks for a
+        manual run."""
+        from airflow.exceptions import AirflowException
+        from ai.starlake.airflow import sl_options_from_events
+        verdict, context = self._the_last_load_triggers(
+            monkeypatch, {"all": {"file_date": "2026-07-24"}}, {"all": {"file_date": "2026-07-25"}}
+        )
+
+        assert verdict is True
+        with pytest.raises(AirflowException, match=r"Conflicting values for sl_options\['all'\]\['file_date'\]") as raised:
+            sl_options_from_events(triggering_events(context), SimpleNamespace(conf={}), None, pulling(pushed(context)))
+        assert ACCEPTED_RECOVERY in str(raised.value)

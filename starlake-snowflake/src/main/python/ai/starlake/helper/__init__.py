@@ -332,6 +332,7 @@ class SnowflakeDAGHelper(SnowflakeHelper):
         query = f"""SELECT SCHEDULED_TIME, QUERY_START_TIME 
 FROM TABLE(
     INFORMATION_SCHEMA.TASK_HISTORY(
+        RESULT_LIMIT => 10000,
         ERROR_ONLY => false
     )
 )
@@ -339,6 +340,7 @@ WHERE GRAPH_RUN_GROUP_ID IN (
     SELECT GRAPH_RUN_GROUP_ID 
     FROM TABLE(
         INFORMATION_SCHEMA.TASK_HISTORY(
+            RESULT_LIMIT => 10000,
             ERROR_ONLY => false
         )
     )

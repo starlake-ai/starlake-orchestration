@@ -16,7 +16,7 @@
 
 from ai.starlake.dagster.starlake_dagster_job import StarlakeDagsterJob, DagsterDataset, StarlakeDagsterUtils
 
-from ai.starlake.common import sl_timestamp_format, sl_scheduled_date, is_valid_cron, get_cron_frequency, StarlakeParameters, scheduled_dates_range
+from ai.starlake.common import sl_timestamp_format, sl_scheduled_date, is_valid_cron, get_cron_frequency, StarlakeParameters, scheduled_dates_range, data_cycle_window
 
 from ai.starlake.dataset import StarlakeDataset, DatasetTriggeringStrategy
 
@@ -37,9 +37,26 @@ from dagster._core.definitions.partition import PARTITION_NAME_TAG
 from datetime import datetime
 import pytz
 
-from typing import Any, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import Any, Iterable, List, NamedTuple, Optional, Sequence, Tuple, TypeVar, Union
 
 J = TypeVar("J", bound=StarlakeDagsterJob)
+
+class DatasetsFreshnessCheck(NamedTuple):
+    """The verdict of DagsterPipeline.check_datasets_freshness (a tuple, so
+    that positional access keeps working)."""
+    # whether every non-optional dataset was found within its window
+    checked: bool
+    # the start of the run's data interval (None when not checked)
+    previous_partition: Optional[datetime]
+    # the end of the run's data interval, its logical datetime (None when not checked)
+    max_scheduled_date: Optional[datetime]
+    # the datasets not found within their window
+    missing: List[StarlakeDataset]
+    # the materializations accepted from the event log for the datasets whose
+    # materializations the sensor does not relay itself (issue #168), whose
+    # run variables the sensor merges with the triggering ones (empty when not
+    # checked)
+    accepted: List[EventLogRecord]
 
 from ai.starlake.orchestration import AbstractTask, AbstractTaskGroup, AbstractPipeline, AbstractOrchestration, AbstractDependency
 
@@ -94,10 +111,24 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                     # a set of values (union, issue #158), then relayed with their
                     # merge declarations to every op of the triggered run through
                     # its config (see DagsterLogicalDatetimeConfig)
-                    merged_sl_options, merged_sl_options_merge = StarlakeDagsterUtils.collect_sl_options_with_merge(
-                        [event.asset_materialization for event in materialized_events.values()],
-                        superseded=StarlakeDagsterUtils.superseded_materializations(context, asset_events),
-                    )
+                    superseded = StarlakeDagsterUtils.superseded_materializations(context, asset_events)
+                    triggering_error: Optional[ValueError] = None
+                    try:
+                        merged_sl_options, merged_sl_options_merge = StarlakeDagsterUtils.collect_sl_options_with_merge(
+                            [event.asset_materialization for event in materialized_events.values()],
+                            superseded=superseded,
+                        )
+                    except ValueError as error:
+                        # raised before any run request or skip reason, unless
+                        # the check accepts a materialization whose union
+                        # declaration applies to the conflicting key (issue #168)
+                        merged_sl_options, merged_sl_options_merge = {}, {}
+                        triggering_error = error
+
+                    def raise_triggering_error() -> None:
+                        if triggering_error is not None:
+                            raise triggering_error
+
                     import json
                     sl_options = json.dumps(merged_sl_options) if merged_sl_options else None
                     sl_options_merge = json.dumps(merged_sl_options_merge) if merged_sl_options and merged_sl_options_merge else None
@@ -117,6 +148,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                     materialized_schedules = {key: tuple[1] for key, tuple in materialized_datasets.items() if tuple[1] is not None}
 
                     if len(materialized_schedules.keys()) == 0:
+                        raise_triggering_error()
                         if len(not_materialized_asset_key_strs) > 0:
                             # If some datasets not materialized, we skip the run
                             return SkipReason(
@@ -151,6 +183,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
 
                     # if there are no datasets to check, we run the pipeline
                     if len(datasets_to_check) == 0:
+                        raise_triggering_error()
                         # Advance the cursor before yielding the run (issue #80),
                         # mirroring the freshness-checked path below.
                         context.advance_cursor(asset_events)
@@ -159,13 +192,44 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                         )
 
                     # we check if all datasets are consistent with the most recent materialized dataset
-                    t = dg_pipeline.check_datasets_freshness(freshest_materialized_dataset_datetime, datasets_to_check, materialized_schedules, context.instance)
-                    checked: bool = t[0]
-                    previous_partition: Optional[datetime] = t[1]
-                    max_scheduled_date: Optional[datetime] = t[2]
+                    t = dg_pipeline.check_datasets_freshness(
+                        freshest_materialized_dataset_datetime,
+                        datasets_to_check,
+                        materialized_schedules,
+                        context.instance,
+                        triggering_uris=materialized_events.keys(),
+                    )
+                    checked: bool = t.checked
+                    previous_partition: Optional[datetime] = t.previous_partition
+                    max_scheduled_date: Optional[datetime] = t.max_scheduled_date
                     if checked and previous_partition and max_scheduled_date:
                         # If all datasets are consistent with the most recent materialized dataset, we run the pipeline
                         print(f"All datasets are consistent with the most recent materialized dataset {freshest_materialized_dataset_datetime.strftime(sl_timestamp_format)}, we run the pipeline {pipeline_id}")
+                        if t.accepted:
+                            # issue #168 — the materializations the check accepted
+                            # from the event log for the datasets without an
+                            # unconsumed materialization carry run variables the
+                            # tasks need as well (under the ANY strategy, the run
+                            # of the last dataset to arrive passes the check
+                            # thanks to the earlier materializations it finds,
+                            # already consumed by previous ticks): they are
+                            # merged with the triggering ones, fail-loud unless
+                            # declared union by either side (a conflict among the
+                            # triggering ones alone raises their own error).
+                            # Without run variables on them, the merge is unchanged
+                            if not superseded:
+                                # a union declared by an accepted materialization
+                                # gathers the earlier unconsumed values too
+                                superseded = StarlakeDagsterUtils.superseded_materializations(context, asset_events, accepted=t.accepted)
+                            merged_sl_options, merged_sl_options_merge = StarlakeDagsterUtils.collect_sl_options_with_merge(
+                                [event.asset_materialization for event in materialized_events.values()],
+                                superseded=superseded,
+                                accepted=t.accepted,
+                            )
+                            sl_options = json.dumps(merged_sl_options) if merged_sl_options else None
+                            sl_options_merge = json.dumps(merged_sl_options_merge) if merged_sl_options and merged_sl_options_merge else None
+                        else:
+                            raise_triggering_error()
                         logical_datetime = max_scheduled_date.strftime(sl_timestamp_format)
                         previous_logical_datetime=previous_partition.strftime(sl_timestamp_format)
                         context.advance_cursor(asset_events)
@@ -179,6 +243,7 @@ class DagsterOrchestration(AbstractOrchestration[JobDefinition, OpDefinition, Gr
                             },
                         )
                     else:
+                        raise_triggering_error()
                         all_materialized_assets = ",".join(materialized_asset_key_strs)
                         all_uris = ",".join([f"{dataset.uri}" for dataset in datasets_to_check])
                         # If any dataset is not consistent with the most recent materialized dataset, we skip the run
@@ -655,7 +720,11 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
         return None
 
     def find_dataset_events(self, instance: DagsterInstance, asset_key: AssetKey, partitions: Optional[Sequence[str]] = None, limit: int = 100) -> Sequence[EventLogRecord]:
-        """Retrieves the events for the specified dataset and optional partitions."""
+        """Retrieves the latest `limit` events for the specified dataset and
+        optional partitions, the most recent LAST: fetch_materializations
+        returns them most recent first, and the checks walk the list from its
+        end, so that they accept the latest in-window materialization (a
+        reload), as Airflow does, and relay its run variables (issue #168)."""
         from dagster import AssetRecordsFilter
 
         materializations: EventRecordsResult = instance.fetch_materializations(
@@ -666,7 +735,56 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             limit=limit,
         )
 
-        return materializations.records
+        return list(reversed(materializations.records))
+
+    # Upper bound of the ticks of a dependency that find_dataset_events_in_window
+    # looks up as partitions (the most recent ones of the window).
+    DATA_CYCLE_PARTITIONS_LIMIT = 500
+
+    def find_dataset_events_in_window(self, instance: DagsterInstance, asset_key: AssetKey, cron: str, window_min: datetime, window_max: datetime, limit: int = 100) -> List[EventLogRecord]:
+        """The materializations of a dependency checked in data-cycle mode whose
+        scheduled date lies within (window_min, window_max], in the order they
+        were recorded: check_datasets_freshness examines them from the end, so
+        it accepts the most recently recorded one (issue #167).
+
+        The window starts at the data-cycle period that holds the anchor, so the
+        accepted materialization may lie on any tick of the dependency in
+        between, not only on the two boundaries of a tick-by-tick window. Two
+        lookups are merged:
+        - the materializations partitioned on the ticks of `cron` within the
+          window (the most recent DATA_CYCLE_PARTITIONS_LIMIT ones): a scheduled
+          load is partitioned on its tick, and this lookup is not crowded out by
+          the materializations recorded after it (a catch-up anchored on a past
+          period);
+        - the latest `limit` materializations without partition filter: a
+          materialization partitioned off the ticks (a manual or replayed load)
+          is kept when its scheduled date lies within the window.
+        """
+        from croniter import croniter
+        from datetime import timedelta
+        partitions = []
+        # croniter steps back from just after the upper bound, so that a tick
+        # on the bound itself is included
+        ticks = croniter(cron, window_max + timedelta(seconds=1))
+        while len(partitions) < self.DATA_CYCLE_PARTITIONS_LIMIT:
+            tick = ticks.get_prev(datetime)
+            if tick <= window_min:
+                break
+            if tick <= window_max:
+                partitions.append(tick.strftime(sl_timestamp_format))
+        records = {}
+        if partitions:
+            for record in self.find_dataset_events(instance, asset_key, partitions, limit):
+                records[record.storage_id] = record
+        for record in self.find_dataset_events(instance, asset_key, None, limit):
+            records.setdefault(record.storage_id, record)
+        in_window = []
+        for storage_id in sorted(records):
+            record = records[storage_id]
+            scheduled_datetime = self.get_event_partition(record)
+            if scheduled_datetime and window_min < scheduled_datetime <= window_max:
+                in_window.append(record)
+        return in_window
 
     def get_dataset_and_partition(self, event: EventLogRecord) -> Tuple[StarlakeDataset, Optional[datetime]]:
         """Extracts the dataset from an asset materialization."""
@@ -701,11 +819,39 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             self.get_event_partition(event)
         )
 
-    def check_datasets_freshness(self, scheduled_date: datetime, datasets: List[StarlakeDataset], schedules: dict[str, datetime], instance: DagsterInstance, limit: int = 100) -> tuple:
-        """Checks the freshness of the datasets and returns True if all datasets have been materialized arround the most recent one."""
+    def check_datasets_freshness(self, scheduled_date: datetime, datasets: List[StarlakeDataset], schedules: dict[str, datetime], instance: DagsterInstance, limit: int = 100, triggering_uris: Optional[Iterable[str]] = None) -> DatasetsFreshnessCheck:
+        """Checks the freshness of the datasets around the most recent materialization.
+
+        Args:
+            scheduled_date: the anchor, the most recent scheduled date among the
+                materializations not yet consumed by the sensor.
+            datasets: the datasets to check.
+            schedules: the scheduled date of the unconsumed materialization of
+                each dataset that has one, by uri.
+            instance: the Dagster instance whose event log is looked up.
+            limit: the number of materializations fetched per lookup.
+            triggering_uris: the uris of the datasets whose unconsumed
+                materializations the sensor relays itself (default: the keys of
+                `schedules`): a materialization accepted from the event log for
+                one of them is not returned as accepted (issue #168).
+
+        Returns:
+            DatasetsFreshnessCheck: (checked, previous_partition,
+            max_scheduled_date, missing, accepted), `accepted` holding the
+            materialization accepted from the event log for each other dataset
+            found there.
+        """
         job: StarlakeDagsterJob = self.job
         missing_datasets: List[StarlakeDataset] = []
         max_scheduled_date = scheduled_date
+        triggering = set(schedules.keys() if triggering_uris is None else triggering_uris)
+        # issue #168 — the materializations accepted from the event log for the
+        # datasets whose materializations the sensor does not relay itself
+        accepted: List[EventLogRecord] = []
+
+        def accept(uri: str, event: EventLogRecord) -> None:
+            if uri not in triggering:
+                accepted.append(event)
 
         # Retrieves the most recent partition of a successful run for the pipeline before the scheduled date.
         previous_partition = self.get_previous_partition(instance, scheduled_date)
@@ -717,7 +863,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 previous_partition = start_date
             else:
                 print(f"No previous successful runs found for {self.pipeline_id} around {scheduled_date} and no start date set for the pipeline")
-                return False
+                return DatasetsFreshnessCheck(False, None, None, list(datasets), [])
 
         print(f"Previous successful run for {self.pipeline_id} around {scheduled_date} is {previous_partition.strftime(sl_timestamp_format)}")
 
@@ -736,7 +882,14 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             freshness = dataset.freshness
             optional = False
             beyond_data_cycle_allowed = False
-            if data_cycle_freshness:
+            # issue #167 — data-cycle mode: with a declared data cycle, a
+            # dependency that fires in every period of it delivers its data
+            # over the period; its materializations are admitted from the start
+            # of the period that holds the anchor, never earlier, so neither
+            # optional nor beyond_data_cycle apply to it. Any other dependency
+            # keeps its own schedule window (dataset mode)
+            data_cycle_mode = job.data_cycle_mode(original_cron)
+            if data_cycle_freshness and not data_cycle_mode:
                 original_scheduled = original_cron and is_valid_cron(original_cron)
                 if job.optional_dataset_enabled:
                     # we check if the dataset is optional by comparing its freshness with that of the data cycle
@@ -751,8 +904,14 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                 print(f"Dataset {dataset.uri} is optional, we skip it")
                 continue
             elif scheduled:
-                (scheduled_date_to_check_min, scheduled_date_to_check_max) = scheduled_dates_range(cron, scheduled_date)
-                if original_cron:
+                if data_cycle_mode:
+                    # the window ends at the anchor, which no unconsumed
+                    # materialization exceeds; freshness widens it on neither side
+                    (scheduled_date_to_check_min, scheduled_date_to_check_max) = data_cycle_window(job.data_cycle, scheduled_date)
+                    print(f"Dataset {dataset.uri} fires in every period of the data cycle {job.data_cycle}: its materializations are admitted within ({scheduled_date_to_check_min}, {scheduled_date_to_check_max}]")
+                else:
+                    (scheduled_date_to_check_min, scheduled_date_to_check_max) = scheduled_dates_range(cron, scheduled_date)
+                if original_cron and not data_cycle_mode:
                     partitions = [
                         scheduled_date_to_check_min.strftime(sl_timestamp_format),
                         scheduled_date_to_check_max.strftime(sl_timestamp_format),
@@ -777,7 +936,13 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                         if scheduled_datetime > max_scheduled_date:
                             max_scheduled_date = scheduled_datetime
                 if not found:
-                    events = self.find_dataset_events(instance, AssetKey(dataset.uri), partitions, limit)
+                    if data_cycle_mode:
+                        # not restricted to the two boundary partitions: an
+                        # earlier attempt of the delivery lies on any tick of
+                        # the period
+                        events = self.find_dataset_events_in_window(instance, AssetKey(dataset.uri), original_cron, scheduled_date_to_check_min, scheduled_date_to_check_max, limit)
+                    else:
+                        events = self.find_dataset_events(instance, AssetKey(dataset.uri), partitions, limit)
                     if not events:
                         print(f"No dataset events for {dataset.uri} found between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
                     else:
@@ -796,6 +961,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                             else:
                                 found = True
                                 print(f"Found dataset {dataset.uri} with materialization at {scheduled_datetime} between {scheduled_date_to_check_min} and {scheduled_date_to_check_max}")
+                                accept(dataset.uri, event)
                                 if scheduled_datetime > max_scheduled_date:
                                     max_scheduled_date = scheduled_datetime
                                 break
@@ -841,6 +1007,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                     print(f"No dataset {dataset.uri} found since the previous partition {previous_partition} and around the scheduled date {scheduled_date} +- {freshness} in seconds")
                 else:
                     print(f"Found dataset {dataset.uri} after the previous partition {previous_partition}  and  around the scheduled date {scheduled_date} +- {freshness} in seconds")
+                    accept(dataset.uri, event)
                     if scheduled_datetime > max_scheduled_date:
                         max_scheduled_date = scheduled_datetime
 
@@ -850,10 +1017,12 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
             print(f"All datasets checked: {', '.join([dataset.uri for dataset in datasets])}")
             print(f"Starlake start date will be set to {previous_partition}")
             print(f"Starlake end date will be set to {max_scheduled_date}")
-            return (True, previous_partition, max_scheduled_date, [])
+            if accepted:
+                print(f"Materializations accepted for the datasets without an unconsumed materialization: {', '.join(f'{event.asset_key.to_user_string()} ({event.storage_id})' for event in accepted)}")
+            return DatasetsFreshnessCheck(True, previous_partition, max_scheduled_date, [], accepted)
         else:
             print(f"Some datasets are missing: {', '.join([dataset.uri for dataset in missing_datasets])}")
-            return (False, None, None, missing_datasets)
+            return DatasetsFreshnessCheck(False, None, None, missing_datasets, [])
 
     def run(self, logical_date: Optional[str] = None, timeout: str = '120', mode: StarlakeExecutionMode = StarlakeExecutionMode.RUN, **kwargs) -> None:
         """Run the pipeline.
@@ -925,7 +1094,7 @@ class DagsterPipeline(AbstractPipeline[JobDefinition, OpDefinition, GraphDefinit
                     instance,
                     limit=1,
                 )
-                print(f"Datasets freshness check: {t[0]}")
+                print(f"Datasets freshness check: {t.checked}")
 
             # Check execution success
             if result.success:

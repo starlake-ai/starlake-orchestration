@@ -38,6 +38,32 @@ def _dag_run(conf: dict = None):
     return types.SimpleNamespace(conf=conf or {})
 
 
+def _found(uri: str, sections: dict = None, merge: dict = None, event_id: int = 7) -> dict:
+    """An entry of the XCom the start task pushes for an event it accepted for a
+    declared dataset that did not trigger the run."""
+    return {"uri": uri, "event_id": event_id, OPTIONS: sections, OPTIONS_MERGE: merge}
+
+
+class _TaskInstance:
+    """A task instance whose xcom_pull answers the start task's
+    found-options XCom and records every pull."""
+
+    def __init__(self, found):
+        self.found = found
+        self.pulls = []
+
+    def xcom_pull(self, task_ids=None, key=None, **kwargs):
+        self.pulls.append({"task_ids": task_ids, "key": key})
+        from ai.starlake.airflow.starlake_airflow_job import SL_FOUND_OPTIONS_XCOM_KEY
+        if task_ids == "start" and key == SL_FOUND_OPTIONS_XCOM_KEY:
+            return self.found
+        return None
+
+
+def _ti(found=None):
+    return _TaskInstance(found)
+
+
 # ------------------------------------------------------------------
 # sl_options_from_events — merge across triggering dataset events
 # ------------------------------------------------------------------
@@ -171,6 +197,158 @@ class TestSlOptionsUnionMerge:
 
 
 # ------------------------------------------------------------------
+# sl_options_from_events — events accepted by the start task for the
+# datasets that did not trigger the run
+# ------------------------------------------------------------------
+
+class TestSlOptionsFromFoundEvents:
+    """Under the ANY triggering strategy, the run triggered by the last
+    dataset to arrive passes the start task thanks to the earlier events it
+    finds for the other datasets: the run variables of those events reach the
+    tasks through the start task's XCom, merged with the triggering events
+    under the same rules."""
+
+    # the run triggered by B (loaded on 2 December); the start task
+    # accepted the event of A (loaded on 1 December)
+    TRIGGERING = {"uri_b": [_event({"all": {"b_fd": "2026-12-02"}})]}
+
+    def test_found_events_options_are_passed_through(self):
+        from ai.starlake.airflow import sl_options_from_events
+        from ai.starlake.airflow.starlake_airflow_job import SL_FOUND_OPTIONS_XCOM_KEY
+        ti = _ti([_found("uri_a", {"all": {"a_fd": "2026-12-01"}})])
+        rendered = sl_options_from_events(self.TRIGGERING, _dag_run(), "d.t", ti)
+        assert set(rendered.split(",")) == {"b_fd=2026-12-02", "a_fd=2026-12-01"}
+        assert ti.pulls == [{"task_ids": "start", "key": SL_FOUND_OPTIONS_XCOM_KEY}]
+
+    def test_found_events_options_alone(self):
+        """A triggering event without run variables: the accepted event's
+        variables are the whole fragment."""
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri_b": [types.SimpleNamespace(extra={})]}
+        ti = _ti([_found("uri_a", {"all": {"a_fd": "2026-12-01"}})])
+        assert sl_options_from_events(events, _dag_run(), "d.t", ti) == "a_fd=2026-12-01"
+
+    def test_task_specific_section_of_a_found_event(self):
+        from ai.starlake.airflow import sl_options_from_events
+        ti = _ti([_found("uri_a", {"all": {"k": "1"}, "d.t": {"k": "2"}})])
+        assert sl_options_from_events({}, _dag_run(), "d.t", ti) == "k=2"
+        assert sl_options_from_events({}, _dag_run(), "d.other", ti) == "k=1"
+
+    def test_same_value_in_a_triggering_and_a_found_event_is_not_a_conflict(self):
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri_b": [_event({"all": {"fd": "2026-12-01"}})]}
+        ti = _ti([_found("uri_a", {"all": {"fd": "2026-12-01"}})])
+        assert sl_options_from_events(events, _dag_run(), None, ti) == "fd=2026-12-01"
+
+    ACCEPTED_RECOVERY = (
+        "The triggering events and the events accepted by the start task carry different run variables "
+        "— run the DAG manually, passing dag_run.conf['sl_options'] (a manual run skips the check)."
+    )
+    COALESCED_RECOVERY = "re-trigger the runs one by one, passing dag_run.conf['sl_options']"
+
+    def test_conflict_with_a_triggering_event_fails_loud(self):
+        """The same key carried with different values by a triggering event and
+        an accepted one stops the run, naming both. Nothing was coalesced and
+        clearing the run would accept the same event again: the recovery is a
+        manual run."""
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        events = {"uri_b": [_event({"all": {"fd": "2026-12-02"}})]}
+        ti = _ti([_found("uri_a", {"all": {"fd": "2026-12-01"}}, event_id=42)])
+        with pytest.raises(AirflowException) as raised:
+            sl_options_from_events(events, _dag_run(), None, ti)
+        message = str(raised.value)
+        assert "Conflicting values for sl_options['all']['fd']" in message
+        assert "across triggering dataset events and the events accepted by the start task" in message
+        assert "(uri_b, uri_a (event 42 accepted by the start task))" in message
+        assert self.ACCEPTED_RECOVERY in message
+        assert self.COALESCED_RECOVERY not in message
+        # the core still suggests the union declaration
+        assert "policy 'union'" in message
+
+    def test_conflict_between_two_found_events_fails_loud(self):
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        ti = _ti([_found("uri_a", {"all": {"fd": "A"}}), _found("uri_c", {"all": {"fd": "B"}})])
+        with pytest.raises(AirflowException, match="Conflicting values") as raised:
+            sl_options_from_events({}, _dag_run(), None, ti)
+        assert self.ACCEPTED_RECOVERY in str(raised.value)
+        assert self.COALESCED_RECOVERY not in str(raised.value)
+
+    def test_a_conflict_among_the_coalesced_triggering_events_keeps_its_message(self):
+        """An accepted event takes part without conflicting: the coalesced
+        triggering events that conflict on their own keep their origin and
+        their recovery."""
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        events = {"uri_b": [_event({"all": {"fd": "2026-12-02"}}), _event({"all": {"fd": "2026-12-03"}})]}
+        ti = _ti([_found("uri_a", {"all": {"a_fd": "2026-12-01"}})])
+        with pytest.raises(AirflowException) as raised:
+            sl_options_from_events(events, _dag_run(), None, ti)
+        message = str(raised.value)
+        assert "across triggering dataset events (uri_b, uri_b)" in message
+        assert self.COALESCED_RECOVERY in message
+        assert self.ACCEPTED_RECOVERY not in message
+        assert "accepted by the start task" not in message
+
+    def test_union_declared_by_the_triggering_event(self):
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri_b": [_event({"all": {"fd": "A|B"}}, {"all": {"fd": UNION}})]}
+        ti = _ti([_found("uri_a", {"all": {"fd": "B|C"}})])
+        assert sl_options_from_events(events, _dag_run(), None, ti) == "fd=A|B|C"
+
+    def test_union_declared_by_the_found_event(self):
+        """The declaration describes the value's type: carried by the accepted
+        event only, it applies to the triggering event's value too."""
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri_b": [_event({"all": {"fd": "C|A"}})]}
+        ti = _ti([_found("uri_a", {"all": {"fd": "B"}}, {"all": {"fd": UNION}})])
+        assert sl_options_from_events(events, _dag_run(), None, ti) == "fd=A|B|C"
+
+    def test_conflicting_declarations_across_triggering_and_found_events_fail_loud(self):
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        events = {"uri_b": [_event({"all": {"fd": "A"}}, {"all": {"fd": UNION}})]}
+        ti = _ti([_found("uri_a", {"all": {"fd": "B"}}, {"all": {"fd": {"policy": "union", "separator": ";"}}})])
+        with pytest.raises(AirflowException, match=r"Conflicting merge declarations for sl_options_merge\['all'\]\['fd'\]"):
+            sl_options_from_events(events, _dag_run(), None, ti)
+
+    def test_a_malformed_declaration_of_a_found_event_fails_loud(self):
+        """A malformed sl_options_merge carried by an accepted event fails the
+        rendering, naming the event, as it does for a triggering event."""
+        from ai.starlake.airflow import sl_options_from_events
+        from airflow.exceptions import AirflowException
+        ti = _ti([_found("uri_a", {"all": {"fd": "A"}}, "not-a-dict")])
+        with pytest.raises(AirflowException, match=r"Invalid sl_options_merge carried by uri_a \(event 7 accepted by the start task\)"):
+            sl_options_from_events(self.TRIGGERING, _dag_run(), None, ti)
+
+    def test_dag_run_conf_overrides_the_found_events(self):
+        from ai.starlake.airflow import sl_options_from_events
+        ti = _ti([_found("uri_a", {"all": {"a_fd": "2026-12-01"}})])
+        run = _dag_run({OPTIONS: {"all": {"a_fd": "2026-12-03"}}})
+        rendered = sl_options_from_events(self.TRIGGERING, run, None, ti)
+        assert set(rendered.split(",")) == {"b_fd=2026-12-02", "a_fd=2026-12-03"}
+
+    @pytest.mark.parametrize("pulled", [None, []], ids=["no-xcom", "empty"])
+    def test_no_found_events_leaves_the_result_unchanged(self, pulled):
+        from ai.starlake.airflow import sl_options_from_events
+        events = {"uri_b": [_event({"all": {"fd": "2026-12-02"}}), _event({"all": {"fd": "2026-12-03"}})]}
+        assert sl_options_from_events(self.TRIGGERING, _dag_run(), "d.t", _ti(pulled)) == "b_fd=2026-12-02"
+        assert sl_options_from_events({}, _dag_run(), "d.t", _ti(pulled)) == "sl_options_applied=0"
+        # the coalesced-events error keeps its origin when nothing was found
+        from airflow.exceptions import AirflowException
+        with pytest.raises(AirflowException, match=r"across triggering dataset events \(uri_b, uri_b\)"):
+            sl_options_from_events(events, _dag_run(), None, _ti(pulled))
+
+    def test_without_a_task_instance_nothing_is_pulled(self):
+        """The three-argument form (a custom template, a direct call) keeps its
+        result."""
+        from ai.starlake.airflow import sl_options_from_events
+        assert sl_options_from_events(self.TRIGGERING, _dag_run(), "d.t") == "b_fd=2026-12-02"
+        assert sl_options_from_events(self.TRIGGERING, _dag_run(), "d.t", None) == "b_fd=2026-12-02"
+
+
+# ------------------------------------------------------------------
 # sl_transform — runtime options fragment appended to --options
 # ------------------------------------------------------------------
 
@@ -181,7 +359,7 @@ class TestSlTransformInjection:
         task = airflow_job.sl_transform(task_id=None, transform_name="d.t", transform_options=None)
         cmd = task.bash_command
         events_key = "triggering_asset_events" if supports_assets() else "triggering_dataset_events"
-        fragment = "{{sl_options_from_events(%s, dag_run, 'd.t')}}" % events_key
+        fragment = "{{sl_options_from_events(%s, dag_run, 'd.t', ti)}}" % events_key
         assert fragment in cmd
         # the fragment must be part of the (quoted) --options value, appended last
         options_value = cmd.split("--options", 1)[1].strip()
@@ -200,8 +378,29 @@ class TestSlTransformInjection:
         import airflow
         monkeypatch.setattr(airflow, "__version__", "3.0.2")
         task = airflow_job.sl_transform(task_id=None, transform_name="d.t", transform_options=None)
-        assert "sl_options_from_events(triggering_asset_events, dag_run, 'd.t')" in task.bash_command
+        assert "sl_options_from_events(triggering_asset_events, dag_run, 'd.t', ti)" in task.bash_command
         assert "triggering_dataset_events" not in task.bash_command
+
+    def test_transform_fragment_renders_the_found_events_options(self, airflow_job):
+        """The fragment hands the task instance to the macro, which pulls the
+        run variables of the events accepted by the start task: rendered with
+        the context Airflow gives the task, a variable carried only by such an
+        event reaches the command."""
+        import jinja2
+        from ai.starlake.airflow import sl_options_from_events
+        from ai.starlake.airflow.compat import supports_assets
+        task = airflow_job.sl_transform(task_id=None, transform_name="d.t", transform_options=None)
+        cmd = task.bash_command
+        begin = cmd.index("{{sl_options_from_events(")
+        fragment = cmd[begin:cmd.index(")}}", begin) + len(")}}")]
+        events_key = "triggering_asset_events" if supports_assets() else "triggering_dataset_events"
+        rendered = jinja2.Environment(undefined=jinja2.StrictUndefined).from_string(fragment).render(**{
+            "sl_options_from_events": sl_options_from_events,
+            events_key: {"uri_b": [_event({"all": {"b_fd": "2026-12-02"}})]},
+            "dag_run": _dag_run(),
+            "ti": _ti([_found("uri_a", {"all": {"a_fd": "2026-12-01"}})]),
+        })
+        assert set(rendered.split(",")) == {"b_fd=2026-12-02", "a_fd=2026-12-01"}
 
 
 # ------------------------------------------------------------------

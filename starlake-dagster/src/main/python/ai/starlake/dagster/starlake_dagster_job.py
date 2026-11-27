@@ -358,6 +358,21 @@ class DagsterLogicalDatetimeConfig(Config):
     # so a downstream sensor merges them the same way (issue #158).
     sl_options_merge: Optional[str] = None
 
+def _carries_options(options) -> bool:
+    """Whether a sl_options payload carries at least one key in a section:
+    merge_sl_options ignores anything else."""
+    return isinstance(options, dict) and any(isinstance(entries, dict) and entries for entries in options.values())
+
+def _carries_declarations(merge) -> bool:
+    """Whether a sl_options_merge payload must take part in the merge: it
+    declares at least one key, or it is malformed (not a dict of dicts), which
+    merge_sl_options rejects, as it does for a triggering materialization."""
+    if merge is None:
+        return False
+    if not isinstance(merge, dict):
+        return True
+    return any(not isinstance(entries, dict) or entries for entries in merge.values())
+
 class StarlakeDagsterUtils:
 
     @classmethod
@@ -570,7 +585,7 @@ class StarlakeDagsterUtils:
         return cls.collect_sl_options_with_merge(materializations)[0]
 
     @classmethod
-    def collect_sl_options_with_merge(cls, materializations, superseded=()) -> Tuple[dict, dict]:
+    def collect_sl_options_with_merge(cls, materializations, superseded=(), accepted=()) -> Tuple[dict, dict]:
         """Merge the sl_options sections carried by asset materializations
         (StarlakeParameters.OPTIONS_PARAMETER in their metadata).
 
@@ -580,6 +595,12 @@ class StarlakeDagsterUtils:
         values (StarlakeParameters.OPTIONS_MERGE_PARAMETER, policy 'union'),
         which merges the values by union — see ai.starlake.sl_options (issue #158).
 
+        A conflict among the triggering materializations alone keeps its
+        message (run them one by one); a conflict that involves an accepted
+        materialization names it and asks for a manual run instead (issue
+        #168): nothing was coalesced, and the sensor would accept the same
+        materialization again.
+
         Args:
             materializations: An iterable of AssetMaterialization (None entries
                 are skipped) — the latest one of each triggering asset.
@@ -587,6 +608,14 @@ class StarlakeDagsterUtils:
                 assets (see superseded_materializations): they add their
                 values to the keys declared union only — for any other key,
                 the latest materialization of an asset replaces its earlier ones.
+            accepted: The EventLogRecords that the sensor's check accepted from
+                the event log for the monitored assets without an unconsumed
+                materialization (see DagsterPipeline.check_datasets_freshness,
+                issue #168): their run variables are merged with the triggering
+                ones under the same rules. A record whose sections carry no key
+                and that carries no merge declaration is ignored, so without
+                run variables on the accepted materializations the result and
+                the errors are the same as without them.
 
         Returns:
             Tuple[dict, dict]: The merged sections {"all": {...}, "<domain.task>": {...}},
@@ -605,40 +634,83 @@ class StarlakeDagsterUtils:
                     pass
             return raw
 
+        def carrier(source, mat) -> tuple:
+            metadata = getattr(mat, "metadata", None) or {}
+            return (
+                source,
+                sections(metadata, StarlakeParameters.OPTIONS_PARAMETER.value),
+                sections(metadata, StarlakeParameters.OPTIONS_MERGE_PARAMETER.value),
+            )
+
         def carriers(mats) -> list:
+            return [carrier(getattr(mat, "asset_key", None), mat) for mat in mats or [] if mat]
+
+        def accepted_carriers(records) -> list:
             result = []
-            for mat in mats or []:
+            for record in records or []:
+                mat = getattr(record, "asset_materialization", None)
                 if not mat:
                     continue
-                metadata = getattr(mat, "metadata", None) or {}
-                result.append((
-                    getattr(mat, "asset_key", None),
-                    sections(metadata, StarlakeParameters.OPTIONS_PARAMETER.value),
-                    sections(metadata, StarlakeParameters.OPTIONS_MERGE_PARAMETER.value),
-                ))
+                asset_key = getattr(record, "asset_key", None) or getattr(mat, "asset_key", None)
+                uri = asset_key.to_user_string() if hasattr(asset_key, "to_user_string") else asset_key
+                storage_id = getattr(record, "storage_id", None)
+                source = f"{uri} (materialization {storage_id} accepted by the sensor)" if storage_id is not None else f"{uri} (accepted by the sensor)"
+                found = carrier(source, mat)
+                if _carries_options(found[1]) or _carries_declarations(found[2]):
+                    result.append(found)
             return result
 
-        return merge_sl_options(
-            carriers(materializations),
-            origin="triggering materializations",
-            recovery=f"Conflicting run variables must be run one by one, passing "
-                     f"{StarlakeParameters.OPTIONS_PARAMETER.value} in the run config.",
-            superseded=carriers(superseded),
+        triggering_origin = "triggering materializations"
+        triggering_recovery = (
+            f"Conflicting run variables must be run one by one, passing "
+            f"{StarlakeParameters.OPTIONS_PARAMETER.value} in the run config."
         )
+        triggering = carriers(materializations)
+        superseded_carriers = carriers(superseded)
+        found_carriers = accepted_carriers(accepted)
+        if not found_carriers:
+            return merge_sl_options(
+                triggering,
+                origin=triggering_origin,
+                recovery=triggering_recovery,
+                superseded=superseded_carriers,
+            )
+        try:
+            return merge_sl_options(
+                triggering + found_carriers,
+                origin=f"{triggering_origin} and the materializations accepted by the sensor",
+                # nothing was coalesced, and the sensor would accept the same
+                # materialization again for a run launched the same way
+                recovery=f"The triggering materializations and the materializations accepted by the sensor carry "
+                         f"different run variables — launch the run manually, passing "
+                         f"{StarlakeParameters.OPTIONS_PARAMETER.value} in the run config (a manual run skips the check).",
+                superseded=superseded_carriers,
+            )
+        except ValueError:
+            # the triggering materializations may conflict on their own: they
+            # keep their own origin and recovery
+            merge_sl_options(
+                triggering,
+                origin=triggering_origin,
+                recovery=triggering_recovery,
+                superseded=superseded_carriers,
+            )
+            raise
 
     # Upper bound of the earlier materializations read per asset by
     # superseded_materializations (a consumer this far behind is past saving).
     SUPERSEDED_MATERIALIZATIONS_LIMIT = 10000
 
     @classmethod
-    def superseded_materializations(cls, context, latest_records: dict) -> List[AssetMaterialization]:
+    def superseded_materializations(cls, context, latest_records: dict, accepted=()) -> List[AssetMaterialization]:
         """The unconsumed materializations of each triggering asset that are
         older than its latest one.
 
         The pipeline sensor reads the latest materialization of each asset;
         when a producer ran several times since the consumer's last run, the
         earlier runs' values of a key declared union must join the union
-        (issue #158). They are only read when a latest materialization carries
+        (issue #158). They are only read when a latest materialization, or a
+        materialization accepted by the sensor's check (issue #168), carries
         merge declarations, so the sensors of pipelines that declare nothing
         do not query them.
 
@@ -647,6 +719,10 @@ class StarlakeDagsterUtils:
             latest_records: The latest unconsumed EventLogRecord (or None) per
                 monitored AssetKey, as returned by
                 context.latest_materialization_records_by_key().
+            accepted: The EventLogRecords accepted by the sensor's check for
+                the assets without an unconsumed materialization: a merge
+                declaration they carry applies to the triggering
+                materializations too.
 
         Returns:
             List[AssetMaterialization]: The earlier materializations, oldest first.
@@ -654,7 +730,7 @@ class StarlakeDagsterUtils:
         merge_parameter = StarlakeParameters.OPTIONS_MERGE_PARAMETER.value
         if not any(
             record and merge_parameter in (getattr(record.asset_materialization, "metadata", None) or {})
-            for record in latest_records.values()
+            for record in list(latest_records.values()) + list(accepted or [])
         ):
             return []
         superseded: List[AssetMaterialization] = []

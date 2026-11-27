@@ -844,6 +844,18 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             self
         )
 
+    def table_freshness(self, domain: str, table: str) -> int:
+        """The freshness in seconds that the schedule declares for a table, 0
+        when it declares none or does not hold the table (issue #166). The load
+        event of the table publishes it: the template hands it to the
+        StarlakeTable, never to the load task, whose operator would reject it."""
+        for schedule_domain in getattr(self.schedule, "domains", None) or []:
+            if schedule_domain.name == domain:
+                for schedule_table in schedule_domain.tables or []:
+                    if schedule_table.name == table:
+                        return getattr(schedule_table, "freshness", 0) or 0
+        return 0
+
     @final
     def sl_load(self, task_id: str, domain: str, table: str, **kwargs) -> Optional[Union[AbstractTask[T], AbstractTaskGroup[GT]]]:
         name=f'{domain}.{table}'
@@ -860,6 +872,7 @@ class AbstractPipeline(Generic[U, T, GT, E], AbstractTaskGroup[U], AbstractEvent
             name        = name,
             sink        = f"{domain}.{table}",
             cron        = self.cron,
+            freshness   = self.table_freshness(domain, table),
             datasetType = StarlakeDatasetType.LOAD,
             **kwargs
         )

@@ -120,7 +120,7 @@ A collection that parses JSON dependency graphs (produced by `starlake dag-gener
 
 Simple data classes representing the schedule-based view of Starlake metadata:
 
-- `StarlakeTable` — a table with `name` and `final_name`
+- `StarlakeTable` — a table with `name`, `final_name` and `freshness`: the `freshness` argument is the table's `metadata.freshness.error` duration, or its domain's when the table declares none (e.g. `"2 days"`), stored in seconds by `freshness_seconds` (issue #166); a number is taken as seconds, and an invalid duration publishes 0 with a warning, so that it cannot keep the whole DAG file from loading. The load templates read it from the `rawDomains` that Starlake core hands them, and emit it only when a raw table matches, so a CLI that sends no `rawDomains` renders the same tables as before
 - `StarlakeDomain` — a domain containing a list of tables
 - `StarlakeSchedule` — groups domains under a `cron` expression with a `name` (e.g., "hourly", "daily")
 - `StarlakeSchedules` — iterable collection of schedules
@@ -181,6 +181,12 @@ The abstract factory for creating orchestrator-native tasks. This is where Starl
 - `sl_pre_load(domain, tables, pre_load_strategy, ...)` → creates a PRELOAD task (handles ACK, IMPORTED, PENDING strategies)
 - `start_op(task_id, ...)` / `end_op(task_id, events, ...)` → pipeline bookend tasks
 - `pre_tasks()` / `post_tasks()` → optional pre/post pipeline tasks (default: no-op)
+
+**Data cycle** (shared by the three orchestrators' dataset checks):
+
+- `data_cycle` — the cycle cron, None unless `data_cycle_enabled` is true; the `data_cycle` option (a preset such as `monthly`, or a cron) or, by default, the pipeline's computed cron assigned by `set_cron_expr`
+- `data_cycle_declared` (since 0.5.8, issue #167) — true only when the `data_cycle` option declared the cycle: the default one carries the hour of one dependency's cron and delimits no delivery
+- `data_cycle_mode(cron)` (since 0.5.8, issue #167) — `data_cycle_declared and fires_in_every_period(cron, data_cycle)`: the dependency is checked in data-cycle mode, its events admitted within `data_cycle_window(data_cycle, anchor)`, without the optional check nor the freshness widening; any other dependency keeps its own schedule window (dataset mode). A dependency more frequent than the cycle is then satisfied by any of its events since the start of the period (a daily table in a monthly cycle), and a dependency that fires only on the cycle ticks (`0 0 1 * *` in a monthly cycle, or the cycle itself) stays in dataset mode, since an event dated on a tick closes the period that ends there
 
 **Abstract methods** (must be implemented by each orchestrator × execution environment):
 
@@ -276,7 +282,7 @@ The **central orchestration class** where everything comes together.
 
 **`@final` methods** (cannot be overridden by subclasses):
 
-- `sl_load()`, `sl_transform()`, `sl_import()`, `sl_pre_load()` — create tasks and register dataset assets
+- `sl_load()`, `sl_transform()`, `sl_import()`, `sl_pre_load()` — create tasks and register dataset assets. `sl_load()` gives the dataset of the load event the freshness that the schedule declares for the table (`table_freshness(domain, table)`, 0 when the schedule declares none or does not hold the table), and to nothing else: every other keyword argument reaches the operator, which would reject it (issue #166). Before 0.5.8 every load event published freshness 0, so a triggering dataset was checked without its producer's freshness
 - `start_task()`, `end_task()`, `pre_tasks()`, `post_tasks()` — pipeline lifecycle bookends
 - `dummy_task()` — creates a no-op task
 - `dry_run()` — calls `run(mode=DRY_RUN)`
@@ -351,6 +357,9 @@ Registry that discovers `AbstractOrchestration` subclasses via `importlib` and i
 | `sl_scheduled_date(cron, ts)` | Returns end of cron interval for timestamp |
 | `sl_scheduled_dataset(dataset, cron, ts)` | Returns dataset URI with schedule parameter |
 | `scheduled_dates_range(cron, scheduled_date)` | Returns `(start, end)` of cron interval |
+| `fires_in_every_period(cron, data_cycle)` | Whether `cron` fires at least once inside every period `(tick, next tick]` of `data_cycle`, a tick on the period's end not counting (issue #167): walks the periods of a fixed reference span (from 1 January 2001 UTC, within 28 years, at most 2,000 periods, so a sub-daily cycle is compared over its first weeks only), never the wall clock; False when the span holds no period; cached per process |
+| `data_cycle_window(data_cycle, anchor)` | `(latest data-cycle tick strictly before anchor, anchor]`: the window of a dependency in data-cycle mode (issue #167) |
+| `freshness_seconds(error)` | Seconds of a freshness duration, as core's `Freshness.acceptability()` computes them (`Duration` grammar and range, never below 0, 0 when absent; `ValueError` on an invalid duration) (issue #166) |
 | `cron_start_time(timezone)` | Returns current time in timezone |
 | `asQueryParameters(parameters)` | Converts dict to URL query string |
 
